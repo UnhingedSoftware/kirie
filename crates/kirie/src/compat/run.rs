@@ -307,6 +307,24 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         specs.iter().map(|(name, _)| name.clone()).collect()
     };
 
+    // Params the IPC applier needs to build a replacement wallpaper off the
+    // render thread for a live `bg`/`preload` (cloned before the factory takes
+    // the originals). Scaling/clamp default to the first configured screen's.
+    let (bg_scaling, bg_clamp) = args
+        .screens
+        .first()
+        .map(|s| (s.scaling, s.clamp))
+        .unwrap_or((args.window_scaling, args.window_clamp));
+    let build_ctx = Arc::new(BuildContext {
+        scaling: bg_scaling,
+        clamp: bg_clamp,
+        volume,
+        silent,
+        registrar: registrar.clone(),
+        audio: audio.clone(),
+        automute_controls: video_controls.clone(),
+    });
+
     let factory_controls = video_controls.clone();
     let factory: kirie_platform::RendererFactory = Box::new(move |target: &RenderTarget<'_>| {
         build_renderer(
@@ -329,6 +347,17 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
 
     let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {
         Ok(mut platform) => {
+            // Enable live `bg`/`preload` swaps: hand the applier the render
+            // thread's command channel + the build params (Wayland only; X11
+            // has no channel yet and falls back to relaunch).
+            if let (Some(app), Some(cmd_tx)) = (ipc_app.as_ref(), platform.command_sender()) {
+                if let Ok(mut slot) = app.swap_slot().lock() {
+                    *slot = Some(SwapCtx {
+                        cmd_tx,
+                        build: build_ctx.clone(),
+                    });
+                }
+            }
             // A test/CI bound on the otherwise-infinite run; the daemon never
             // sets it, so live behavior is unchanged (runs until stopped).
             let duration = std::env::var("KIRIE_RUN_SECONDS")
@@ -602,6 +631,72 @@ fn build_renderer(
         }
     };
 
+    // Web (CEF) is render-thread-bound (its backend is `!Send`), so it's built
+    // here. Everything else is `Send` and goes through `build_for_spec`, which
+    // the preload / async-swap paths also call from a worker thread.
+    #[cfg(feature = "web-cef")]
+    if let RunSpec::Web { url } = spec {
+        return build_web(target, url, silent);
+    }
+    build_for_spec(
+        target,
+        screen_key,
+        spec,
+        volume,
+        silent,
+        registrar,
+        audio,
+        properties,
+        automute_controls,
+    )
+}
+
+/// Build the CEF web renderer for `url` on the render thread (the backend is
+/// `!Send`, so it must be created and live there). Degrades to `black` on a
+/// backend-start failure rather than crashing the output. Shared by the
+/// initial-launch path ([`build_renderer`]) and the live-swap path
+/// ([`BuildContext::build_local_fn`]) so both build web identically.
+#[cfg(feature = "web-cef")]
+fn build_web(target: &RenderTarget<'_>, url: &str, silent: bool) -> Box<dyn Renderer> {
+    // Initial off-screen size is arbitrary: `WebRenderer` resizes the CEF surface
+    // to the real output on its first frame. `--silent` mutes the page's audio
+    // (docs/subsystems-misc.md §3: host mute).
+    let size = WebSize {
+        width: 1920,
+        height: 1080,
+    };
+    match <CefBackend as WebBackend>::new(url, size) {
+        Ok(mut backend) => {
+            if silent {
+                backend.set_muted(true);
+            }
+            tracing::info!(output = %target.output_name, url, "web (CEF) wallpaper ready");
+            Box::new(WebRenderer::new(target, Box::new(backend)))
+        }
+        Err(err) => {
+            eprintln!("{}: failed to start web backend: {err}", target.output_name);
+            black(target)
+        }
+    }
+}
+
+/// Build a `Send` (non-web) renderer for `spec` + `screen_key`. Returns
+/// `Box<dyn Renderer + Send>` so it can be built off the render thread (preload /
+/// async `bg` swap) as well as on it; the render thread stores it as a plain
+/// `Box<dyn Renderer>`. Web backends are `!Send` and stay on the render thread in
+/// [`build_renderer`].
+#[allow(clippy::too_many_arguments)]
+fn build_for_spec(
+    target: &RenderTarget<'_>,
+    screen_key: String,
+    spec: &RunSpec,
+    volume: i64,
+    silent: bool,
+    registrar: Option<&crossbeam_channel::Sender<Register>>,
+    audio: Option<Arc<AudioCapture>>,
+    properties: &[(String, String)],
+    automute_controls: &Arc<Mutex<Vec<VideoControl>>>,
+) -> Box<dyn Renderer + Send> {
     match spec {
         RunSpec::Video { media, scaling } => {
             let options = VideoOptions {
@@ -687,31 +782,114 @@ fn build_renderer(
                 }
             }
         }
+        // Web is routed to the render thread by `build_renderer` and never
+        // reaches here; keep the arm total + defensive.
         #[cfg(feature = "web-cef")]
-        RunSpec::Web { url } => {
-            // Initial off-screen size is arbitrary: `WebRenderer` resizes the
-            // CEF surface to the real output on its first frame. `--silent`
-            // mutes the page's audio (docs/subsystems-misc.md §3: host mute).
-            let size = WebSize {
-                width: 1920,
-                height: 1080,
-            };
-            match <CefBackend as WebBackend>::new(url, size) {
-                Ok(mut backend) => {
-                    if silent {
-                        backend.set_muted(true);
-                    }
-                    tracing::info!(output = %target.output_name, url, "web (CEF) wallpaper ready");
-                    Box::new(WebRenderer::new(target, Box::new(backend)))
-                }
-                Err(err) => {
-                    eprintln!("{}: failed to start web backend: {err}", target.output_name);
-                    black(target)
-                }
-            }
-        }
+        RunSpec::Web { .. } => black(target),
         RunSpec::Skip => black(target),
     }
+}
+
+/// Send parameters the IPC applier needs to build a wallpaper renderer off the
+/// render thread for a live `bg`/`preload` (everything [`build_for_spec`] needs
+/// besides the per-command screen/spec/properties). Cheap clones of the launch
+/// params, so the factory keeps its own copies.
+pub(crate) struct BuildContext {
+    scaling: ScalingMode,
+    clamp: ClampMode,
+    volume: i64,
+    silent: bool,
+    registrar: Option<crossbeam_channel::Sender<Register>>,
+    audio: Option<Arc<AudioCapture>>,
+    automute_controls: Arc<Mutex<Vec<VideoControl>>>,
+}
+
+impl BuildContext {
+    /// Classify `path` and return an off-thread [`kirie_platform::BuildFn`] that
+    /// builds it for `screen` with `properties`. `None` when the wallpaper isn't
+    /// runnable, or is web (web is `!Send` / render-thread-only).
+    pub(crate) fn build_fn(
+        self: &Arc<Self>,
+        screen: String,
+        path: &Path,
+        properties: Vec<(String, String)>,
+    ) -> Option<kirie_platform::BuildFn> {
+        let target = make_target(
+            screen.clone(),
+            path.to_string_lossy().into_owned(),
+            self.scaling,
+            self.clamp,
+        );
+        match &target.spec {
+            RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
+            // Skip (unsupported) and Web (render-thread-only) are not swappable.
+            _ => return None,
+        }
+        let ctx = self.clone();
+        let spec = target.spec;
+        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name| {
+            let rt = RenderTarget {
+                device,
+                queue,
+                format,
+                output_name: name,
+            };
+            build_for_spec(
+                &rt,
+                screen,
+                &spec,
+                ctx.volume,
+                ctx.silent,
+                ctx.registrar.as_ref(),
+                ctx.audio.clone(),
+                &properties,
+                &ctx.automute_controls,
+            )
+        });
+        Some(build)
+    }
+
+    /// Classify `path` and, for a **web** item, return a render-thread
+    /// [`kirie_platform::BuildLocalFn`] that builds it (CEF is `!Send`, so it
+    /// can't use the off-thread [`build_fn`]). `None` for non-web / unsupported
+    /// items (use `build_fn`). This is what lets the daemon's live `bg` swap
+    /// bring in a web wallpaper without relaunching the engine — a brief hitch
+    /// while CEF builds, then it swaps in. Only compiled with the CEF backend.
+    #[cfg(feature = "web-cef")]
+    pub(crate) fn build_local_fn(
+        self: &Arc<Self>,
+        screen: String,
+        path: &Path,
+    ) -> Option<kirie_platform::BuildLocalFn> {
+        let target = make_target(
+            screen,
+            path.to_string_lossy().into_owned(),
+            self.scaling,
+            self.clamp,
+        );
+        let RunSpec::Web { url } = target.spec else {
+            return None;
+        };
+        let silent = self.silent;
+        let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name| {
+            let rt = RenderTarget {
+                device,
+                queue,
+                format,
+                output_name: name,
+            };
+            build_web(&rt, &url, silent)
+        });
+        Some(build)
+    }
+}
+
+/// The live-swap context handed to the IPC applier once the platform is up (its
+/// command channel + the build params). Applier `bg`/`preload` use it to build
+/// off-thread and swap on the render thread.
+pub(crate) struct SwapCtx {
+    pub cmd_tx: kirie_platform::CommandSender,
+    pub build: Arc<BuildContext>,
 }
 
 /// Bind the control socket and spawn its applier thread, or `(None, None)` if
@@ -751,7 +929,7 @@ struct BlackRenderer {
 }
 
 /// Build a [`BlackRenderer`] for `target`.
-fn black(target: &RenderTarget<'_>) -> Box<dyn Renderer> {
+fn black(target: &RenderTarget<'_>) -> Box<dyn Renderer + Send> {
     Box::new(BlackRenderer {
         device: target.device.clone(),
         queue: target.queue.clone(),

@@ -7,8 +7,11 @@ name: Release
 # Artifacts (all with ffmpeg + shaderc statically linked via `--features portable`):
 #   kirie              - portable single binary. Only universal dynamic deps
 #                        (glibc, alsa, pulse, xcb); runs on any distro (glibc>=2.31).
-#   kirie-web-cef      - + bundled Chromium (libcef.so + runtime beside the binary).
-#                        Self-contained web-wallpaper build; no system browser needed.
+#   kirie-web-cef      - SINGLE self-extracting file with bundled Chromium: the
+#                        engine + the whole CEF runtime (libcef.so, resources,
+#                        locales) stripped, compressed and appended behind a
+#                        launcher stub. One executable, no runtime dir, no system
+#                        browser; self-extracts to cache on first run.
 #   kirie-web-webview  - + wry/system webkit2gtk-4.1. Smaller, but REQUIRES the
 #                        target to have webkit2gtk-4.1 + libsoup-3.0 installed
 #                        (webkit can't be bundled). Built on glibc 2.35.
@@ -143,35 +146,38 @@ jobs:
             echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
           fi
           echo "ok: ffmpeg + shaderc statically linked"
-      # Assemble the shippable tree. web-cef also ships the CEF runtime (libcef.so,
-      # icudtl.dat, *.pak, snapshot blobs, locales) copied beside the binary by the
-      # cef-dll-sys build script; the app finds them next to the executable.
+      # Package. web-cef is shipped as a SINGLE self-extracting file: kirie-pack
+      # stages the engine + CEF runtime (libcef.so, ANGLE/swiftshader libs,
+      # icudtl.dat, *.pak, v8 snapshot, locales), strips debug symbols (libcef
+      # ships unstripped at ~1.3 GB → ~245 MB), trims locales to en-US, and packs
+      # it behind the launcher stub. One executable, no runtime dir, no
+      # LD_LIBRARY_PATH — it self-extracts to cache on first run. default +
+      # web-webview stay plain-binary tarballs.
       - name: Package (${{ matrix.variant }})
         id: package
         run: |
           set -euo pipefail
-          dist="dist/${{ matrix.artifact }}"
-          mkdir -p "$dist"
-          cp target/release/kirie "$dist/${{ matrix.artifact }}"
-          cp README.md LICENSE "$dist/" 2>/dev/null || true
           if [ "${{ matrix.variant }}" = "web-cef" ]; then
-            cp target/release/kirie-cef-helper "$dist/"
-            for f in libcef.so icudtl.dat chrome-sandbox v8_context_snapshot.bin snapshot_blob.bin; do
-              [ -f "target/release/$f" ] && cp "target/release/$f" "$dist/" || true
-            done
-            cp target/release/*.pak "$dist/" 2>/dev/null || true
-            cp target/release/*.bin "$dist/" 2>/dev/null || true
-            [ -d target/release/locales ] && cp -r target/release/locales "$dist/" || true
+            cargo build --release -p kirie-launcher
+            asset="${{ matrix.artifact }}-linux-x86_64"
+            ./target/release/kirie-pack target/release "$asset"
+            chmod +x "$asset"
+          else
+            dist="dist/${{ matrix.artifact }}"
+            mkdir -p "$dist"
+            cp target/release/kirie "$dist/${{ matrix.artifact }}"
+            cp README.md LICENSE "$dist/" 2>/dev/null || true
+            if [ "${{ matrix.variant }}" = "web-webview" ]; then
+              printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n' > "$dist/REQUIREMENTS.txt"
+            fi
+            asset="${{ matrix.artifact }}-linux-x86_64.tar.gz"
+            tar -C dist -czf "$asset" "${{ matrix.artifact }}"
           fi
-          if [ "${{ matrix.variant }}" = "web-webview" ]; then
-            printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n' > "$dist/REQUIREMENTS.txt"
-          fi
-          tar -C dist -czf "${{ matrix.artifact }}-linux-x86_64.tar.gz" "${{ matrix.artifact }}"
-          echo "tarball=${{ matrix.artifact }}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "asset=$asset" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-linux-x86_64
-          path: ${{ steps.package.outputs.tarball }}
+          path: ${{ steps.package.outputs.asset }}
           if-no-files-found: error
 
   # 3. Create/update the draft release once, with all built artifacts + notes.
@@ -195,7 +201,9 @@ jobs:
       - name: Create or update the draft release
         run: |
           set -euo pipefail
-          files=$(ls *.tar.gz)
+          # Tarballs (default, web-webview) + the raw self-extracting web-cef
+          # single file (no extension).
+          files=$(ls *-linux-x86_64*)
           echo "attaching:"; echo "$files"
           # No checkout here, so gh must stay API-only: GH_REPO gives the repo and
           # --target gives create an explicit commit. Update in place if it exists.

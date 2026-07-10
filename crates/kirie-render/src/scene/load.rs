@@ -136,7 +136,13 @@ pub fn load_workshop_scene(
     options: SceneOptions,
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
-) -> Result<Box<dyn Renderer>, SceneLoadError> {
+) -> Result<Box<dyn Renderer + Send>, SceneLoadError> {
+    // Cache this wallpaper's compiled shaders in a folder beside it
+    // (`<dir>/.kirie-cache`), so they persist with the wallpaper and never
+    // rebuild — independent of `~/.cache`. Falls back to the global cache if the
+    // folder isn't writable (best-effort). Set per-thread, so the off-thread
+    // preload/swap build uses it too.
+    kirie_shader::translate::set_cache_dir(Some(scene_dir.join(".kirie-cache")));
     let pkg =
         OwnedPkg::from_path(scene_dir.join("scene.pkg")).map_err(|e| SceneLoadError::Pkg(e.to_string()))?;
 

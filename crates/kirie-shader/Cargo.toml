@@ -20,6 +20,8 @@ static-shaderc = ["shaderc/build-from-source"]
 kirie-formats = { workspace = true }
 naga = { workspace = true }
 shaderc = { workspace = true }
+blake3 = { workspace = true }
+bincode = "1"
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

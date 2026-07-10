@@ -47,6 +47,9 @@ mod x11;
 
 pub use backend::{Backend, Platform, PresentOptions};
 pub use error::PlatformError;
-pub use renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
+pub use renderer::{
+    BuildFn, BuildLocalFn, CaptureFn, CommandSender, RenderCommand, RenderTarget, Renderer,
+    RendererFactory, SurfaceSize,
+};
 pub use test_pattern::TestPattern;
 pub use x11::X11Mode;

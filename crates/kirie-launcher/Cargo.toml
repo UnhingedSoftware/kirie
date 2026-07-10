@@ -1,0 +1,28 @@
+[package]
+name = "kirie-launcher"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Self-extracting launcher: unpacks an appended CEF runtime to cache and execs the real engine, so kirie ships as a single file"
+
+# The launcher stub that gets prepended to the compressed runtime blob. Kept
+# tiny + dependency-light: it only reads its own trailer, extracts once, execs.
+[[bin]]
+name = "kirie-launcher"
+path = "src/main.rs"
+
+# Build-time packer: concatenates the stub + a zstd-compressed tar of the CEF
+# runtime + a trailer into the single-file `kirie`. Not shipped.
+[[bin]]
+name = "kirie-pack"
+path = "src/bin/pack.rs"
+
+[dependencies]
+blake3 = { workspace = true }
+# `zstdmt` enables multi-threaded compression for the (large) runtime pack step.
+zstd = { version = "0.13", features = ["zstdmt"] }
+tar = "0.4"
+
+[lints]
+workspace = true

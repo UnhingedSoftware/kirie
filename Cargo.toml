@@ -13,6 +13,7 @@ members = [
     "crates/kirie-web",
     "crates/kirie-platform",
     "crates/kirie-ipc",
+    "crates/kirie-launcher",
 ]
 
 [workspace.package]
@@ -48,7 +49,7 @@ triple_buffer = "9"
 ringbuf = "0.5"
 rustfft = "6"
 cpal = "0.16"
-naga = { version = "30", features = ["glsl-in", "spv-in", "spv-out", "wgsl-out"] }
+naga = { version = "30", features = ["glsl-in", "spv-in", "spv-out", "wgsl-out", "serialize", "deserialize"] }
 shaderc = "0.10"
 rayon = "1"
 image-compare = "0.5"

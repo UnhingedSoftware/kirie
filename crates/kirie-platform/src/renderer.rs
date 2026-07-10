@@ -58,3 +58,102 @@ pub trait Renderer {
 
 /// Factory invoked once per output surface to build its [`Renderer`].
 pub type RendererFactory = Box<dyn FnMut(&RenderTarget<'_>) -> Box<dyn Renderer>>;
+
+/// Builds a renderer off the render thread, given a cloned GPU device+queue and
+/// the target output's surface format + name. `Send` so a worker thread can run
+/// it; the produced renderer is `Box<dyn Renderer + Send>` so it can be handed
+/// back to the render thread. The app supplies this (it owns the build logic);
+/// the platform just runs it on a worker and swaps the result in.
+pub type BuildFn = Box<
+    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str) -> Box<dyn Renderer + Send>
+        + Send,
+>;
+
+/// Builds a renderer **on the render thread**, given a cloned GPU device+queue
+/// and the target output's surface format + name. The closure is `Send` (so it
+/// can ride the command channel) but its output need not be — this is for
+/// `!Send` backends like the CEF web renderer, which must be created and live on
+/// the render thread and therefore can't use the off-thread [`BuildFn`]. Running
+/// it blocks the render loop for the build's duration (a brief hitch), so it's
+/// reserved for backends that genuinely cannot build off-thread.
+pub type BuildLocalFn = Box<
+    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str) -> Box<dyn Renderer> + Send,
+>;
+
+/// Captures the current frame of an already-built, warm renderer to disk, on the
+/// render thread. Given the shared device+queue, the live output's current
+/// renderer, its physical size and surface format, the app renders one frame to
+/// an offscreen texture (pipelines match because the format matches the live
+/// surface), reads it back and writes the image. `Send` so it can ride the
+/// command channel from the IPC applier; the app supplies it (it owns the
+/// readback/encode logic and the `image` dependency).
+pub type CaptureFn = Box<
+    dyn FnOnce(&wgpu::Device, &wgpu::Queue, &mut dyn Renderer, SurfaceSize, wgpu::TextureFormat)
+        + Send,
+>;
+
+/// Clone-able sender for [`RenderCommand`]s into the render thread's channel.
+pub type CommandSender =
+    smithay_client_toolkit::reexports::calloop::channel::Sender<RenderCommand>;
+
+/// A command delivered to the render thread over the platform's command channel
+/// (sent by another thread, e.g. the IPC applier). Applied between frames on the
+/// render thread — no lock, no surface sharing.
+pub enum RenderCommand {
+    /// Build a new wallpaper for output `screen` on a worker thread, then install
+    /// it (async `bg` swap). The current wallpaper keeps rendering until ready.
+    /// `stash` = `Some(key)` preloads it (stash, don't show) for a later instant
+    /// [`RenderCommand::Swap`]; `None` shows it as soon as it's built.
+    Build {
+        /// Target output name (`--screen-root`); `"*"` = every output.
+        screen: String,
+        /// `Some(key)` = preload (stash); `None` = install when built.
+        stash: Option<String>,
+        /// The app's off-thread builder.
+        build: BuildFn,
+    },
+    /// Show a wallpaper: if one is stashed under `key` for `screen` (a preload
+    /// hit) install it instantly — a sub-100ms pointer swap. On a miss (nothing
+    /// preloaded, or the preload is still building), fall back to building
+    /// `build` off-thread and installing it when ready.
+    Swap {
+        /// Target output name; `"*"` = every output.
+        screen: String,
+        /// Preload key to look up.
+        key: String,
+        /// Fallback builder used on a preload miss.
+        build: BuildFn,
+    },
+    /// Internal: a worker finished building — install (swap) it on `screen`.
+    Install {
+        /// Target output name; `"*"` = every output.
+        screen: String,
+        /// Preload key if this was a preload build (stash instead of show).
+        stash: Option<String>,
+        /// The freshly built renderer.
+        renderer: Box<dyn Renderer + Send>,
+    },
+    /// Capture the current frame of `screen`'s live renderer to disk (socket
+    /// `screenshot`, doc §4.12). Runs `capture` on the render thread with the
+    /// output's warm renderer, physical size and surface format — a one-shot
+    /// offscreen re-render + readback, so the palette source matches what is on
+    /// screen (property overrides included), not the workshop preview.
+    Screenshot {
+        /// Target output name; `"*"` = the first output (per-monitor daemon).
+        screen: String,
+        /// The app's render-thread capture-to-disk closure.
+        capture: CaptureFn,
+    },
+    /// Build a renderer on the render thread and swap it in — for `!Send`
+    /// backends (CEF web) that must be created and live on the render thread and
+    /// so can't use the off-thread [`RenderCommand::Swap`]. The build runs inline
+    /// on the render thread: a brief hitch on the current wallpaper while it
+    /// initializes (e.g. CEF's first browser init), then the new one installs.
+    /// No black gap, no process relaunch.
+    SwapLocal {
+        /// Target output name; `"*"` = the first output.
+        screen: String,
+        /// Render-thread builder producing the (possibly `!Send`) renderer.
+        build_local: BuildLocalFn,
+    },
+}

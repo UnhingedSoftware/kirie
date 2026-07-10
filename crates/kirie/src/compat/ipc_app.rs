@@ -16,7 +16,11 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
+use kirie_platform::{CaptureFn, RenderCommand};
+
+use super::run::SwapCtx;
 use crossbeam_channel::{Receiver, Sender, select};
 use kirie_ipc::{Command, CommandOutcome, IpcEvent, ScalingMode as IpcScaling, ScreenStatus, StatusSnapshot};
 use kirie_video::{ScalingMode as VideoScaling, VideoControl};
@@ -55,6 +59,9 @@ struct AppState {
     /// Stored per-key property overrides (doc §4.9: recorded even when not
     /// live-applicable; "applies in P4/P5").
     properties: BTreeMap<String, String>,
+    /// Live-swap context (render-command sender + build params), set once the
+    /// platform is up. `None` until then (and on X11) → `bg`/`preload` error.
+    swap: Arc<Mutex<Option<SwapCtx>>>,
 }
 
 /// Handle to the running applier thread.
@@ -66,6 +73,9 @@ struct AppState {
 /// irrelevant (no join, no deadlock).
 pub struct IpcApp {
     register: Sender<Register>,
+    /// Shared slot the run loop fills after the platform is up, so `bg`/`preload`
+    /// can build off-thread and swap on the render thread.
+    swap: Arc<Mutex<Option<SwapCtx>>>,
 }
 
 impl IpcApp {
@@ -82,6 +92,7 @@ impl IpcApp {
         muted: bool,
     ) -> Self {
         let (register_tx, register_rx) = crossbeam_channel::unbounded::<Register>();
+        let swap: Arc<Mutex<Option<SwapCtx>>> = Arc::new(Mutex::new(None));
         let mut state = AppState {
             screens: seed_screens
                 .into_iter()
@@ -91,6 +102,7 @@ impl IpcApp {
             volume,
             muted,
             properties: BTreeMap::new(),
+            swap: swap.clone(),
         };
         std::thread::Builder::new()
             .name("kirie-ipc-app".into())
@@ -98,6 +110,7 @@ impl IpcApp {
             .expect("spawn ipc-app thread");
         Self {
             register: register_tx,
+            swap,
         }
     }
 
@@ -105,6 +118,13 @@ impl IpcApp {
     #[must_use]
     pub fn registrar(&self) -> Sender<Register> {
         self.register.clone()
+    }
+
+    /// The shared live-swap slot; the run loop fills it once the platform's
+    /// command channel exists, enabling live `bg`/`preload` swaps.
+    #[must_use]
+    pub(crate) fn swap_slot(&self) -> Arc<Mutex<Option<SwapCtx>>> {
+        self.swap.clone()
     }
 }
 
@@ -230,12 +250,85 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
         // running engine is partial/absent in P3, applied honestly where a
         // handle exists (none of these have one for video).
         Command::Set(_opt) => CommandOutcome::Ok,
-        // Live wallpaper swap needs a render-thread rebuild kirie cannot do
-        // inside the presentation loop yet (doc §4.7) → error, prior wallpaper
-        // keeps running.
-        Command::Bg { .. } => CommandOutcome::Error,
-        // Warm-cache preload always acks, even on failure (doc §4.8).
-        Command::Preload { .. } => CommandOutcome::Ok,
+        // Live wallpaper swap (doc §4.7): build the new wallpaper off the render
+        // thread and swap it in — instant if it was `preload`ed, otherwise the
+        // old wallpaper keeps rendering until the build finishes. Errors only if
+        // the platform has no command channel (X11 / not up) or the path isn't a
+        // runnable non-web wallpaper.
+        Command::Bg { screen, path } => {
+            let sc = state
+                .swap
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
+            let Some((cmd_tx, build_ctx)) = sc else {
+                return CommandOutcome::Error;
+            };
+            let props: Vec<(String, String)> = state
+                .properties
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            // Non-web (video/image/scene): build off the render thread and swap
+            // (instant if it was preloaded).
+            if let Some(build) = build_ctx.build_fn(screen.clone(), &path, props) {
+                let _ = cmd_tx.send(RenderCommand::Swap {
+                    screen: screen.clone(),
+                    key: path.to_string_lossy().into_owned(),
+                    build,
+                });
+                state
+                    .screens
+                    .entry(screen)
+                    .or_insert_with(|| ScreenEntry { bg: None, control: None })
+                    .bg = Some(path);
+                return CommandOutcome::Ok;
+            }
+            // Web (CEF): the backend is `!Send`, so it can't build off-thread.
+            // Build it on the render thread and swap in place — a brief hitch
+            // while CEF initializes, then the web wallpaper appears, no relaunch.
+            // Only reachable in a `web-cef` build; otherwise falls through to
+            // error (the daemon then shows a static preview).
+            #[cfg(feature = "web-cef")]
+            if let Some(build_local) = build_ctx.build_local_fn(screen.clone(), &path) {
+                let _ = cmd_tx.send(RenderCommand::SwapLocal {
+                    screen: screen.clone(),
+                    build_local,
+                });
+                state
+                    .screens
+                    .entry(screen)
+                    .or_insert_with(|| ScreenEntry { bg: None, control: None })
+                    .bg = Some(path);
+                return CommandOutcome::Ok;
+            }
+            CommandOutcome::Error
+        }
+        // Warm-cache preload (doc §4.8, always acks): build the wallpaper off the
+        // render thread now and stash it, so a later `bg` for the same path is an
+        // instant pointer swap. Targets the primary output (`"*"` = first).
+        Command::Preload { path } => {
+            if let Some((cmd_tx, build_ctx)) = state
+                .swap
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())))
+            {
+                let props: Vec<(String, String)> = state
+                    .properties
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if let Some(build) = build_ctx.build_fn("*".to_owned(), &path, props) {
+                    let _ = cmd_tx.send(RenderCommand::Build {
+                        screen: "*".to_owned(),
+                        stash: Some(path.to_string_lossy().into_owned()),
+                        build,
+                    });
+                }
+            }
+            CommandOutcome::Ok
+        }
         Command::Property { screen, key, value } => {
             // doc §4.9: error if the screen has no registered background. The
             // override is recorded regardless (stored-before-validation), then
@@ -269,11 +362,32 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 _ => CommandOutcome::Error,
             }
         }
-        // Socket `screenshot` captures the *currently rendered* frame, which
-        // requires render-thread readback kirie does not expose from the
-        // applier in P3 (doc §4.12) → error (the daemon falls back to the
-        // workshop preview image).
-        Command::Screenshot { .. } => CommandOutcome::Error,
+        // Socket `screenshot` captures the *currently rendered* frame (doc
+        // §4.12). The applier can't touch the surface, so it hands the render
+        // thread a capture closure that re-renders the warm renderer's current
+        // state into an offscreen texture and writes `path`. The daemon polls
+        // for the file and ignores this reply, so acking before the write lands
+        // is fine; only a missing command channel (X11 / platform not up) errors.
+        Command::Screenshot { path } => {
+            let cmd_tx = state
+                .swap
+                .lock()
+                .ok()
+                .and_then(|g| g.as_ref().map(|s| s.cmd_tx.clone()));
+            let Some(cmd_tx) = cmd_tx else {
+                return CommandOutcome::Error;
+            };
+            let capture: CaptureFn = Box::new(move |device, queue, renderer, size, format| {
+                if let Err(e) = super::screenshot::capture_live(device, queue, renderer, size, format, &path) {
+                    tracing::warn!(error = format!("{e:#}"), "socket screenshot failed");
+                }
+            });
+            let _ = cmd_tx.send(RenderCommand::Screenshot {
+                screen: "*".to_owned(),
+                capture,
+            });
+            CommandOutcome::Ok
+        }
     }
 }
 

@@ -35,7 +35,7 @@ use std::collections::HashMap;
 
 use kirie_audio::AudioSpectrum;
 use kirie_scene::material::Material;
-use kirie_scene::object::{ModelObject, Object};
+use kirie_scene::object::{AnimationTrack, ModelObject, Object};
 use kirie_scene::resolve::AssetSource;
 use kirie_shader::IncludeResolver;
 
@@ -90,9 +90,12 @@ pub(super) struct ModelGpu {
     origin: [f32; 3],
     /// Object scale (`scale`).
     scale: [f32; 3],
-    /// Static base angles in radians (`angles`; the keyframe animation is a
-    /// documented gap — at t≈0 it evaluates to these base angles anyway).
+    /// Base angles in radians (`angles`); the live angles are this plus the
+    /// evaluated `angles_animation` track (models only, like C++ CModel).
     angles: [f32; 3],
+    /// `angles.animation` keyframe track — evaluated per frame in `draw_model`
+    /// to rotate/spin the model over time (`AnimationTrack::sample`).
+    angles_animation: Option<AnimationTrack>,
     /// Live visibility (`visible`; false ⇒ the whole model is skipped).
     pub(super) visible: bool,
     /// True when a mesh's material samples `_rt_FullFrameBuffer` /
@@ -277,6 +280,7 @@ pub(super) fn build_model(
     let origin = object.base.origin.value;
     let scale = object.base.scale.value;
     let angles = object.base.angles.value;
+    let angles_animation = object.base.angles_animation.clone();
     let visible = object.base.visible.value;
     tracing::debug!(
         id = object.base.id,
@@ -289,6 +293,7 @@ pub(super) fn build_model(
         origin,
         scale,
         angles,
+        angles_animation,
         visible,
         reads_scene,
     })
@@ -356,7 +361,22 @@ pub(super) fn draw_model(
     let projection = matrix::perspective(fov.to_radians(), aspect, near, far);
     let view = matrix::look_at(camera.eye, camera.center, camera.up);
     let view_projection = matrix::mul(&projection, &view);
-    let model_matrix = compute_model_matrix(model.origin, model.angles, model.scale);
+    // Evaluate the angle-animation track (models only, like C++ CModel): add the
+    // sampled offset to the base angles when `relative`, else replace them.
+    let angles = match model
+        .angles_animation
+        .as_ref()
+        .and_then(|t| t.sample(time).map(|off| (t, off)))
+    {
+        Some((t, off)) if t.relative => [
+            model.angles[0] + off[0],
+            model.angles[1] + off[1],
+            model.angles[2] + off[2],
+        ],
+        Some((_, off)) => off,
+        None => model.angles,
+    };
+    let model_matrix = compute_model_matrix(model.origin, angles, model.scale);
     let mvp = matrix::mul(&view_projection, &model_matrix);
 
     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

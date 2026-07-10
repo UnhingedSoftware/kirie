@@ -56,6 +56,10 @@ pub(crate) struct OutputContext {
     /// (each monitor renders at its own compositor-driven cadence,
     /// docs/render-architecture.md §2.3).
     pub last_frame: Option<Instant>,
+    /// Surface texture format, captured at first draw. Needed to build a
+    /// replacement renderer off the render thread (live `bg` swap / preload),
+    /// where the surface itself must not be touched.
+    pub format: Option<wgpu::TextureFormat>,
 }
 
 impl OutputContext {

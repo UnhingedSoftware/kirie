@@ -7,7 +7,13 @@ use std::time::{Duration, Instant};
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
 use smithay_client_toolkit::reexports::calloop::EventLoop;
+use smithay_client_toolkit::reexports::calloop::channel::{
+    Event as CalloopEvent, Sender as CmdSender, channel,
+};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
+use std::collections::HashMap;
+
+use crate::renderer::RenderCommand;
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
@@ -35,6 +41,9 @@ use crate::renderer::{RenderTarget, RendererFactory, SurfaceSize};
 pub struct WaylandPlatform {
     event_loop: EventLoop<'static, PlatformState>,
     state: PlatformState,
+    /// Clone-able sender for [`RenderCommand`]s applied on the render thread
+    /// (live `bg` swap / preload); handed to the IPC applier.
+    cmd_tx: CmdSender<RenderCommand>,
 }
 
 /// Handler state driven by the wayland event queue.
@@ -77,6 +86,12 @@ struct PlatformState {
     /// abnormal, mirroring WaylandOpenGLDriver.cpp:234-274
     /// (docs/render-architecture.md §2.3).
     all_surfaces_closed: bool,
+    /// Sender for the render thread's own command channel — build workers send
+    /// `Install` back through it.
+    cmd_tx: CmdSender<RenderCommand>,
+    /// Preloaded renderers awaiting an instant [`RenderCommand::Swap`], keyed by
+    /// (output name, preload key), stored with the format they were built for.
+    preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
 }
 
 impl WaylandPlatform {
@@ -117,8 +132,22 @@ impl WaylandPlatform {
             .insert(event_loop.handle())
             .map_err(|err| PlatformError::EventLoopRegister(err.to_string()))?;
 
+        // Command channel: another thread (the IPC applier) sends RenderCommands;
+        // they are applied on THIS (render) thread between frames via the calloop
+        // source callback — no lock, no surface sharing.
+        let (cmd_tx, cmd_rx) = channel::<RenderCommand>();
+        event_loop
+            .handle()
+            .insert_source(cmd_rx, |event, _, state: &mut PlatformState| {
+                if let CalloopEvent::Msg(cmd) = event {
+                    state.handle_command(cmd);
+                }
+            })
+            .map_err(|err| PlatformError::EventLoopRegister(err.to_string()))?;
+
         Ok(Self {
             event_loop,
+            cmd_tx: cmd_tx.clone(),
             state: PlatformState {
                 outputs: Vec::new(),
                 gpu: None,
@@ -133,8 +162,18 @@ impl WaylandPlatform {
                 namespace: options.layer_namespace,
                 screen_roots: options.screen_roots,
                 all_surfaces_closed: false,
+                cmd_tx,
+                preloaded: HashMap::new(),
             },
         })
+    }
+
+    /// A clone-able sender for [`RenderCommand`]s. Hand this to the IPC applier so
+    /// `bg`/`preload` build renderers off-thread and swap them in on the render
+    /// thread (live switch, no relaunch).
+    #[must_use]
+    pub fn command_sender(&self) -> CmdSender<RenderCommand> {
+        self.cmd_tx.clone()
     }
 
     /// Number of outputs that currently have a surface.
@@ -179,6 +218,130 @@ impl WaylandPlatform {
 }
 
 impl PlatformState {
+    /// Apply a [`RenderCommand`] on the render thread (called from the calloop
+    /// channel source, between frames — no lock, surface untouched here).
+    fn handle_command(&mut self, cmd: RenderCommand) {
+        match cmd {
+            RenderCommand::Build { screen, stash, build } => {
+                let Some(gpu) = &self.gpu else { return };
+                let Some(ctx) = self.output_for(&screen) else { return };
+                let Some(format) = ctx.format else { return }; // no frame drawn yet
+                let name = ctx.name.clone();
+                let device = gpu.device.clone();
+                let queue = gpu.queue.clone();
+                let tx = self.cmd_tx.clone();
+                // Build off the render thread — the current wallpaper keeps
+                // rendering. The worker sends the result back as `Install`.
+                std::thread::spawn(move || {
+                    let renderer = build(&device, &queue, format, &name);
+                    let _ = tx.send(RenderCommand::Install { screen: name, stash, renderer });
+                });
+            }
+            RenderCommand::Install { screen, stash, renderer } => {
+                let Some(idx) = self.output_index(&screen) else { return };
+                match stash {
+                    Some(key) => {
+                        let name = self.outputs[idx].name.clone();
+                        if let Some(format) = self.outputs[idx].format {
+                            self.preloaded.insert((name, key), (format, renderer));
+                        }
+                    }
+                    None => self.install_renderer(idx, renderer),
+                }
+            }
+            RenderCommand::Swap { screen, key, build } => {
+                let Some(idx) = self.output_index(&screen) else { return };
+                let name = self.outputs[idx].name.clone();
+                let hit = self.preloaded.remove(&(name, key)).and_then(|(format, r)| {
+                    // Only a format match is a real hit (surface may have
+                    // reconfigured since the preload).
+                    (self.outputs[idx].format == Some(format)).then_some(r)
+                });
+                match hit {
+                    // Preload hit → instant pointer swap (sub-100ms).
+                    Some(renderer) => {
+                        tracing::info!(%screen, "preload hit — instant swap");
+                        self.install_renderer(idx, renderer);
+                    }
+                    // Miss → build off-thread + install when ready (like Build).
+                    None => {
+                        tracing::info!(%screen, "preload miss — building off-thread");
+                        self.handle_command(RenderCommand::Build {
+                            screen,
+                            stash: None,
+                            build,
+                        });
+                    }
+                }
+            }
+            RenderCommand::SwapLocal { screen, build_local } => {
+                // Render-thread build (CEF web is !Send). Blocks the loop for the
+                // build's duration — a brief hitch on the current wallpaper — then
+                // installs. Needs the GPU + a drawn output (format known).
+                let Some(gpu) = &self.gpu else { return };
+                let Some(idx) = self.output_index(&screen) else { return };
+                let Some(format) = self.outputs[idx].format else { return };
+                let name = self.outputs[idx].name.clone();
+                let device = gpu.device.clone();
+                let queue = gpu.queue.clone();
+                let renderer = build_local(&device, &queue, format, &name);
+                self.install_renderer(idx, renderer);
+            }
+            RenderCommand::Screenshot { screen, capture } => {
+                // Capture the live frame on the render thread: the warm renderer
+                // re-renders one frame to an offscreen texture (format matches the
+                // surface, so its pipelines fit) and the app reads it back + writes
+                // the file. Needs the GPU, a drawn output (format known) and a
+                // renderer; any missing → drop (the daemon then falls back to the
+                // workshop preview, which is why no error is surfaced here).
+                let Some(gpu) = &self.gpu else { return };
+                let Some(idx) = self.output_index(&screen) else { return };
+                let ctx = &mut self.outputs[idx];
+                let Some(format) = ctx.format else { return };
+                let size = ctx.physical_size;
+                if let Some(renderer) = ctx.renderer.as_mut() {
+                    capture(&gpu.device, &gpu.queue, renderer.as_mut(), size, format);
+                }
+            }
+        }
+    }
+
+    /// Swap `outputs[idx]`'s renderer (the old one drops here) and request a
+    /// repaint so the new wallpaper paints on the next frame. Takes a plain
+    /// `Box<dyn Renderer>` (no `Send` bound) so it serves both the off-thread
+    /// build (whose output is `Send`, coerced here) and the render-thread
+    /// [`RenderCommand::SwapLocal`] build (whose output may be `!Send`, e.g. CEF).
+    fn install_renderer(&mut self, idx: usize, renderer: Box<dyn crate::renderer::Renderer>) {
+        let qh = self.qh.clone();
+        let ctx = &mut self.outputs[idx];
+        ctx.renderer = Some(renderer); // previous renderer drops here
+        ctx.last_frame = None; // reset per-output dt for the fresh renderer
+        if ctx.configured && !ctx.frame_pending {
+            ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
+            ctx.frame_pending = true;
+            ctx.wl_surface().commit();
+        }
+        tracing::info!(output = %ctx.name, "wallpaper swapped in");
+    }
+
+    /// The output matching `screen` (`"*"` = the first output, for window mode).
+    fn output_for(&self, screen: &str) -> Option<&OutputContext> {
+        if screen == "*" {
+            self.outputs.first()
+        } else {
+            self.outputs.iter().find(|c| c.name == screen)
+        }
+    }
+
+    /// Index of the output matching `screen` (`"*"` = the first).
+    fn output_index(&self, screen: &str) -> Option<usize> {
+        if screen == "*" {
+            (!self.outputs.is_empty()).then_some(0)
+        } else {
+            self.outputs.iter().position(|c| c.name == screen)
+        }
+    }
+
     /// Create the layer surface + swapchain for a newly announced output
     /// (docs/render-architecture.md §2.3: per requested output one
     /// `wl_surface` + layer surface anchored to all four edges with
@@ -257,6 +420,7 @@ impl PlatformState {
             first_frame_presented: false,
             renderer: None,
             last_frame: None,
+            format: None,
         });
     }
 
@@ -370,6 +534,7 @@ impl PlatformState {
         let view = texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        ctx.format = Some(texture.texture.format());
 
         let renderer = ctx.renderer.get_or_insert_with(|| {
             (self.make_renderer)(&RenderTarget {

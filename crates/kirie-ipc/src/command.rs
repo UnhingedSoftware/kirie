@@ -509,6 +509,18 @@ pub fn parse_request(line: &[u8]) -> Request {
             let value = rest_string(&mut cur);
             Request::Command(Command::Property { screen, key, value })
         }
+        // Daemon `stage <key> <value>`: record a property override (no screen) for
+        // the *next* `bg` build — no live rebuild. Same store as `property`; the
+        // empty screen just means "global, applied at the next build".
+        b"stage" => {
+            let key = token_string(&mut cur);
+            let value = rest_string(&mut cur);
+            Request::Command(Command::Property {
+                screen: String::new(),
+                key,
+                value,
+            })
+        }
         b"scaling" => {
             let screen = token_string(&mut cur);
             let mode = match cur.token() {

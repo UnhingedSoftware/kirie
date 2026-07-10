@@ -149,6 +149,16 @@ impl Platform {
         }
     }
 
+    /// Render-command sender for live `bg`/`preload` swaps. `Some` on Wayland;
+    /// `None` on X11 (not wired there yet — X11 relaunches per switch).
+    #[must_use]
+    pub fn command_sender(&self) -> Option<crate::renderer::CommandSender> {
+        match self {
+            Self::Wayland(p) => Some(p.command_sender()),
+            Self::X11(_) => None,
+        }
+    }
+
     /// Drive the backend's render loop until `duration` elapses (`None` = run
     /// forever). Wayland blocks in the compositor event loop between frame
     /// callbacks; X11 runs the vsync-paced present loop

@@ -103,6 +103,61 @@ impl AnimationTrack {
             relative,
         }
     }
+
+    /// Evaluate the angle track at `time_secs` (elapsed render seconds) → the
+    /// per-channel `[X, Y, Z]` animated values, or `None` when disabled
+    /// (`length <= 0` or all channels empty). Mirrors C++
+    /// `CModel::computeModelMatrix` (`CModel.cpp:30-50,222-238`): `frame =
+    /// time * fps`, wrapped over `length` (loop) or ping-ponged (mirror), with
+    /// linear interpolation between keyframes and held constant outside the
+    /// keyframe range. The caller combines this with the base angles per
+    /// [`AnimationTrack::relative`]. Applied by C++ to MODEL objects only.
+    #[must_use]
+    pub fn sample(&self, time_secs: f32) -> Option<[f32; 3]> {
+        if self.length <= 0.0
+            || (self.c0.is_empty() && self.c1.is_empty() && self.c2.is_empty())
+        {
+            return None;
+        }
+        let mut frame = time_secs * self.fps;
+        match self.mode {
+            AnimMode::Mirror => {
+                let period = 2.0 * self.length;
+                frame = frame.rem_euclid(period);
+                if frame > self.length {
+                    frame = period - frame;
+                }
+            }
+            AnimMode::Loop => frame = frame.rem_euclid(self.length),
+        }
+        Some([
+            eval_channel(&self.c0, frame),
+            eval_channel(&self.c1, frame),
+            eval_channel(&self.c2, frame),
+        ])
+    }
+}
+
+/// Linear keyframe lookup for one channel (`CModel.cpp:30-50`): held constant
+/// before the first and after the last keyframe, linearly interpolated between
+/// the two bracketing keyframes otherwise. Empty channel ⇒ 0.
+fn eval_channel(keys: &[Keyframe], frame: f32) -> f32 {
+    match (keys.first(), keys.last()) {
+        (None, _) => 0.0,
+        (Some(first), _) if frame <= first.frame => first.value,
+        (_, Some(last)) if frame >= last.frame => last.value,
+        _ => {
+            for w in keys.windows(2) {
+                if frame <= w[1].frame {
+                    let (a, b) = (w[0], w[1]);
+                    let span = b.frame - a.frame;
+                    let t = if span > 0.0 { (frame - a.frame) / span } else { 0.0 };
+                    return a.value + (b.value - a.value) * t;
+                }
+            }
+            keys.last().map_or(0.0, |k| k.value)
+        }
+    }
 }
 
 /// Base fields common to every object (docs/format-scene-json.md §7.1).
@@ -575,5 +630,46 @@ fn parse_particle(obj: &Map<String, Value>) -> ParticleObject {
         particle_file,
         system,
         instanceoverride,
+    }
+}
+
+#[cfg(test)]
+mod anim_tests {
+    use super::{AnimMode, AnimationTrack, Keyframe};
+
+    fn track(c0: Vec<Keyframe>, length: f32, mode: AnimMode) -> AnimationTrack {
+        AnimationTrack { c0, c1: vec![], c2: vec![], fps: 30.0, length, mode, relative: true }
+    }
+    fn kf(frame: f32, value: f32) -> Keyframe {
+        Keyframe { frame, value }
+    }
+
+    #[test]
+    fn disabled_when_length_zero_or_empty() {
+        assert_eq!(track(vec![kf(0.0, 1.0)], 0.0, AnimMode::Loop).sample(1.0), None);
+        assert_eq!(track(vec![], 100.0, AnimMode::Loop).sample(1.0), None);
+    }
+
+    #[test]
+    fn linear_interp_and_hold_outside_range() {
+        // 0@frame0 -> 10@frame100, long length so no wrap in the tested range.
+        let t = track(vec![kf(0.0, 0.0), kf(100.0, 10.0)], 1000.0, AnimMode::Loop);
+        assert!((t.sample(0.0).unwrap()[0] - 0.0).abs() < 1e-3);
+        assert!((t.sample(50.0 / 30.0).unwrap()[0] - 5.0).abs() < 1e-3); // frame 50 -> 5
+        assert!((t.sample(200.0 / 30.0).unwrap()[0] - 10.0).abs() < 1e-3); // past last -> held
+    }
+
+    #[test]
+    fn loop_wraps_over_length() {
+        let t = track(vec![kf(0.0, 0.0), kf(100.0, 10.0)], 100.0, AnimMode::Loop);
+        assert!((t.sample(100.0 / 30.0).unwrap()[0] - 0.0).abs() < 1e-3); // frame 100 -> wrap 0
+        assert!((t.sample(150.0 / 30.0).unwrap()[0] - 5.0).abs() < 1e-3); // frame 150 -> 50 -> 5
+    }
+
+    #[test]
+    fn mirror_ping_pongs() {
+        let t = track(vec![kf(0.0, 0.0), kf(100.0, 10.0)], 100.0, AnimMode::Mirror);
+        assert!((t.sample(150.0 / 30.0).unwrap()[0] - 5.0).abs() < 1e-3); // 150 -> fold to 50 -> 5
+        assert!((t.sample(100.0 / 30.0).unwrap()[0] - 10.0).abs() < 1e-3); // boundary -> 10
     }
 }

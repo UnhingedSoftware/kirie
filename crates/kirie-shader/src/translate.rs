@@ -22,22 +22,43 @@ use crate::reflect::Reflection;
 use crate::{Stage, TranslateError, TranslatePath, TranslatedShader};
 
 /// Translate modernized GLSL for `stage` into a validated module + reflection.
+///
+/// The expensive work (preprocess → naga-GLSL / glslang frontend → validate —
+/// seconds on a big scene) is served from an on-disk cache of the **serialized
+/// naga module**, keyed by the input GLSL. A warm load deserializes the cached
+/// module (a few ms) instead of retranslating, and it's **lossless** — serde
+/// round-trips the *exact* module the cold path produced (unlike re-emitting
+/// SPIR-V from the module, which recompiles and changes the shader). wgpu
+/// re-validates on `create_shader_module`, so skipping our own validate on the
+/// warm path is safe. Cache I/O is best-effort — any miss/corruption falls
+/// through to a full translate, so correctness never depends on the cache.
 pub fn translate(
     stage: Stage,
     filename: &str,
     modernized: String,
     reflection: Reflection,
 ) -> Result<TranslatedShader, TranslateError> {
+    let key = shader_cache_key(stage, &modernized);
+    if let Some(module) = cache_load_module(&key) {
+        return Ok(TranslatedShader {
+            module,
+            reflection,
+            path: TranslatePath::Shaderc,
+            glsl: String::new(),
+        });
+    }
+
     // Step 1: preprocess (macro/`#if` expansion) + array-varying flatten, then
     // reproduce the patched-glslang shape/type leniencies (docs/shader-pipeline.md
     // §7.1, §7.2) that stock glslang and naga reject.
     let flat = preprocess_and_flatten(stage, filename, &modernized);
     let flat = crate::coerce::coerce_shapes(&flat);
 
-    // Step 2: naga pure-Rust GLSL frontend, then validate. A parse *or*
-    // validation failure falls through to the shaderc route.
+    // Step 2: naga pure-Rust GLSL frontend, then validate. On success cache the
+    // validated module; on failure fall through to the shaderc route.
     let naga_diag = match try_naga_glsl(stage, &flat).and_then(validate) {
         Ok(module) => {
+            cache_store_module(&key, &module);
             return Ok(TranslatedShader {
                 module,
                 reflection,
@@ -48,9 +69,10 @@ pub fn translate(
         Err(e) => e,
     };
 
-    // Step 3: shaderc → SPIR-V → naga SPIR-V frontend, then validate.
+    // Step 3: shaderc → SPIR-V → naga SPIR-V frontend, then validate + cache.
     let shaderc_diag = match try_shaderc(stage, filename, &flat).and_then(validate) {
         Ok(module) => {
+            cache_store_module(&key, &module);
             return Ok(TranslatedShader {
                 module,
                 reflection,
@@ -117,7 +139,10 @@ fn try_naga_glsl(stage: Stage, src: &str) -> Result<naga::Module, String> {
 }
 
 /// Attempt the shaderc → SPIR-V → naga SPIR-V path; returns the module or a
-/// diagnostic string.
+/// diagnostic string. The glslang compile (the expensive step, seconds on big
+/// shaders) is served from an on-disk SPIR-V cache when possible, so the same
+/// shader across loads/scenes only compiles once — this is what turns a heavy
+/// scene's ~18s first frame into a warm-load in well under a second.
 fn try_shaderc(stage: Stage, filename: &str, src: &str) -> Result<naga::Module, String> {
     let compiler = shaderc::Compiler::new().map_err(|e| e.to_string())?;
     let opts = shaderc_options().ok_or_else(|| "shaderc options unavailable".to_string())?;
@@ -134,6 +159,82 @@ fn try_shaderc(stage: Stage, filename: &str, src: &str) -> Result<naga::Module, 
         ..Default::default()
     };
     naga::front::spv::parse_u8_slice(artifact.as_binary_u8(), &spv_opts).map_err(|e| format!("{e:?}"))
+}
+
+/// Cache key for a shader's serialized naga module: `blake3(modernized ‖ stage ‖
+/// TRANSLATOR_VERSION ‖ CACHE_FORMAT)`. Bumping [`crate::TRANSLATOR_VERSION`] or
+/// the format tag invalidates every entry; a different shader or stage never
+/// collides.
+fn shader_cache_key(stage: Stage, modernized: &str) -> String {
+    // Bump when the cached representation changes (currently: bincode naga::Module).
+    const CACHE_FORMAT: u32 = 3;
+    let mut h = blake3::Hasher::new();
+    h.update(modernized.as_bytes());
+    h.update(&[match stage {
+        Stage::Vertex => 0u8,
+        Stage::Fragment => 1u8,
+    }]);
+    h.update(&crate::TRANSLATOR_VERSION.to_le_bytes());
+    h.update(&CACHE_FORMAT.to_le_bytes());
+    h.finalize().to_hex().to_string()
+}
+
+/// Deserialize the cached naga module for `key`, if present and valid. `None`
+/// (miss/corrupt) ⇒ full translate.
+fn cache_load_module(key: &str) -> Option<naga::Module> {
+    let bytes = std::fs::read(spirv_cache_dir()?.join(format!("{key}.nga"))).ok()?;
+    bincode::deserialize(&bytes).ok()
+}
+
+/// Serialize a validated naga module for `key` (best-effort, atomic).
+fn cache_store_module(key: &str, module: &naga::Module) {
+    if let (Ok(bytes), Some(dir)) = (bincode::serialize(module), spirv_cache_dir()) {
+        write_cache_atomic(&dir.join(format!("{key}.nga")), &bytes);
+    }
+}
+
+thread_local! {
+    /// Per-build cache directory override (e.g. a folder beside the wallpaper),
+    /// used in preference to the global cache. Set for the current thread at the
+    /// start of a scene load; the worker thread that builds a preload/swap sets
+    /// its own.
+    static CACHE_DIR_OVERRIDE: std::cell::RefCell<Option<std::path::PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Set a per-build shader-cache directory for the current thread, or `None` to
+/// clear it (falling back to the global cache). A scene loader sets this to a
+/// folder beside the wallpaper so its compiled shaders persist with it and never
+/// rebuild, independent of `~/.cache`.
+pub fn set_cache_dir(dir: Option<std::path::PathBuf>) {
+    CACHE_DIR_OVERRIDE.with(|c| *c.borrow_mut() = dir);
+}
+
+/// The active shader-cache directory: the per-build override if set, else
+/// `$XDG_CACHE_HOME/kirie/shaders` (or `$HOME/.cache/kirie/shaders`). `None`
+/// disables the cache.
+fn spirv_cache_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = CACHE_DIR_OVERRIDE.with(|c| c.borrow().clone()) {
+        return Some(dir);
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
+    Some(base.join("kirie").join("shaders"))
+}
+
+/// Write `bytes` to `path` atomically (temp + rename), best-effort — a failure to
+/// create the dir or write is ignored so the cache never breaks a build.
+fn write_cache_atomic(path: &std::path::Path, bytes: &[u8]) {
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let stem = path.file_name().and_then(|n| n.to_str()).unwrap_or("x");
+    let tmp = dir.join(format!(".tmp-{}-{stem}", std::process::id()));
+    if std::fs::write(&tmp, bytes).is_ok() {
+        let _ = std::fs::rename(&tmp, path);
+    }
 }
 
 /// Extract the first `: error:` line from a shaderc diagnostic for concision.

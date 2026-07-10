@@ -434,7 +434,7 @@ pub fn capture(
         // Read back once past the minimum settle, or on the final (timed-out)
         // frame so the last frame is always written.
         if frame >= min_frames || timed_out {
-            pixels = readback(&gpu, &target_tex, capture_size)?;
+            pixels = readback(&gpu.device, &gpu.queue, &target_tex, capture_size)?;
             let lit = lit_fraction(&pixels);
             if lit > content_floor {
                 captured_nonblack = true;
@@ -464,6 +464,65 @@ pub fn capture(
     Ok(())
 }
 
+/// Capture the current frame of an already-built, warm `renderer` to `path`,
+/// rendering one frame into an offscreen texture whose format matches the live
+/// surface `format` (so the renderer's pipelines — built for that format — fit)
+/// and reading it straight back.
+///
+/// Distinct from [`capture`]: no throwaway device, no renderer rebuild, no
+/// settle loop. The renderer is already warm on the render thread and has been
+/// presenting, so a single re-render of its current state (`dt = 0`, no
+/// animation advance) reproduces the on-screen frame. This backs the socket
+/// `screenshot` command (doc §4.12), whose caller (the daemon's theming) wants
+/// the palette to match what is actually displayed — property overrides and all
+/// — rather than the workshop preview.
+pub fn capture_live(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut dyn Renderer,
+    size: SurfaceSize,
+    format: wgpu::TextureFormat,
+    path: &Path,
+) -> Result<()> {
+    let size = SurfaceSize {
+        width: size.width.max(1),
+        height: size.height.max(1),
+    };
+    let target_tex = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kirie-socket-screenshot"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target_tex.create_view(&wgpu::TextureViewDescriptor::default());
+
+    renderer.render(&view, size, 0.0);
+    device
+        .poll(wgpu::PollType::wait_indefinitely())
+        .map_err(|e| anyhow!("gpu poll after live-frame render: {e}"))?;
+
+    let mut pixels = readback(device, queue, &target_tex, size)?;
+    // The surface may be BGRA (common on Vulkan); write_image reads the first
+    // three bytes as R,G,B, so reorder BGRA→RGBA. RGBA formats need no swap.
+    if matches!(
+        format,
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    ) {
+        for px in pixels.chunks_exact_mut(4) {
+            px.swap(0, 2);
+        }
+    }
+    write_image(path, size.width, size.height, &pixels)
+}
+
 /// Wall-clock safety budget for the capture loop.
 ///
 /// Image/video paints its first frame immediately and the loop returns the
@@ -491,25 +550,29 @@ fn capture_budget(wallpaper: &Wallpaper) -> Duration {
 }
 
 /// Copy the target texture to a mappable buffer and return tightly packed
-/// RGBA8 (`width·height·4` bytes, row padding stripped).
-fn readback(gpu: &Headless, texture: &wgpu::Texture, size: SurfaceSize) -> Result<Vec<u8>> {
+/// RGBA8/BGRA8 (`width·height·4` bytes, row padding stripped) — the byte order
+/// is the texture's own (the caller reorders per format).
+fn readback(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    size: SurfaceSize,
+) -> Result<Vec<u8>> {
     let width = size.width;
     let height = size.height;
     let unpadded = width * 4;
     let padded = unpadded.div_ceil(ROW_ALIGN) * ROW_ALIGN;
 
-    let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("kirie-screenshot-readback"),
         size: u64::from(padded) * u64::from(height),
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
 
-    let mut encoder = gpu
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("kirie-screenshot-copy"),
-        });
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("kirie-screenshot-copy"),
+    });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture,
@@ -531,14 +594,14 @@ fn readback(gpu: &Headless, texture: &wgpu::Texture, size: SurfaceSize) -> Resul
             depth_or_array_layers: 1,
         },
     );
-    gpu.queue.submit(Some(encoder.finish()));
+    queue.submit(Some(encoder.finish()));
 
     let slice = buffer.slice(..);
     let (tx, rx) = crossbeam_channel::bounded(1);
     slice.map_async(wgpu::MapMode::Read, move |res| {
         let _ = tx.send(res);
     });
-    gpu.device
+    device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|e| anyhow!("gpu poll for map: {e}"))?;
     rx.recv()
