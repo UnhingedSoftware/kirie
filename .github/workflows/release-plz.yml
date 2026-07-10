@@ -40,7 +40,7 @@ jobs:
             libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
             libavfilter-dev libswscale-dev libswresample-dev \
             libasound2-dev libpulse-dev \
-            libwayland-dev libxkbcommon-dev \
+            libwayland-dev libxkbcommon-dev libxcb1-dev \
             libshaderc-dev glslang-dev
       - name: release-plz release-pr
         uses: release-plz/action@v0.5

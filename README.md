@@ -24,7 +24,7 @@ sudo pacman -S --needed rust ffmpeg alsa-lib libpulse shaderc glslang \
 sudo apt install -y build-essential clang cmake pkg-config \
     libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
     libasound2-dev libpulse-dev libshaderc-dev glslang-dev \
-    libwayland-dev libxkbcommon-dev libx11-dev libfreetype-dev libdbus-1-dev
+    libwayland-dev libxkbcommon-dev libx11-dev libxcb1-dev libfreetype-dev libdbus-1-dev
 
 # Default build (no web backend): lean and always-green.
 cargo build --release -p kirie
