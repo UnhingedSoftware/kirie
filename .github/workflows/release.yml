@@ -162,13 +162,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: kirie-linux-x86_64
-      - name: Create draft release with assets
+      - name: Create or update the draft release
         run: |
           set -euo pipefail
-          # Replace any existing release/draft for this version, then create fresh
-          # with the asset + notes attached in one call.
-          gh release delete "$V" --yes --cleanup-tag 2>/dev/null || true
-          gh release create "$V" --draft --title "$V" \
-            --notes-file RELEASE_NOTES.md \
-            kirie-linux-x86_64.tar.gz
-          echo "Draft $V created with the portable binary attached."
+          # No checkout in this job, so gh must not fall back to git: GH_REPO
+          # gives it the repo, and --target gives create an explicit commit (a
+          # draft never pushes a tag, so this is just the target-on-publish).
+          if gh release view "$V" >/dev/null 2>&1; then
+            echo "release $V exists — updating in place (not deleting)"
+            gh release edit "$V" --draft --title "$V" --notes-file RELEASE_NOTES.md
+            gh release upload "$V" kirie-linux-x86_64.tar.gz --clobber
+          else
+            echo "creating draft $V"
+            gh release create "$V" --draft --title "$V" --target "$GITHUB_SHA" \
+              --notes-file RELEASE_NOTES.md kirie-linux-x86_64.tar.gz
+          fi
+          echo "Draft $V ready with the portable binary attached."
