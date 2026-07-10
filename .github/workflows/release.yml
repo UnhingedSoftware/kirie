@@ -1,20 +1,17 @@
 name: Release
-# Produces a fully-populated DRAFT release with ONE portable Linux binary that
-# runs on any modern distro, which you just review and Publish.
+# Produces a fully-populated DRAFT release you review and Publish. Kick off from
+# Actions -> Release -> Run workflow (optionally type a version; blank = auto).
+# It computes the version + changelog, builds three artifacts, and creates the
+# draft with all of them + notes attached in one shot.
 #
-# GitHub emits no event when a draft release is saved, so you can't trigger off
-# drafting. Kick this off from the Actions tab:
-#   Actions -> Release -> Run workflow  (optionally type a version; blank = auto)
-# It then:
-#   1. picks the version (your input, or next SemVer from Conventional Commits),
-#   2. generates the changelog,
-#   3. builds the portable `kirie` binary (`--features portable`: ffmpeg + shaderc
-#      statically linked from source) on an old glibc (debian:11, 2.31) so the
-#      only dynamic deps are universal system sonames — it runs on Arch, Ubuntu,
-#      Fedora, … with no bundling,
-#   4. creates the DRAFT release with the binary + changelog attached in one shot.
-# You then hit Publish. (Web backends aren't shipped here yet — they link system
-# CEF/webkit which isn't portable; build those per-distro if needed.)
+# Artifacts (all with ffmpeg + shaderc statically linked via `--features portable`):
+#   kirie              - portable single binary. Only universal dynamic deps
+#                        (glibc, alsa, pulse, xcb); runs on any distro (glibc>=2.31).
+#   kirie-web-cef      - + bundled Chromium (libcef.so + runtime beside the binary).
+#                        Self-contained web-wallpaper build; no system browser needed.
+#   kirie-web-webview  - + wry/system webkit2gtk-4.1. Smaller, but REQUIRES the
+#                        target to have webkit2gtk-4.1 + libsoup-3.0 installed
+#                        (webkit can't be bundled). Built on glibc 2.35.
 on:
   workflow_dispatch:
     inputs:
@@ -30,8 +27,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 1. Version + changelog. Publishes RELEASE_NOTES.md as an artifact for the
-  #    release job (which runs on a clean image without git history).
+  # 1. Version + changelog; publish RELEASE_NOTES.md as an artifact.
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -67,24 +63,43 @@ jobs:
           path: RELEASE_NOTES.md
           if-no-files-found: error
 
-  # 2. Build the portable binary on old glibc. ffmpeg + shaderc are compiled from
-  #    source and statically linked (the `portable` feature), so the binary keeps
-  #    only universal dynamic deps (glibc, libasound.so.2, libpulse.so.0,
-  #    libxcb.so.1, libstdc++, libgcc). Vulkan/Wayland/X11 are dlopen'd at runtime.
+  # 2. Build the three variants. ffmpeg + shaderc are compiled from source and
+  #    statically linked (the `portable` feature) in all of them. default + web-cef
+  #    build on debian:11 (glibc 2.31 floor); web-webview builds on ubuntu:22.04,
+  #    which ships webkit2gtk-4.1 (debian:11 only has 4.0). fail-fast:false so one
+  #    variant failing never blocks the others.
   build:
     needs: prepare
     runs-on: ubuntu-latest
-    container: debian:11
-    # Container steps default to `sh` (dash); use bash so `set -o pipefail` and
-    # other bashisms work (bash ships in the debian:11 base image).
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: default
+            container: debian:11
+            features: portable
+            artifact: kirie
+          - variant: web-cef
+            container: debian:11
+            features: portable,web-cef
+            artifact: kirie-web-cef
+          - variant: web-webview
+            container: ubuntu:22.04
+            features: portable,web-webview
+            artifact: kirie-web-webview
+    name: build (${{ matrix.variant }})
     defaults:
       run:
         shell: bash
     steps:
       # Toolchain + build deps for the from-source static libs (nasm for ffmpeg;
       # cmake/ninja/git/python for shaderc) and the -dev packages for the libs
-      # that stay dynamic. No ffmpeg/shaderc packages — those come from source.
+      # that stay dynamic. cmake comes from pip (<4) because debian:11's is 3.18
+      # but shaderc's SPIRV-Tools needs >=3.22.1.
       - name: Install build dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
@@ -92,10 +107,9 @@ jobs:
             pkg-config python3 python3-pip \
             libasound2-dev libpulse-dev \
             libxcb1-dev libwayland-dev libxkbcommon-dev libx11-dev libdbus-1-dev
-          # debian:11 ships cmake 3.18, but shaderc's SPIRV-Tools needs >=3.22.1.
-          # Install a modern cmake from pip (pinned <4 so glslang/SPIRV-Tools'
-          # older cmake_minimum_required policies still apply). Keeps debian:11's
-          # old glibc (2.31) as the portability floor.
+          if [ "${{ matrix.variant }}" = "web-webview" ]; then
+            apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libsoup-3.0-dev
+          fi
           pip3 install "cmake<4"
           cmake --version
       - name: Install Rust (rustup, current stable)
@@ -103,78 +117,95 @@ jobs:
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
-      # Cache ~/.cargo + target/ so only changed crates recompile. Critically this
-      # also caches the from-source ffmpeg + shaderc build outputs (in the
-      # ffmpeg-sys/shaderc-sys OUT_DIRs under target/), which are the ~10-minute
-      # part of a clean build. cache-on-failure keeps them even when a later step
-      # fails, so re-runs during iteration don't rebuild them.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: portable-debian11
+          key: portable-${{ matrix.variant }}
           cache-on-failure: true
       - name: Set crate version
         run: |
           v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
-      - name: Build portable release
-        run: cargo build --release -p kirie --features portable
-      # Guard: fail if any version-specific soname slipped back into the binary.
-      - name: Verify portability (no churny sonames)
+      - name: Build (${{ matrix.variant }})
+        run: cargo build --release -p kirie --features ${{ matrix.features }}
+      # The CEF subprocess helper is a separate binary that also links libcef.
+      - name: Build CEF helper (web-cef only)
+        if: matrix.variant == 'web-cef'
+        run: cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
+      # Guard: ffmpeg + shaderc must be static in every variant. (libcef / webkit
+      # are expected dynamic deps for the web variants and are not flagged.)
+      - name: Verify ffmpeg + shaderc are static
         run: |
           set -euo pipefail
           apt-get install -y --no-install-recommends binutils >/dev/null
           needed="$(readelf -d target/release/kirie | grep NEEDED || true)"
           echo "$needed"
           if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
-            echo "::error::churny soname present — not portable"; exit 1
+            echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
           fi
-          echo "portable: only universal sonames"
-      - name: Package
+          echo "ok: ffmpeg + shaderc statically linked"
+      # Assemble the shippable tree. web-cef also ships the CEF runtime (libcef.so,
+      # icudtl.dat, *.pak, snapshot blobs, locales) copied beside the binary by the
+      # cef-dll-sys build script; the app finds them next to the executable.
+      - name: Package (${{ matrix.variant }})
         id: package
         run: |
           set -euo pipefail
-          install -Dm755 target/release/kirie "dist/kirie"
-          cp README.md LICENSE dist/ 2>/dev/null || true
-          tar -C dist -czf kirie-linux-x86_64.tar.gz .
-          echo "tarball=kirie-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@v4
+          dist="dist/${{ matrix.artifact }}"
+          mkdir -p "$dist"
+          cp target/release/kirie "$dist/${{ matrix.artifact }}"
+          cp README.md LICENSE "$dist/" 2>/dev/null || true
+          if [ "${{ matrix.variant }}" = "web-cef" ]; then
+            cp target/release/kirie-cef-helper "$dist/"
+            for f in libcef.so icudtl.dat chrome-sandbox v8_context_snapshot.bin snapshot_blob.bin; do
+              [ -f "target/release/$f" ] && cp "target/release/$f" "$dist/" || true
+            done
+            cp target/release/*.pak "$dist/" 2>/dev/null || true
+            cp target/release/*.bin "$dist/" 2>/dev/null || true
+            [ -d target/release/locales ] && cp -r target/release/locales "$dist/" || true
+          fi
+          if [ "${{ matrix.variant }}" = "web-webview" ]; then
+            printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n' > "$dist/REQUIREMENTS.txt"
+          fi
+          tar -C dist -czf "${{ matrix.artifact }}-linux-x86_64.tar.gz" "${{ matrix.artifact }}"
+          echo "tarball=${{ matrix.artifact }}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
         with:
-          name: kirie-linux-x86_64
+          name: ${{ matrix.artifact }}-linux-x86_64
           path: ${{ steps.package.outputs.tarball }}
           if-no-files-found: error
 
-  # 3. Create the DRAFT release once, with the binary + notes attached in a single
-  #    `gh release create` (no fragile create-then-upload-by-tag lookup).
+  # 3. Create/update the draft release once, with all built artifacts + notes.
   release:
     needs: [prepare, build]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
-      # This job only downloads artifacts (no checkout), so gh can't detect the
-      # repo from git — tell it explicitly.
       GH_REPO: ${{ github.repository }}
       V: ${{ needs.prepare.outputs.version }}
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download changelog
+        uses: actions/download-artifact@v4
         with:
           name: release-notes
-      - uses: actions/download-artifact@v4
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: kirie-linux-x86_64
+          pattern: "*-linux-x86_64"
+          merge-multiple: true
       - name: Create or update the draft release
         run: |
           set -euo pipefail
-          # No checkout in this job, so gh must not fall back to git: GH_REPO
-          # gives it the repo, and --target gives create an explicit commit (a
-          # draft never pushes a tag, so this is just the target-on-publish).
+          files=$(ls *.tar.gz)
+          echo "attaching:"; echo "$files"
+          # No checkout here, so gh must stay API-only: GH_REPO gives the repo and
+          # --target gives create an explicit commit. Update in place if it exists.
           if gh release view "$V" >/dev/null 2>&1; then
             echo "release $V exists — updating in place (not deleting)"
             gh release edit "$V" --draft --title "$V" --notes-file RELEASE_NOTES.md
-            gh release upload "$V" kirie-linux-x86_64.tar.gz --clobber
+            gh release upload "$V" $files --clobber
           else
             echo "creating draft $V"
             gh release create "$V" --draft --title "$V" --target "$GITHUB_SHA" \
-              --notes-file RELEASE_NOTES.md kirie-linux-x86_64.tar.gz
+              --notes-file RELEASE_NOTES.md $files
           fi
-          echo "Draft $V ready with the portable binary attached."
+          echo "Draft $V ready with all artifacts attached."
