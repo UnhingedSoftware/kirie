@@ -1,0 +1,33 @@
+# release-plz: automated versioning + changelog for the kirie workspace.
+#
+# The workspace shares one version (`version.workspace = true`), so release-plz
+# bumps that single version. It decides the bump from Conventional Commit
+# messages since the last release AND runs cargo-semver-checks on the library
+# crates to catch API breaking changes automatically:
+#
+#   fix:               -> patch   (0.1.0 -> 0.1.1)
+#   feat:              -> minor   (0.1.0 -> 0.2.0)
+#   feat!: / BREAKING  -> major, and a detected breaking public-API change in a
+#                         library crate forces the major bump on its own.
+#
+# Flow: push to main -> release-plz opens/updates a "chore: release" PR that
+# bumps the version + regenerates CHANGELOG.md (this PR is your reviewable draft
+# release). Merge it -> release-plz tags vX.Y.Z + creates the GitHub Release,
+# whose tag triggers release.yml to build and attach the three binaries.
+
+[workspace]
+# Not published to crates.io (yet): do version bumps, CHANGELOG, git tags, and
+# GitHub Releases only. Flip `publish` to true (and add CARGO_REGISTRY_TOKEN)
+# when kirie-formats is ready to ship to crates.io.
+publish = false
+git_release_enable = true
+git_tag_enable = true
+semver_check = true
+changelog_update = true
+# Only release when the release PR merges (i.e. the version actually changed);
+# don't cut a release on every push to main.
+release_always = false
+
+[changelog]
+# Keep a Changelog + Conventional Commits grouping.
+protect_breaking_commits = true

@@ -1,0 +1,70 @@
+name: Release-plz
+# Automated versioning + changelog. On every push to main, release-plz opens (or
+# updates) a "chore: release" PR that bumps the single workspace version and
+# regenerates CHANGELOG.md — that PR is your reviewable draft release. The bump
+# is chosen from Conventional Commit messages since the last release, and
+# cargo-semver-checks runs on the library crates to catch API breaking changes
+# automatically. Merge the PR to tag vX.Y.Z + cut the GitHub Release; that tag
+# then triggers release.yml to build and attach the three binaries.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Never run two release-plz jobs at once against main.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 1. Open/refresh the release PR (version bump + CHANGELOG). release-plz no-ops
+  #    when there's nothing new to release, so it's safe to run on every push.
+  release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # semver-checks builds the library crates, so it needs the same system
+      # libraries the workspace links against (kept in sync with ci.yml).
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev cmake ninja-build pkg-config \
+            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+            libavfilter-dev libswscale-dev libswresample-dev \
+            libasound2-dev libpulse-dev \
+            libwayland-dev libxkbcommon-dev \
+            libshaderc-dev glslang-dev
+      - name: release-plz release-pr
+        uses: release-plz/action@v0.5
+        with:
+          command: release-pr
+        env:
+          # GITHUB_TOKEN is enough to open the PR + create releases. To make CI
+          # (ci.yml) run *on* the release PR, replace with a PAT/GitHub-App token
+          # stored as secrets.RELEASE_PLZ_TOKEN — GITHUB_TOKEN-authored PRs don't
+          # trigger other workflows by design.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # 2. When the release PR is merged (version changed on main), tag + create the
+  #    GitHub Release. release.yml (on: tag v*) then builds + attaches binaries.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
