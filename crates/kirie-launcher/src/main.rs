@@ -93,7 +93,12 @@ fn ensure_extracted(exe: &Path) -> io::Result<PathBuf> {
     File::create(tmp.join(".complete"))?;
 
     match fs::rename(&tmp, &dir) {
-        Ok(()) => Ok(dir),
+        Ok(()) => {
+            // A distinct build extracts a new ~1.5 GB runtime; prune old ones so
+            // they don't accumulate one-per-build forever.
+            prune_old_runtimes(&root, key);
+            Ok(dir)
+        }
         // Lost a race with a concurrent launch that already populated `dir`.
         Err(_) if dir.join(".complete").is_file() => {
             let _ = fs::remove_dir_all(&tmp);
@@ -103,6 +108,33 @@ fn ensure_extracted(exe: &Path) -> io::Result<PathBuf> {
             let _ = fs::remove_dir_all(&tmp);
             Err(e)
         }
+    }
+}
+
+/// Keep the current runtime + the single most-recently-modified other under
+/// `root`, removing older `<key>` dirs (each ~1.5 GB). Best-effort: skips the
+/// current key and any in-progress `.tmp.*` dir; a runtime a running engine
+/// still uses keeps working through its open inodes even once unlinked.
+fn prune_old_runtimes(root: &Path, keep: &str) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    let mut dirs: Vec<(PathBuf, std::time::SystemTime)> = entries
+        .flatten()
+        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| {
+            let n = e.file_name();
+            let n = n.to_string_lossy();
+            !n.starts_with('.') && n != keep
+        })
+        .filter_map(|e| {
+            let m = e.metadata().and_then(|m| m.modified()).ok()?;
+            Some((e.path(), m))
+        })
+        .collect();
+    dirs.sort_by(|a, b| b.1.cmp(&a.1)); // newest first
+    for (path, _) in dirs.into_iter().skip(1) {
+        let _ = fs::remove_dir_all(path);
     }
 }
 

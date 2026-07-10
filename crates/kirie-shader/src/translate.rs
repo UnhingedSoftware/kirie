@@ -190,6 +190,49 @@ fn cache_load_module(key: &str) -> Option<naga::Module> {
 fn cache_store_module(key: &str, module: &naga::Module) {
     if let (Ok(bytes), Some(dir)) = (bincode::serialize(module), spirv_cache_dir()) {
         write_cache_atomic(&dir.join(format!("{key}.nga")), &bytes);
+        maybe_prune_cache(&dir);
+    }
+}
+
+/// Byte cap for a shader-module cache dir; oldest `.nga` files are evicted past
+/// it. Modules are small (a bincode naga module), so this holds thousands.
+const SHADER_CACHE_CAP_BYTES: u64 = 128 * 1024 * 1024;
+
+/// Prune `dir` under [`SHADER_CACHE_CAP_BYTES`], oldest-first — at most once per
+/// dir per process. Without this, bumping `TRANSLATOR_VERSION`/`CACHE_FORMAT`
+/// orphans every key and the cache grows unbounded. Best-effort.
+fn maybe_prune_cache(dir: &std::path::Path) {
+    use std::sync::{Mutex, OnceLock};
+    static SWEPT: OnceLock<Mutex<std::collections::HashSet<std::path::PathBuf>>> = OnceLock::new();
+    let swept = SWEPT.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let Ok(mut guard) = swept.lock() else { return };
+    if !guard.insert(dir.to_path_buf()) {
+        return; // already swept this dir this process
+    }
+    drop(guard); // release the lock before the filesystem sweep
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(std::path::PathBuf, u64, std::time::SystemTime)> = entries
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "nga"))
+        .filter_map(|e| {
+            let m = e.metadata().ok()?;
+            Some((e.path(), m.len(), m.modified().ok()?))
+        })
+        .collect();
+    let mut remaining: u64 = files.iter().map(|f| f.1).sum();
+    if remaining <= SHADER_CACHE_CAP_BYTES {
+        return;
+    }
+    files.sort_by(|a, b| a.2.cmp(&b.2)); // oldest first
+    for (path, len, _) in files {
+        if remaining <= SHADER_CACHE_CAP_BYTES {
+            break;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            remaining -= len;
+        }
     }
 }
 
