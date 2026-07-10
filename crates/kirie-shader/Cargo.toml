@@ -8,6 +8,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Statically link shaderc by building it (and glslang/SPIRV-Tools) from source,
+# emitting `link-lib=static=shaderc_combined`. Removes libshaderc_shared.so.1 +
+# libglslang.so.16 (whose names/versions differ per distro) from the binary.
+# Needs cmake + git + python + ninja at build time. Enabled via kirie's
+# `portable` feature; off by default (dynamic link, fast dev/CI builds).
+static-shaderc = ["shaderc/build-from-source"]
+
 [dependencies]
 kirie-formats = { workspace = true }
 naga = { workspace = true }

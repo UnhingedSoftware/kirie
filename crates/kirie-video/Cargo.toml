@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Statically link ffmpeg by building it from source (ffmpeg-sys-next `build` =>
+# --enable-static --disable-shared). Removes the version-specific libav*/libsw*
+# sonames from the binary so it runs across distros. Needs a C toolchain + nasm
+# at build time. Enabled via kirie's `portable` feature; off by default (dynamic
+# link, fast dev/CI builds).
+static-ffmpeg = ["ffmpeg-next/build"]
+
 [dependencies]
 kirie-platform = { path = "../kirie-platform" }
 ffmpeg-next = { workspace = true }

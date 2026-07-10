@@ -1,25 +1,20 @@
 name: Release
-# Produces a fully-populated DRAFT release that you just review and Publish.
+# Produces a fully-populated DRAFT release with ONE portable Linux binary that
+# runs on any modern distro, which you just review and Publish.
 #
-# GitHub does NOT emit any workflow event when you click "Draft a new release"
-# (draft releases fire no events), so you can't trigger off drafting. Instead you
-# kick this off from the Actions tab:
+# GitHub emits no event when a draft release is saved, so you can't trigger off
+# drafting. Kick this off from the Actions tab:
 #   Actions -> Release -> Run workflow  (optionally type a version; blank = auto)
-# It then, with no further input from you:
-#   1. picks the version (your input, or the next SemVer from Conventional
-#      Commits via git-cliff — breaking changes bump it and are flagged),
-#   2. generates the changelog into the release body,
-#   3. builds the three binary variants IN AN ARCH CONTAINER and attaches them,
-#   4. creates the DRAFT release with all of it.
-# You then go to Releases and hit Publish — that's the only manual step, and by
-# then everything is already filed.
-#
-# Why Arch: the binaries dynamically link ffmpeg + shaderc, whose sonames differ
-# per distro (Arch ships libavcodec.so.62 / libshaderc_shared.so.1; Ubuntu ships
-# older .so.60 / libshaderc.so.1). Building on Arch makes the binary link the
-# sonames Arch-family systems (Arch, CachyOS, EndeavourOS, Manjaro, …) actually
-# have, so it finds them in /usr/lib at load time with no bundling. Other distros
-# would need their own build (or a static build) — out of scope here.
+# It then:
+#   1. picks the version (your input, or next SemVer from Conventional Commits),
+#   2. generates the changelog,
+#   3. builds the portable `kirie` binary (`--features portable`: ffmpeg + shaderc
+#      statically linked from source) on an old glibc (debian:11, 2.31) so the
+#      only dynamic deps are universal system sonames — it runs on Arch, Ubuntu,
+#      Fedora, … with no bundling,
+#   4. creates the DRAFT release with the binary + changelog attached in one shot.
+# You then hit Publish. (Web backends aren't shipped here yet — they link system
+# CEF/webkit which isn't portable; build those per-distro if needed.)
 on:
   workflow_dispatch:
     inputs:
@@ -28,7 +23,6 @@ on:
         required: false
         default: ""
 
-# Creating/editing the draft + uploading assets only needs contents:write.
 permissions:
   contents: write
 
@@ -36,8 +30,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # 1. Decide the version + generate the changelog, then create (or refresh) the
-  #    draft release with that body. Bins get attached by the build job.
+  # 1. Version + changelog. Publishes RELEASE_NOTES.md as an artifact for the
+  #    release job (which runs on a clean image without git history).
   prepare:
     runs-on: ubuntu-latest
     outputs:
@@ -45,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # full history so git-cliff sees every commit + tag
+          fetch-depth: 0
       - name: Install git-cliff
         uses: taiki-e/install-action@v2
         with:
@@ -56,128 +50,102 @@ jobs:
           set -euo pipefail
           input="${{ inputs.version }}"
           if [ -n "$input" ]; then
-            version="$input"
-            case "$version" in v*) ;; *) version="v$version" ;; esac
+            version="$input"; case "$version" in v*) ;; *) version="v$version" ;; esac
           else
             raw="$(git cliff --bumped-version 2>/dev/null || true)"
-            ver="${raw#v}"
-            if [ -z "$ver" ] || [ "$ver" = "0.0.0" ]; then ver="0.1.0"; fi
+            ver="${raw#v}"; if [ -z "$ver" ] || [ "$ver" = "0.0.0" ]; then ver="0.1.0"; fi
             version="v$ver"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "Release version: $version"
       - name: Generate changelog
         run: git cliff --unreleased --tag "${{ steps.version.outputs.version }}" --strip all -o RELEASE_NOTES.md
-      - name: Create/refresh the draft release
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          v="${{ steps.version.outputs.version }}"
-          if gh release view "$v" >/dev/null 2>&1; then
-            gh release edit "$v" --draft --title "$v" --notes-file RELEASE_NOTES.md
-          else
-            gh release create "$v" --draft --title "$v" --notes-file RELEASE_NOTES.md --target "$GITHUB_SHA"
-          fi
+      - name: Upload changelog
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-notes
+          path: RELEASE_NOTES.md
+          if-no-files-found: error
 
-  # 2. Build the three binaries INSIDE an Arch container so they link Arch-family
-  #    sonames, then attach to the draft. Variants (one source tree, cargo feature):
-  #      - default     -> `kirie`             (no web backend)
-  #      - web-cef     -> `kirie-web-cef`     (Chromium Embedded Framework, OSR)
-  #      - web-webview -> `kirie-web-webview` (wry + system webkit2gtk-4.1)
-  #    fail-fast:false so one backend failing never blocks the others.
+  # 2. Build the portable binary on old glibc. ffmpeg + shaderc are compiled from
+  #    source and statically linked (the `portable` feature), so the binary keeps
+  #    only universal dynamic deps (glibc, libasound.so.2, libpulse.so.0,
+  #    libxcb.so.1, libstdc++, libgcc). Vulkan/Wayland/X11 are dlopen'd at runtime.
   build:
     needs: prepare
     runs-on: ubuntu-latest
-    container: archlinux:latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: default
-            features: ""
-            artifact: kirie
-          - variant: web-cef
-            features: web-cef
-            artifact: kirie-web-cef
-          - variant: web-webview
-            features: web-webview
-            artifact: kirie-web-webview
-    name: build (${{ matrix.variant }})
-    env:
-      # gh detects the repo from this instead of git remote (avoids in-container
-      # git ownership issues).
-      GH_REPO: ${{ github.repository }}
-      GH_TOKEN: ${{ github.token }}
+    container: debian:11
     steps:
-      # Base libraries every kirie build links (FFmpeg, ALSA/PulseAudio, xcb/X11,
-      # shaderc/glslang, Wayland) plus the toolchain. base-devel brings gcc,
-      # make, pkgconf; cmake/ninja/clang cover the shaderc + CEF wrapper builds;
-      # github-cli provides `gh` for the upload.
-      - name: Install Arch build dependencies
+      # Toolchain + build deps for the from-source static libs (nasm for ffmpeg;
+      # cmake/ninja/git/python for shaderc) and the -dev packages for the libs
+      # that stay dynamic. No ffmpeg/shaderc packages — those come from source.
+      - name: Install build dependencies
         run: |
-          pacman -Syu --noconfirm --needed \
-            base-devel git curl rust \
-            ffmpeg shaderc glslang \
-            alsa-lib libpulse \
-            wayland libxkbcommon libxcb libx11 \
-            cmake ninja clang pkgconf \
-            github-cli
-
-      # web-webview: wry links webkit2gtk-4.1 + libsoup-3 at compile time.
-      - name: Install webkit2gtk (web-webview only)
-        if: matrix.variant == 'web-webview'
-        run: pacman -S --noconfirm --needed webkit2gtk-4.1 libsoup3
-
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential clang cmake ninja-build nasm git curl ca-certificates \
+            pkg-config python3 \
+            libasound2-dev libpulse-dev \
+            libxcb1-dev libwayland-dev libxkbcommon-dev libx11-dev libdbus-1-dev
+      - name: Install Rust (rustup, current stable)
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
-
-      # Stamp the release version into the workspace Cargo.toml so the built
-      # binary reports it via `kirie --version`. Runner-local only — never
-      # committed (git-cliff derives the next version from tags, not Cargo.toml).
       - name: Set crate version
         run: |
           v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
-
-      - name: Build release (${{ matrix.variant }})
-        run: cargo build --release -p kirie ${{ matrix.features && format('--features {0}', matrix.features) || '' }}
-
-      # The CEF subprocess helper is a separate binary that also links libcef; it
-      # only exists in a `cef` build (required-features).
-      - name: Build CEF helper (web-cef only)
-        if: matrix.variant == 'web-cef'
-        run: cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
-
-      # Assemble the shippable tree. For CEF that means the binary + helper + the
-      # whole CEF runtime (libcef.so, icudtl.dat, *.pak, snapshot blobs, locales)
-      # that cef-dll-sys copied next to the built binary.
-      - name: Package artifact
+      - name: Build portable release
+        run: cargo build --release -p kirie --features portable
+      # Guard: fail if any version-specific soname slipped back into the binary.
+      - name: Verify portability (no churny sonames)
+        run: |
+          set -euo pipefail
+          apt-get install -y --no-install-recommends binutils >/dev/null
+          needed="$(readelf -d target/release/kirie | grep NEEDED || true)"
+          echo "$needed"
+          if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
+            echo "::error::churny soname present — not portable"; exit 1
+          fi
+          echo "portable: only universal sonames"
+      - name: Package
         id: package
         run: |
           set -euo pipefail
-          dist="dist/${{ matrix.artifact }}"
-          mkdir -p "$dist"
-          cp "target/release/kirie" "$dist/${{ matrix.artifact }}"
-          if [ "${{ matrix.variant }}" = "web-cef" ]; then
-            cp "target/release/kirie-cef-helper" "$dist/"
-            for f in libcef.so icudtl.dat chrome-sandbox v8_context_snapshot.bin snapshot_blob.bin; do
-              [ -f "target/release/$f" ] && cp "target/release/$f" "$dist/" || true
-            done
-            cp target/release/*.pak "$dist/" 2>/dev/null || true
-            cp target/release/*.bin "$dist/" 2>/dev/null || true
-            [ -d target/release/locales ] && cp -r target/release/locales "$dist/" || true
-          fi
-          tar -C dist -czf "${{ matrix.artifact }}-linux-x86_64.tar.gz" "${{ matrix.artifact }}"
-          echo "tarball=${{ matrix.artifact }}-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
-
-      - name: Upload build artifact
+          install -Dm755 target/release/kirie "dist/kirie"
+          cp README.md LICENSE dist/ 2>/dev/null || true
+          tar -C dist -czf kirie-linux-x86_64.tar.gz .
+          echo "tarball=kirie-linux-x86_64.tar.gz" >> "$GITHUB_OUTPUT"
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}-linux-x86_64
+          name: kirie-linux-x86_64
           path: ${{ steps.package.outputs.tarball }}
           if-no-files-found: error
 
-      # Attach the tarball to the draft release created by the prepare job.
-      # --clobber so re-runs replace instead of erroring.
-      - name: Attach to draft release
-        run: gh release upload "${{ needs.prepare.outputs.version }}" "${{ steps.package.outputs.tarball }}" --clobber
+  # 3. Create the DRAFT release once, with the binary + notes attached in a single
+  #    `gh release create` (no fragile create-then-upload-by-tag lookup).
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      V: ${{ needs.prepare.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-notes
+      - uses: actions/download-artifact@v4
+        with:
+          name: kirie-linux-x86_64
+      - name: Create draft release with assets
+        run: |
+          set -euo pipefail
+          # Replace any existing release/draft for this version, then create fresh
+          # with the asset + notes attached in one call.
+          gh release delete "$V" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$V" --draft --title "$V" \
+            --notes-file RELEASE_NOTES.md \
+            kirie-linux-x86_64.tar.gz
+          echo "Draft $V created with the portable binary attached."

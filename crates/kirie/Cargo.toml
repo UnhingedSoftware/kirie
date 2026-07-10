@@ -12,6 +12,12 @@ description = "kirie (切り絵) — Wallpaper Engine compatible wallpaper rende
 # browser deps live behind these opt-in features, which pull the (otherwise
 # unbuilt) `kirie-web` crate and turn on the matching backend inside it.
 default = []
+# One portable binary for any Linux distro: statically link the two churny
+# libraries (ffmpeg + shaderc/glslang) so the binary's only dynamic deps are
+# universal, same-named-everywhere system libs (glibc, libvulkan.so.1, wayland/
+# xcb/x11, alsa/pulse). Build the release with this feature (needs nasm + cmake +
+# python + ninja + git); leave it off for fast dynamic dev/CI builds.
+portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
 # Chromium Embedded Framework off-screen-rendering backend. `kirie-web/cef`
 # downloads + links libcef. This is the backend that composites through kirie's
 # wgpu presentation layer (a `kirie_platform::Renderer` blitting CEF's OSR

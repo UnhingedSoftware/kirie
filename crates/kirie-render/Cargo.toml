@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Wallpaper renderers: still-image + animated-gif (.tex TEXS atlases) on wgpu, shared output-scaling math"
 
+[features]
+# Forwards kirie's `portable` static-shaderc build down to kirie-shader (kirie
+# depends on kirie-shader through this crate, not directly).
+static-shaderc = ["kirie-shader/static-shaderc"]
+
 [dependencies]
 kirie-formats = { workspace = true }
 # Sibling workspace crates, not listed in [workspace.dependencies]; path deps
