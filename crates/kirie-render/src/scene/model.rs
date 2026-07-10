@@ -357,7 +357,7 @@ pub(super) fn draw_model(
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
 ) {
-    let (fov, near, far) = clamp_camera(camera.fov, camera.nearz, camera.farz);
+    let (fov, near, far) = clamp_camera(camera.fov.value, camera.nearz, camera.farz);
     let projection = matrix::perspective(fov.to_radians(), aspect, near, far);
     let view = matrix::look_at(camera.eye, camera.center, camera.up);
     let view_projection = matrix::mul(&projection, &view);

@@ -234,6 +234,9 @@ impl SceneModel {
     /// [`SceneModel::load_assets`].
     pub fn resolve(mut scene: Scene, bag: &PropertyBag) -> Self {
         scene.general.resolve(bag);
+        // The camera FOV is commonly bound to a `fov` slider — resolve it so the
+        // user's FOV drives the perspective (a static parse ignored it).
+        resolve_us(&mut scene.camera.fov, bag);
         for object in &mut scene.objects {
             object.resolve(bag);
         }

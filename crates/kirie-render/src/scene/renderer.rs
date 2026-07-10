@@ -440,7 +440,7 @@ impl SceneRenderer {
             blit_srgb: target.format.is_srgb(),
             audio,
             script,
-            camera: scene.camera,
+            camera: scene.camera.clone(),
             model_depth,
             parent_by_id,
             visible_by_id,

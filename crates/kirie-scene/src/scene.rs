@@ -25,7 +25,7 @@ pub enum Projection {
 }
 
 /// The `camera` section (docs/format-scene-json.md §6).
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Camera {
     /// `eye` (required vec3).
     pub eye: Vec3,
@@ -38,7 +38,11 @@ pub struct Camera {
     /// Far plane, default 10000 (§6.2, clamped `>nearz` else 10000).
     pub farz: f32,
     /// Field of view, default 50 (`general.fov` preferred, else `camera.fov`).
-    pub fov: f32,
+    /// A **user setting**: real scenes bind it to a `fov` slider
+    /// (`{"user":"fov","value":50}`), so it must be resolved from the property
+    /// bag — a static parse would ignore the user's FOV. Read `.value` after
+    /// [`crate::resolve`].
+    pub fov: UserSetting<f32>,
     /// Resolved projection (§6.2).
     pub projection: Projection,
 }
@@ -70,12 +74,14 @@ impl Camera {
         };
         let nearz = read_f("nearz", 0.1);
         let farz = read_f("farz", 10000.0);
-        // §6.2/§5: fov — general preferred, else camera.
-        let fov = general
-            .get("fov")
-            .and_then(coerce_f64)
-            .or_else(|| camera.get("fov").and_then(coerce_f64))
-            .map_or(50.0, |v| v as f32);
+        // §6.2/§5: fov — general preferred, else camera. Parsed as a user
+        // setting so a `{"user":"fov"}` binding survives to resolution; a plain
+        // number stays a literal. General wins when it carries a non-null fov.
+        let fov = if matches!(general.get("fov"), Some(v) if !v.is_null()) {
+            user_f32(general, "fov", 50.0)
+        } else {
+            user_f32(camera, "fov", 50.0)
+        };
 
         // §6.2: orthogonalprojection object / null / missing ⇒ auto.
         let projection = match general.get("orthogonalprojection") {
