@@ -154,6 +154,9 @@ pub struct SceneRenderer {
     /// before each post-process layer draws, so the read never aliases the
     /// write. Same size as `scene_fbo`.
     scene_snapshot: Fbo,
+    /// Camera bloom post-process, present when `general.bloom` is enabled
+    /// (docs §5). Runs on the composited scene FBO just before the blit.
+    bloom: Option<super::bloom::Bloom>,
     // Final blit stage-2.
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind: wgpu::BindGroup,
@@ -309,6 +312,26 @@ impl SceneRenderer {
         let scene_fbo = Fbo::new(device, "kirie-scene-fbo", proj_w, proj_h);
         let scene_snapshot = Fbo::new(device, "kirie-scene-snapshot", proj_w, proj_h);
 
+        // Camera bloom (docs §5): when enabled, glow the composited scene with
+        // the reproduced WE `camerabloom` effect just before the blit. Strength +
+        // threshold come from the resolved `general.bloomstrength`/`bloomthreshold`
+        // (matching WE `CScene.cpp:160`). The combine reuses `scene_snapshot`.
+        let bloom = scene.general.bloom.value.then(|| {
+            // `KIRIE_BLOOM_STRENGTH`/`KIRIE_BLOOM_THRESHOLD` override the scene
+            // values (diagnostics / tuning against the reference).
+            let env_f = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
+            super::bloom::Bloom::new(
+                device,
+                queue,
+                proj_w,
+                proj_h,
+                &scene_fbo.view,
+                &scene_snapshot.view,
+                env_f("KIRIE_BLOOM_STRENGTH").unwrap_or(scene.general.bloomstrength.value),
+                env_f("KIRIE_BLOOM_THRESHOLD").unwrap_or(scene.general.bloomthreshold.value),
+            )
+        });
+
         let resolver = SourceIncludes(source);
         let mut items = Vec::new();
         let mut text_pipeline: Option<TextPipeline> = None;
@@ -421,6 +444,7 @@ impl SceneRenderer {
             text_pipeline,
             scene_fbo,
             scene_snapshot,
+            bloom,
             blit_pipeline,
             blit_bind,
             blit_window,
@@ -1166,6 +1190,12 @@ impl Renderer for SceneRenderer {
                     }
                 }
             }
+        }
+
+        // Stage 1c: camera bloom — glow the composited scene in place (docs §5),
+        // so the blit below picks up the bloomed result unchanged.
+        if let Some(bloom) = &self.bloom {
+            bloom.run(&mut encoder, &self.scene_fbo, &self.scene_snapshot);
         }
 
         // Stage 2: blit the scene FBO to the surface (docs §2.5).

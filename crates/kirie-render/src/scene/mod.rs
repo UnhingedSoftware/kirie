@@ -19,6 +19,7 @@
 //! - [`renderer`] — [`SceneRenderer`], the per-frame compositor.
 
 pub mod blend;
+pub mod bloom;
 pub mod error;
 pub mod extras;
 pub mod matrix;
