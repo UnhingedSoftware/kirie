@@ -730,7 +730,16 @@ fn build_object(
     // renders its composite RT regardless of visibility (docs §5.6); only the
     // scene draw is suppressed (donors never emit a Scene pass).
     let visible = offscreen_donor || (image.visible.value && object.base.visible.value);
-    let chain = plan::plan_image(image, visible);
+    // The `colorBlendMode` compatibility material, loaded at setup like the
+    // reference's `MaterialParser::load(project, "materials/util/
+    // effectpassthrough.json")` (`CImage.cpp:770-788`). A missing builtin
+    // degrades to no extra pass (SPEC.md §V9 skip-and-continue).
+    let color_blend = (image.color_blend_mode.value > 0)
+        .then(|| source.load(plan::COLOR_BLEND_MATERIAL))
+        .flatten()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .map(|v| kirie_scene::material::Material::from_value(&v));
+    let chain = plan::plan_image(image, visible, color_blend.as_ref());
     if chain.passes.is_empty() {
         return None;
     }
@@ -827,14 +836,22 @@ fn build_object(
     }
     let mut built: Vec<Survivor> = Vec::new();
     for (ci, plan_pass) in chain.passes.iter().enumerate() {
-        let vs_name = format!("shaders/{}.vert", plan_pass.shader);
-        let fs_name = format!("shaders/{}.frag", plan_pass.shader);
-        let (Some(vs_bytes), Some(fs_bytes)) = (source.load(&vs_name), source.load(&fs_name)) else {
-            tracing::debug!(shader = %plan_pass.shader, "missing shader source; pass skipped");
-            continue;
-        };
-        let (Ok(vs_src), Ok(fs_src)) = (String::from_utf8(vs_bytes), String::from_utf8(fs_bytes)) else {
-            continue;
+        // `commands/copy` is the reference's VFS-registered blit for effect
+        // `command:"copy"` passes (`WallpaperApplication.cpp:165-182`) — it
+        // exists in no asset container, so bind the embedded sources instead.
+        let (vs_src, fs_src) = if plan_pass.shader == plan::COPY_COMMAND_SHADER {
+            (COPY_COMMAND_VERT.to_owned(), COPY_COMMAND_FRAG.to_owned())
+        } else {
+            let vs_name = format!("shaders/{}.vert", plan_pass.shader);
+            let fs_name = format!("shaders/{}.frag", plan_pass.shader);
+            let (Some(vs_bytes), Some(fs_bytes)) = (source.load(&vs_name), source.load(&fs_name)) else {
+                tracing::debug!(shader = %plan_pass.shader, "missing shader source; pass skipped");
+                continue;
+            };
+            let (Ok(vs_src), Ok(fs_src)) = (String::from_utf8(vs_bytes), String::from_utf8(fs_bytes)) else {
+                continue;
+            };
+            (vs_src, fs_src)
         };
         // The base pass of a puppet draws the deformable mesh (indexed triangle
         // list); every other pass keeps the 4-vertex triangle strip.
@@ -2419,13 +2436,20 @@ pub(super) fn build_bind_group(
             if let Some(hit) = name.as_deref().and_then(|n| named.get(n)) {
                 return Slot::Named(*hit);
             }
+            // A `_rt_FullFrameBuffer` name resolves to the scene snapshot on
+            // any slot, slot 0 included (a `command:"copy"` source may be the
+            // scene): the reference resolves FBO names before falling back to
+            // the pass input (`CPass.cpp` name-based texture resolution). For
+            // the base pass this is the same view the Input arm binds.
+            if name.as_deref().is_some_and(is_scene_rt) {
+                return Slot::Scene;
+            }
             // Slot 0 otherwise samples the pass input view (the layer texture or
             // composite front), whose contents already are slot 0's texture.
             if slot.slot == Some(0) {
                 return Slot::Input;
             }
             match name {
-                Some(n) if is_scene_rt(&n) => Slot::Scene,
                 Some(n) if !n.starts_with("_rt_") && !n.starts_with("_alias_") => {
                     Slot::Tex(registry.get(&n, source))
                 }
@@ -2639,6 +2663,31 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// The `commands/copy` blit vertex shader. The reference registers this pair
+/// in its virtual asset filesystem instead of shipping files
+/// (`WallpaperApplication.cpp:165-182`), so no [`AssetSource`] can resolve
+/// them; ported verbatim to the WE GLSL dialect the shader pipeline consumes
+/// (`attribute`/`varying`, `gl_FragColor`, `texSample2D`). The pass-space NDC
+/// quad (`gl_Position = a_Position`) drawn into the `target` FBO while
+/// sampling the `source` at slot 0 IS the copy (`CImage.cpp:704-718`).
+const COPY_COMMAND_VERT: &str = "\
+attribute vec3 a_Position;\n\
+attribute vec2 a_TexCoord;\n\
+varying vec2 v_TexCoord;\n\
+void main() {\n\
+gl_Position = vec4(a_Position, 1.0);\n\
+v_TexCoord = a_TexCoord;\n\
+}\n";
+
+/// The `commands/copy` blit fragment shader — samples the `source` FBO the
+/// plan bound at texture slot 0 (`WallpaperApplication.cpp:165-171`).
+const COPY_COMMAND_FRAG: &str = "\
+uniform sampler2D g_Texture0;\n\
+varying vec2 v_TexCoord;\n\
+void main() {\n\
+gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n\
+}\n";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2653,6 +2702,37 @@ mod tests {
             assert_eq!(effective_blending(true, planned), Blending::Translucent);
             assert_eq!(effective_blending(false, planned), planned);
         }
+    }
+
+    #[test]
+    fn embedded_copy_command_shader_translates() {
+        // The `commands/copy` pair never touches an asset container, so a
+        // translation regression would silently drop every copy pass (§V9
+        // skip). Translate both stages exactly as `pipeline::build_pass` does
+        // (CPU-only; no GPU device involved).
+        struct NoIncludes;
+        impl IncludeResolver for NoIncludes {
+            fn resolve(&self, _: &str) -> Option<String> {
+                None
+            }
+        }
+        let inputs = kirie_shader::ShaderInputs::default();
+        kirie_shader::translate(
+            kirie_shader::Stage::Vertex,
+            "copy.vert",
+            COPY_COMMAND_VERT,
+            &NoIncludes,
+            &inputs,
+        )
+        .expect("commands/copy vertex stage must translate");
+        kirie_shader::translate(
+            kirie_shader::Stage::Fragment,
+            "copy.frag",
+            COPY_COMMAND_FRAG,
+            &NoIncludes,
+            &inputs,
+        )
+        .expect("commands/copy fragment stage must translate");
     }
 
     #[test]
