@@ -249,25 +249,22 @@ pub fn plan_image(image: &ImageObject, visible: bool) -> ImagePlan {
         return ImagePlan::default();
     }
 
-    // §7.1 blend-mode relocation: with >1 pass, the first pass's blending moves
-    // to the last pass and the first becomes Normal (layer blending happens
-    // when compositing into the scene, not when copying into the layer FBO).
-    //
-    // Exception — puppet-mesh base: a flat-quad copy pass writes each destination
-    // texel exactly once, so Normal (replace) into the transparent layer FBO is
-    // correct. A puppet base instead draws an *indexed mesh whose triangles
-    // overlap*, and Normal blending makes a later transparent-margin triangle
-    // REPLACE an already-opaque texel with alpha 0 — punching holes (the girl 女's
-    // eye socket, which then let the LOGO layer bleed through as a red mark). The
-    // mesh must composite over itself, so a puppet base keeps its translucent
-    // blend (paired with blend.rs's coverage-correct alpha factor). The relocated
-    // layer blend still lands on the last pass for the scene composite.
+    // §7.1 blend-mode relocation (`CImage.cpp:789-795`): with >1 pass, the
+    // first pass's blending moves to the last pass and the first becomes Normal
+    // (layer blending happens when compositing into the scene, not when copying
+    // into the layer FBO). The reference applies this *unconditionally* — even
+    // for a puppet base, whose overlapping mesh triangles must nevertheless
+    // composite over themselves (Normal would let a transparent-margin triangle
+    // REPLACE an already-opaque texel with alpha 0, punching holes — the girl
+    // 女's eye socket in scene 3428443753). The reference restores that by
+    // *forcing* the first pass to Translucent in `setupPasses`
+    // (`CImage.cpp:832-834`), gated on the puppet mesh actually having loaded
+    // (`m_hasPuppetMesh`). Planning is pure and cannot know load success, so
+    // kirie applies that force in the renderer (`effective_blending`), paired
+    // with blend.rs's coverage-correct alpha factor.
     if passes.len() > 1 {
         let first_blend = passes[0].pass.blending;
-        let puppet_base = image.model.as_ref().is_some_and(|m| m.puppet.is_some());
-        if !puppet_base {
-            passes[0].pass.blending = Blending::Normal;
-        }
+        passes[0].pass.blending = Blending::Normal;
         let last = passes.len() - 1;
         passes[last].pass.blending = first_blend;
     }
@@ -489,5 +486,32 @@ mod tests {
             Blending::Additive,
             "first's blend relocated to last"
         );
+    }
+
+    #[test]
+    fn blend_relocation_is_unconditional_for_puppet_images() {
+        // `CImage.cpp:789-795` relocates with no puppet exception; the puppet
+        // base's Translucent is *forced later* by the renderer, gated on the
+        // mesh actually loading (`CImage.cpp:832-834` `m_hasPuppetMesh` —
+        // `effective_blending` in renderer.rs). The plan must therefore leave
+        // the relocated Normal in place even when a puppet is declared.
+        let mut img = image(vec![
+            pass("base", Blending::Translucent),
+            pass("effect", Blending::Normal),
+        ]);
+        img.model = Some(kirie_scene::material::ModelFile {
+            material: "materials/女.json".into(),
+            solidlayer: false,
+            fullscreen: false,
+            passthrough: false,
+            autosize: true,
+            nopadding: false,
+            width: None,
+            height: None,
+            puppet: Some("models/女_puppet.mdl".into()),
+        });
+        let plan = plan_image(&img, true);
+        assert_eq!(plan.passes[0].blending, Blending::Normal, "no puppet exception");
+        assert_eq!(plan.passes[1].blending, Blending::Translucent, "relocated to last");
     }
 }

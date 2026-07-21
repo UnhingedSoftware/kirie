@@ -848,7 +848,7 @@ fn build_object(
         match pipeline::build_pass(
             device,
             FBO_FORMAT,
-            plan_pass.blending,
+            effective_blending(is_puppet_base, plan_pass.blending),
             plan_pass.cull,
             kirie_scene::material::DepthMode::Disabled,
             kirie_scene::material::DepthMode::Disabled,
@@ -1166,7 +1166,7 @@ fn build_object(
             output,
             geometry,
             model_matrix,
-            blending: raw_pass.blending,
+            blending: effective_blending(is_puppet_base, raw_pass.blending),
             tex_resolution,
             params_vs,
             params_fs,
@@ -2166,6 +2166,27 @@ fn scene_space_quad(
     ]
 }
 
+/// The blending a pass actually renders with. The base pass of a *loaded*
+/// puppet mesh is forced Translucent — `CImage::setupPasses` does
+/// `pass->setBlendingMode (BlendingMode_Translucent)` on the first pass when
+/// `m_hasPuppetMesh` (`CImage.cpp:832-834`), *after* the §7.1 first→last blend
+/// relocation (`CImage.cpp:789-795`) already set it to Normal. The force is
+/// applied here (not in the pure plan) because it is gated on the puppet `.mdl`
+/// actually parsing, exactly like `m_hasPuppetMesh`: a corrupt puppet falls
+/// back to the flat quad *and* keeps the relocated Normal, as the reference
+/// would. Overlapping puppet triangles need it — Normal (replace) would punch
+/// alpha-0 holes where a transparent margin overdraws an opaque texel.
+fn effective_blending(
+    is_puppet_base: bool,
+    planned: kirie_scene::material::Blending,
+) -> kirie_scene::material::Blending {
+    if is_puppet_base {
+        kirie_scene::material::Blending::Translucent
+    } else {
+        planned
+    }
+}
+
 /// Interleaved `[x, y, z, u, v]` local-space puppet vertices in the reference's
 /// `updatePuppetPositionBuffer` space (`size/2 ± p`, `CImage.cpp:536-540`). Both
 /// puppet paths upload these same local vertices; only the MVP differs. A
@@ -2621,6 +2642,18 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn puppet_base_forces_translucent_blending() {
+        // `CImage.cpp:832-834`: a loaded puppet's first pass is forced
+        // Translucent regardless of what relocation/material left there; every
+        // other pass keeps its planned blending.
+        use kirie_scene::material::Blending;
+        for planned in [Blending::Normal, Blending::Translucent, Blending::Additive] {
+            assert_eq!(effective_blending(true, planned), Blending::Translucent);
+            assert_eq!(effective_blending(false, planned), planned);
+        }
+    }
 
     #[test]
     fn uv_crop_scales_only_uv_columns_into_real_subrect() {
