@@ -27,6 +27,9 @@ web-cef = ["dep:kirie-web", "kirie-web/cef"]
 # `webkit2gtk-4.1`/`libsoup-3.0` via pkg-config at COMPILE time, so this variant
 # only builds on a box with those -dev packages installed.
 web-webview = ["dep:kirie-web", "kirie-web/webview"]
+# VAAPI hardware video decode in kirie-video. Runtime-safe to enable: when no
+# VAAPI device/driver exists, playback degrades to the usual CPU decode path.
+vaapi = ["kirie-video/vaapi"]
 
 [dependencies]
 kirie-formats = { workspace = true }

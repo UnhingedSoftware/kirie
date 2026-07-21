@@ -15,11 +15,14 @@
 //! steady-state loop allocates nothing on either side (SPEC V5 on the
 //! render side).
 //!
-//! Hardware decode (VAAPI) is intentionally absent here: SPEC T11 will
-//! slot a dma-buf import path in right where [`Decoder::convert`] does the
-//! sws_scale + CPU copy today (decode to `AV_PIX_FMT_VAAPI`, export the
-//! surface as dma-buf, import as an external wgpu texture; CPU path kept
-//! as fallback).
+//! Hardware decode (SPEC T11): with the `vaapi` cargo feature, decoder
+//! setup first tries a VAAPI hw device (`crate::hw`); decoded frames then
+//! arrive as VAAPI surfaces and are downloaded to system memory right
+//! before [`Decoder::convert`]'s sws_scale + CPU copy. Every init failure
+//! (no render node, no driver, unsupported codec) degrades to this CPU
+//! path with an info log, so behavior without a VAAPI stack is unchanged.
+//! True zero-copy (export the surface as dma-buf, import as an external
+//! wgpu texture) remains follow-up work.
 
 use std::path::{Path, PathBuf};
 
@@ -94,6 +97,9 @@ pub(crate) struct Decoder {
     /// Consecutive undecodable packets skipped, for log throttling (SPEC
     /// V9: a corrupt run must degrade gracefully, not flood the journal).
     undecodable: u64,
+    /// Consecutive unconvertible frames dropped, same throttling story
+    /// (e.g. a persistently failing VAAPI hw→system download).
+    unconvertible: u64,
     /// Estimated per-frame duration in seconds.
     frame_dur: f64,
     /// Synthesized PTS for streams that provide none.
@@ -105,6 +111,10 @@ pub(crate) struct Decoder {
 struct Converter {
     scaler: Option<scaling::Context>,
     rgb: ffmpeg::frame::Video,
+    /// VAAPI surface → system-memory download state; idle (allocating
+    /// nothing) unless hardware decode actually engaged.
+    #[cfg(feature = "vaapi")]
+    hw: crate::hw::HwDownload,
 }
 
 impl Converter {
@@ -112,6 +122,8 @@ impl Converter {
         Self {
             scaler: None,
             rgb: ffmpeg::frame::Video::empty(),
+            #[cfg(feature = "vaapi")]
+            hw: crate::hw::HwDownload::new(),
         }
     }
 }
@@ -133,9 +145,7 @@ impl Decoder {
             stream.start_time() as f64 * time_base
         };
         let frame_rate = f64::from(stream.avg_frame_rate()).max(0.0);
-        let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
-            .decoder()
-            .video()?;
+        let decoder = open_video_decoder(&stream)?;
         let (width, height) = (decoder.width(), decoder.height());
         if width == 0 || height == 0 {
             return Err(VideoError::InvalidDimensions { width, height });
@@ -167,6 +177,7 @@ impl Decoder {
             decoded: ffmpeg::frame::Video::empty(),
             last_raw: None,
             undecodable: 0,
+            unconvertible: 0,
             frame_dur,
             synth_pts: 0.0,
         })
@@ -254,13 +265,22 @@ impl Decoder {
             match self.decoder.receive_frame(&mut self.decoded) {
                 Ok(()) => match self.convert(converter, recycle) {
                     Ok(frame) => {
+                        self.unconvertible = 0;
                         // Bounded send: blocks when the queue is full,
                         // which is the entire backpressure story (V4/V6).
                         if frames.send(frame).is_err() {
                             return false;
                         }
                     }
-                    Err(err) => tracing::warn!(%err, "dropping unconvertible video frame"),
+                    Err(err) => {
+                        // Throttled like undecodable packets (SPEC V9): a
+                        // persistent failure — e.g. a VAAPI download that
+                        // stops working — must not flood the journal.
+                        self.unconvertible += 1;
+                        if self.unconvertible.is_power_of_two() {
+                            tracing::warn!(%err, count = self.unconvertible, "dropping unconvertible video frame(s)");
+                        }
+                    }
                 },
                 // EAGAIN (needs more input) or EOF (fully drained).
                 Err(_) => return true,
@@ -268,16 +288,28 @@ impl Decoder {
         }
     }
 
-    /// Convert `self.decoded` to a timestamped RGBA frame.
+    /// Convert the frame the decoder just produced to a timestamped RGBA
+    /// frame.
     ///
-    /// T11 (VAAPI) note: this is the exact seam where dma-buf import
-    /// replaces sws_scale + CPU copy.
+    /// T11 (VAAPI) seam: with the `vaapi` feature, frames decoded in
+    /// hardware arrive as VAAPI surfaces and are downloaded to system
+    /// memory (typically NV12) here, then take the same sws RGBA path.
+    /// Zero-copy dma-buf → wgpu import would replace this download + copy
+    /// and is follow-up work.
     fn convert(
         &mut self,
         converter: &mut Converter,
         recycle: &Receiver<Vec<u8>>,
     ) -> Result<DecodedFrame, VideoError> {
-        let (width, height) = (self.decoded.width(), self.decoded.height());
+        #[cfg(feature = "vaapi")]
+        let decoded = match converter.hw.download(&self.decoded)? {
+            Some(sw) => sw,
+            None => &self.decoded,
+        };
+        #[cfg(not(feature = "vaapi"))]
+        let decoded = &self.decoded;
+
+        let (width, height) = (decoded.width(), decoded.height());
         if width == 0 || height == 0 {
             return Err(VideoError::InvalidDimensions { width, height });
         }
@@ -288,14 +320,14 @@ impl Decoder {
         let needs_scaler = match &converter.scaler {
             None => true,
             Some(s) => {
-                s.input().format != self.decoded.format()
+                s.input().format != decoded.format()
                     || s.input().width != width
                     || s.input().height != height
             }
         };
         if needs_scaler {
             converter.scaler = Some(scaling::Context::get(
-                self.decoded.format(),
+                decoded.format(),
                 width,
                 height,
                 Pixel::RGBA,
@@ -321,10 +353,11 @@ impl Decoder {
             // Unreachable by construction; keep V9 (no panic) anyway.
             return Err(VideoError::InvalidDimensions { width, height });
         };
-        scaler.run(&self.decoded, &mut converter.rgb)?;
+        scaler.run(decoded, &mut converter.rgb)?;
 
         // Raw PTS in seconds within the file (best-effort timestamp, then
-        // pts, then synthesized from the frame rate).
+        // pts, then synthesized from the frame rate). Always read off the
+        // decoder's own frame: the VAAPI download copies pixels, not props.
         let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
             Some(ts) => ts as f64 * self.time_base - self.start,
             None => self.synth_pts,
@@ -350,6 +383,38 @@ impl Decoder {
             data,
         })
     }
+}
+
+/// Open the stream's video decoder.
+///
+/// With the `vaapi` feature this first tries a VAAPI hw device (SPEC T11);
+/// any init failure — no render node, no driver, codec without VAAPI
+/// support, open failure — degrades to the plain CPU decoder with an info
+/// log, leaving the no-VAAPI behavior contract untouched.
+fn open_video_decoder(
+    stream: &ffmpeg::format::stream::Stream<'_>,
+) -> Result<ffmpeg::decoder::Video, VideoError> {
+    #[cfg(feature = "vaapi")]
+    {
+        let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
+        match crate::hw::attach_vaapi(&mut context) {
+            Ok(()) => match context.decoder().video() {
+                Ok(decoder) => {
+                    tracing::info!(
+                        "VAAPI device attached; hardware decode enabled for supported profiles"
+                    );
+                    return Ok(decoder);
+                }
+                Err(err) => {
+                    tracing::info!(%err, "VAAPI decoder open failed; falling back to CPU decode");
+                }
+            },
+            Err(err) => tracing::info!(%err, "VAAPI unavailable; using CPU decode"),
+        }
+    }
+    Ok(ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .video()?)
 }
 
 /// Copy the RGBA plane into `buf`, dropping any stride padding so the

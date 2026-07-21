@@ -23,15 +23,24 @@
 //! frames, recycles pixel buffers (no steady-state allocation) and does
 //! zero work while the compositor withholds frame callbacks.
 //!
-//! CPU decode only for now: hardware decode (VAAPI dma-buf import) is
-//! SPEC T11 and slots into the seam marked in `decode.rs`.
+//! CPU decode by default; the `vaapi` cargo feature (SPEC T11) adds VAAPI
+//! hardware decode: decoder setup attaches a hw device, decoded surfaces
+//! are downloaded to system memory (`hw.rs`) and fed to the same RGBA
+//! path. Missing device/driver/codec support degrades to the CPU path at
+//! info level, leaving the no-VAAPI behavior contract untouched. True
+//! zero-copy (dma-buf → imported wgpu texture) is follow-up work.
 
-#![deny(unsafe_code)] // SPEC V2: unsafe reserved for the future dma-buf import (T11).
+// SPEC V2: unsafe is confined to the VAAPI FFI seam (T11) — `hw.rs` alone
+// relaxes this to a module-level allow, with SAFETY comments on every
+// block (rationale in that module's docs).
+#![deny(unsafe_code)]
 
 mod audio;
 mod clock;
 mod decode;
 mod error;
+#[cfg(feature = "vaapi")]
+mod hw;
 mod pacing;
 mod player;
 mod renderer;
