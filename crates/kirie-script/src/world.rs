@@ -196,6 +196,22 @@ impl World {
                         message: msg,
                     });
                 }
+                // `update(value)` must receive the property's CURRENT value —
+                // including writes made by this module's own `init()` (e.g. the
+                // visualizer template's `thisLayer.visible = false`) or another
+                // script, which the host-side `current` cache cannot see. The
+                // layer snapshot in the JS world is the live truth for
+                // layer-backed props; fall back to the cache when the layer
+                // doesn't carry the prop (module keys are "<prop>_<objectId>").
+                let arg = match (*owner, key.rsplit_once('_')) {
+                    (Some(id), Some((prop, _))) => {
+                        match call_ret2(&ctx, "__getLayerProp", (id, prop)) {
+                            Ok(v) if !v.is_undefined() => v,
+                            _ => arg,
+                        }
+                    }
+                    _ => arg,
+                };
                 match call_export_ret(&ctx, key, "update", arg) {
                     Ok(Some(ret)) => {
                         results.push((key.clone(), ScriptValue::from_js(&ret), true));
@@ -359,6 +375,18 @@ fn call_void<'js, A: rquickjs::function::IntoArgs<'js>>(
     f.call::<_, Value>(args)
         .catch(ctx)
         .map(|_| ())
+        .map_err(|e| ScriptError::Internal(e.to_string()))
+}
+
+/// Call a global function returning its raw JS value (for `__getLayerProp`).
+fn call_ret2<'js, A: rquickjs::function::IntoArgs<'js>>(
+    ctx: &Ctx<'js>,
+    name: &str,
+    args: A,
+) -> Result<Value<'js>, ScriptError> {
+    let f: Function = global(ctx, name)?;
+    f.call::<_, Value>(args)
+        .catch(ctx)
         .map_err(|e| ScriptError::Internal(e.to_string()))
 }
 

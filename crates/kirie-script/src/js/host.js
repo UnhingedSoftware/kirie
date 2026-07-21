@@ -187,6 +187,15 @@ function __makeLayer(id) {
 }
 globalThis.__makeLayer = __makeLayer;
 globalThis.__bindThisLayer = function (id) { globalThis.thisLayer = (id == null) ? undefined : __makeLayer(id); };
+// Live layer-prop read for the tick loop: a property script's update(value)
+// must receive the CURRENT value — including writes other exports just made
+// (init()'s `thisLayer.visible = false`), which the host-side cache misses.
+globalThis.__getLayerProp = function (id, name) {
+  var l = __layerById(id);
+  if (!l || !(name in l)) return undefined;
+  var v = l[name];
+  return (v && v.slice) ? v.slice() : v;
+};
 
 // ---- thisScene (docs §6.2) ------------------------------------------------
 function __sceneVecGetter(key) { return function () { var v = __host.scene[key]; return new Vec3(v[0], v[1], v[2]); }; }
