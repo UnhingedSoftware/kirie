@@ -8,11 +8,14 @@
 //!
 //! 1. Open the `scene.pkg` container ([`OwnedPkg`]).
 //! 2. Build the [`PropertyBag`] from `project.json` (user-property defaults).
-//! 3. Parse `scene.json` out of the pkg and [`SceneModel::resolve`] it.
-//! 4. Load referenced material/effect/model/particle assets against a
+//! 3. Consult the kirie-bake bundle cache ([`super::bundle`], Phase 3.1) — a
+//!    hit yields the resolved [`SceneModel`] directly and skips steps 4–5.
+//! 4. Parse `scene.json` out of the pkg and [`SceneModel::resolve`] it.
+//! 5. Load referenced material/effect/model/particle assets against a
 //!    [`CompositeSource`] — the pkg first, then the shared WE builtin-assets
-//!    dir (docs/render-architecture.md §10 asset lookup).
-//! 5. Build the [`SceneRenderer`].
+//!    dir (docs/render-architecture.md §10 asset lookup) — then bake the
+//!    resolved model into the bundle cache (inline, best-effort).
+//! 6. Build the [`SceneRenderer`].
 //!
 //! Best-effort per SPEC.md §V9 and the P4 corpus-render gate: a scene whose
 //! objects all skip (unsupported object kinds, all-invisible after property
@@ -150,7 +153,12 @@ pub fn load_workshop_scene(
     // the corpus loader and the C++ tolerance of a scene without user props.
     // Keep the parsed project so we can enumerate its declared property names
     // for `engine.userProperties` (SceneScript §6.1) — the bag has no iterator.
-    let project = Project::from_path(scene_dir.join("project.json")).ok();
+    // The raw bytes are kept too: they are one input of the bundle-cache key.
+    let project_bytes = std::fs::read(scene_dir.join("project.json")).ok();
+    let project = project_bytes.as_deref().and_then(|bytes| {
+        let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+        Project::from_value(value).ok()
+    });
     let mut bag = project
         .as_ref()
         .map(PropertyBag::from_project)
@@ -181,24 +189,54 @@ pub fn load_workshop_scene(
         })
         .unwrap_or_default();
 
-    let scene = {
-        let bytes = pkg
-            .read_name(b"scene.json")
-            .map_err(|e| SceneLoadError::SceneJson(e.to_string()))?;
-        Scene::from_slice(bytes).map_err(|e| SceneLoadError::Parse(e.to_string()))?
-    };
-
-    let mut model = SceneModel::resolve(scene, &bag);
     let source = CompositeSource {
         pkg: &pkg,
         assets: assets_dir,
     };
-    // Asset load problems are non-fatal (missing textures/shaders degrade to
-    // per-object skips inside the renderer); surface them at trace level.
-    let problems = model.load_assets(&source, &bag);
-    for p in &problems {
-        tracing::debug!(path = %p.path, reason = %p.reason, "scene asset problem");
-    }
+
+    // Phase 3.1: consult the prebaked bundle cache before doing any scene work.
+    // The key folds in the pkg + project.json content AND the resolved property
+    // set (the bundle stores the RESOLVED model — see scene/bundle.rs). A hit
+    // skips scene.json parse, property resolution and every asset-JSON load; a
+    // miss builds the model as before and bakes it inline, best-effort. Shader
+    // translation and texture decode still run in SceneRenderer::new either way
+    // (Phase 3.4: shader warm-load is covered by kirie-shader's own
+    // content-addressed `.kirie-cache` set above, which the bundle path leaves
+    // untouched; folding translated modules into the bundle awaits a
+    // shader-provider seam in pipeline.rs and the shader-cache rekey).
+    let bundle_cache = kirie_bake::Cache::open_default().ok();
+    let bundle_src = super::bundle::bundle_source(
+        pkg.as_bytes(),
+        project_bytes.as_deref(),
+        assets_dir,
+        &user_props,
+    );
+    let baked = bundle_cache
+        .as_ref()
+        .and_then(|cache| super::bundle::try_load_model(cache, &bundle_src));
+
+    let model = if let Some(model) = baked {
+        model
+    } else {
+        let scene = {
+            let bytes = pkg
+                .read_name(b"scene.json")
+                .map_err(|e| SceneLoadError::SceneJson(e.to_string()))?;
+            Scene::from_slice(bytes).map_err(|e| SceneLoadError::Parse(e.to_string()))?
+        };
+
+        let mut model = SceneModel::resolve(scene, &bag);
+        // Asset load problems are non-fatal (missing textures/shaders degrade to
+        // per-object skips inside the renderer); surface them at trace level.
+        let problems = model.load_assets(&source, &bag);
+        for p in &problems {
+            tracing::debug!(path = %p.path, reason = %p.reason, "scene asset problem");
+        }
+        if let Some(cache) = &bundle_cache {
+            super::bundle::store_model(cache, &bundle_src, &model);
+        }
+        model
+    };
 
     match SceneRenderer::new(target, &model, &source, options, audio, &user_props) {
         Ok(renderer) => Ok(Box::new(renderer)),
