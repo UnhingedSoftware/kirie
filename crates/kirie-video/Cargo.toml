@@ -12,6 +12,14 @@ repository.workspace = true
 # at build time. Enabled via kirie's `portable` feature; off by default (dynamic
 # link, fast dev/CI builds).
 static-ffmpeg = ["ffmpeg-next/build"]
+# VAAPI hardware video decode (SPEC T11): attach a VAAPI hw device at decoder
+# open and download decoded surfaces to system memory for the existing RGBA
+# conversion path. Degrades to CPU decode (info log) when no render node/
+# driver/codec support exists, so behavior without a VAAPI stack is unchanged.
+# Holds the crate's only unsafe code, isolated in src/hw.rs (module-level
+# allow with SAFETY comments; the crate stays deny(unsafe_code)). Off by
+# default. True zero-copy dma-buf → wgpu import is follow-up work.
+vaapi = []
 
 [dependencies]
 kirie-platform = { path = "../kirie-platform" }
