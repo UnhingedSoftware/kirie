@@ -62,6 +62,12 @@ struct AppState {
     /// Live-swap context (render-command sender + build params), set once the
     /// platform is up. `None` until then (and on X11) → `bg`/`preload` error.
     swap: Arc<Mutex<Option<SwapCtx>>>,
+    /// Debounce generation for property-triggered rebuild-swaps: each live
+    /// `property` bumps it; a scheduled rebuild only fires if it is still the
+    /// newest, so a slider drag coalesces into one rebuild (doc §4.9 — the C++
+    /// engine reloads the wallpaper on `setProperty`; the rebuild-swap is the
+    /// no-black equivalent).
+    prop_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
 /// Handle to the running applier thread.
@@ -103,6 +109,7 @@ impl IpcApp {
             muted,
             properties: BTreeMap::new(),
             swap: swap.clone(),
+            prop_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
         std::thread::Builder::new()
             .name("kirie-ipc-app".into())
@@ -337,17 +344,55 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             // ...and applied LIVE to the running renderer on `screen` (a real
             // monitor). `stage` maps here with an empty screen, which targets no
             // output, so it only records (no live effect) — exactly its role.
-            if let Some(cmd_tx) = state
+            let sc = state
                 .swap
                 .lock()
                 .ok()
-                .and_then(|g| g.as_ref().map(|s| s.cmd_tx.clone()))
-            {
+                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
+            if let Some((cmd_tx, build_ctx)) = sc {
                 let _ = cmd_tx.send(RenderCommand::SetProperty {
                     screen: screen.clone(),
                     key,
                     value,
                 });
+                // The instant path above covers direct bindings, camera, general
+                // and script `applyUserProperties` handlers — but a scene whose
+                // scripts capture `engine.userProperties` at init only re-reads
+                // them on a reload, which is what the C++ engine does on every
+                // `setProperty`. Match it with a DEBOUNCED rebuild-swap: same
+                // end-state as the reference reload, no relaunch, no black gap,
+                // and a slider drag coalesces to one rebuild. Skipped for `stage`
+                // (empty screen: record-only by design) and web (no build_fn —
+                // the reference itself crashes CEF reloading web on property).
+                if !screen.is_empty()
+                    && let Some(path) = state.screens.get(&screen).and_then(|e| e.bg.clone())
+                {
+                    use std::sync::atomic::Ordering;
+                    let props: Vec<(String, String)> = state
+                        .properties
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    let generation = state.prop_gen.fetch_add(1, Ordering::SeqCst) + 1;
+                    let gen_slot = state.prop_gen.clone();
+                    let screen_c = screen.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(350));
+                        if gen_slot.load(Ordering::SeqCst) != generation {
+                            return; // superseded by a newer property change
+                        }
+                        if let Some(build) = build_ctx.build_fn(screen_c.clone(), &path, props) {
+                            // Distinct key: a preload stashed under the plain path
+                            // was built with the OLD props — never serve it here.
+                            let key = format!("{}#props", path.to_string_lossy());
+                            let _ = cmd_tx.send(RenderCommand::Swap {
+                                screen: screen_c,
+                                key,
+                                build,
+                            });
+                        }
+                    });
+                }
             }
             if state.screens.get(&screen).is_some_and(|e| e.bg.is_some()) {
                 CommandOutcome::Ok
