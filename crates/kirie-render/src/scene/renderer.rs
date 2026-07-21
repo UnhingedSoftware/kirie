@@ -137,6 +137,19 @@ struct ObjectGpu {
     /// Ping-pong index holding the final composite after the full chain (the
     /// view dependents bind). `None` when the object has no composite FBOs.
     final_front: Option<usize>,
+    /// The layer texture's animated atlas, when the base material's slot-0
+    /// `.tex` is multi-frame. The first (layer-sampling) pass drives its
+    /// `g_Texture0Translation`/`g_Texture0Rotation` builtins from this per
+    /// frame — the reference's per-pass texture-animation state
+    /// (`CPass.cpp:287-306`). Page streaming lives on [`SceneRenderer`].
+    atlas: Option<Arc<super::texture::AtlasTexture>>,
+}
+
+/// One animated atlas plus the page currently uploaded into its bound texture
+/// (see [`SceneRenderer::atlas_textures`]).
+struct AtlasSlot {
+    atlas: Arc<super::texture::AtlasTexture>,
+    uploaded_page: usize,
 }
 
 /// A script-created runtime layer (`thisScene.createLayer`, docs §6.2) — the
@@ -202,6 +215,14 @@ pub struct SceneRenderer {
     /// render tick (the reference plays these — a frozen first frame was the
     /// 3445942378 divergence).
     video_textures: Vec<super::texture::VideoTexture>,
+    /// Animated `.tex` atlases (docs/format-tex.md §8-§9): per render tick the
+    /// current frame is selected by the reference's frametime walk
+    /// (`CPass.cpp:348-378`) and, for multi-page (gif-style) textures, the
+    /// frame's page streams into the one texture every pass bound — the wgpu
+    /// equivalent of the reference's `textureID[frameNumber]` bind
+    /// (`CPass.cpp:380-387`). `uploaded_page` tracks the page currently in the
+    /// texture so unchanged frames upload nothing (SPEC.md §V5).
+    atlas_textures: Vec<AtlasSlot>,
     /// Surface-normalized pointer, top-left origin (T26; platform-fed). Centered
     /// until the platform knows the cursor — the old hardcoded default.
     pointer: [f32; 2],
@@ -615,6 +636,15 @@ impl SceneRenderer {
             sprite_scratch: Vec::new(),
             pack_scratch: Vec::new(),
             video_textures: registry.take_videos(),
+            atlas_textures: registry
+                .take_atlases()
+                .into_iter()
+                .map(|atlas| AtlasSlot {
+                    atlas,
+                    // `load` uploaded page 0 (the first page) at build time.
+                    uploaded_page: 0,
+                })
+                .collect(),
             pointer: [0.5, 0.5],
             pointer_last: [0.5, 0.5],
             parallax_disp: [0.0, 0.0],
@@ -798,6 +828,12 @@ fn build_object(
     let layer_tex = base_layer_texture(image, source, registry);
     let layer_reads_scene = base_layer_name(image).as_deref().is_some_and(is_scene_rt);
     let mut reads_scene = layer_reads_scene;
+    // The layer texture's animated atlas, if `load` registered one for its
+    // name (multi-frame `.tex`). Drives the first pass's `g_Texture0*` frame
+    // placement builtins per frame (`CPass.cpp:287-306`, docs §8.3).
+    let layer_atlas = base_layer_name(image)
+        .filter(|n| !n.starts_with("_rt_") && !n.starts_with("_alias_"))
+        .and_then(|n| registry.atlas_for(&n));
 
     // The layer's own transform (docs §7.1: the `sceneSpacePosition` quad is
     // built at the *scaled* size, rotated about its center by the negated Z
@@ -1193,6 +1229,7 @@ fn build_object(
         offscreen_donor,
         final_front: comp_front,
         parallax_depth: image.parallax_depth.value,
+        atlas: layer_atlas,
     })
 }
 
@@ -1381,6 +1418,49 @@ impl Renderer for SceneRenderer {
             }
         }
 
+        // Advance animated `.tex` atlases (docs/format-tex.md §8-§9): select
+        // the frame with the reference's `fmod(renderTime, Σ frametime)` walk
+        // (`CPass.cpp:348-378`) and, when the frame lives on another page
+        // (gif-style multi-image .tex), stream that page into the one texture
+        // every pass bound — the wgpu stand-in for the reference's
+        // `glBindTexture(textureID[frameNumber])` (`CPass.cpp:380-387`).
+        // Single-page spritesheets upload nothing here; their placement rides
+        // the `g_Texture0Translation`/`g_Texture0Rotation` builtins instead.
+        for slot in &mut self.atlas_textures {
+            let frame = slot.atlas.placement_at(self.elapsed);
+            if frame.page == slot.uploaded_page {
+                continue;
+            }
+            let Some(page) = slot.atlas.pages.get(frame.page) else {
+                continue; // single-page atlas (no CPU pages retained)
+            };
+            let gpu = &slot.atlas.gpu;
+            // Registration guarantees uniform page dims; guard anyway (V9).
+            if (page.width, page.height) != (gpu.width, gpu.height) {
+                continue;
+            }
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &gpu.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &page.pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(4 * page.width),
+                    rows_per_image: Some(page.height),
+                },
+                wgpu::Extent3d {
+                    width: page.width,
+                    height: page.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+            slot.uploaded_page = frame.page;
+        }
+
         // Sweep 0 — dependency donors (docs §5.6): render their image-space
         // composites FIRST, unconditionally (they are invisible by design), so
         // dependents sample this frame's content. Their passes only write their
@@ -1398,6 +1478,7 @@ impl Renderer for SceneRenderer {
                     self.ambient,
                     self.skylight,
                     time,
+                    self.elapsed,
                     texel,
                     audio,
                     pack_scratch,
@@ -1438,6 +1519,7 @@ impl Renderer for SceneRenderer {
                         self.ambient,
                         self.skylight,
                         time,
+                        self.elapsed,
                         texel,
                         audio,
                         pack_scratch,
@@ -1859,6 +1941,7 @@ fn apply_runtime_updates(
 /// object mutably while reading the renderer's other fields.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn draw_image_object(
     encoder: &mut wgpu::CommandEncoder,
     queue: &wgpu::Queue,
@@ -1868,6 +1951,7 @@ fn draw_image_object(
     ambient: [f32; 3],
     skylight: [f32; 3],
     time: f32,
+    elapsed: f64,
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
     scratch: &mut Vec<u8>,
@@ -1886,7 +1970,22 @@ fn draw_image_object(
     } else {
         screen_mvp
     };
-    for pass in &object.passes {
+    // Animated-atlas frame placement for the layer texture (the reference's
+    // per-pass `resolveTextureAnimationState`, `CPass.cpp:287-306, 348-378`):
+    // `g_Texture0Translation = frame origin / page dims`, `g_Texture0Rotation =
+    // frame axes / page dims`. Only the pass that samples the layer texture
+    // (the first pass — every later pass's texture0 is a composite FBO, which
+    // the reference reports as not-animated) receives the state; SPRITESHEET
+    // shaders remap `v_TexCoord` from it (`genericimage2.vert:99-101`).
+    let atlas_anim = object.atlas.as_ref().map(|a| {
+        let f = a.placement_at(elapsed);
+        (f.translation, f.axes)
+    });
+    for (pass_index, pass) in object.passes.iter().enumerate() {
+        let (t0_translation, t0_rotation) = match (pass_index, &atlas_anim) {
+            (0, Some((t, r))) => (*t, *r),
+            _ => ([0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
+        };
         // Per-frame builtins for this pass.
         let mvp = match pass.geometry {
             // Scene-space geometry (flat quad or scene-space puppet mesh) maps
@@ -1940,8 +2039,8 @@ fn draw_image_object(
             model: pass.model_matrix,
             view_projection: matrix::IDENTITY,
             eye: [0.0, 0.0, 1000.0],
-            texture0_translation: [0.0, 0.0],
-            texture0_rotation: [0.0, 0.0, 0.0, 0.0],
+            texture0_translation: t0_translation,
+            texture0_rotation: t0_rotation,
             texture_resolution: pass.tex_resolution,
             // Live audio bands (mono; Left == Right, filled by `components`).
             // Silent (zeros) when no capture is running (docs §8.3).
@@ -2231,15 +2330,12 @@ fn create_puppet_index_buffer(
 /// (docs §7.1). Base UVs run 0..1; after this they run 0..crop, so sampling the
 /// padded `.tex` page hits only the real image and the padding never composites.
 /// `g_TextureNResolution` value for a texture: `(texW, texH, realW, realH)`,
-/// where `real = tex × uv_crop` recovers the NPOT real size baked into the page
-/// (docs/format-tex.md §8.1). Shaders derive the padding crop as `real/tex`.
+/// where `real` is the logical content size — the NPOT header crop for stills,
+/// `gifWidth/gifHeight` for animated atlases — exactly the reference's
+/// `CTexture::setupResolution` (`CTexture.cpp:149-153`; docs/format-tex.md
+/// §8.1). Shaders derive the padding crop as `real/tex`.
 pub(super) fn tex_res(t: &super::texture::GpuTexture) -> [f32; 4] {
-    [
-        t.width as f32,
-        t.height as f32,
-        t.width as f32 * t.uv_crop[0],
-        t.height as f32 * t.uv_crop[1],
-    ]
+    [t.width as f32, t.height as f32, t.real_size[0], t.real_size[1]]
 }
 
 /// Scale a quad's UV columns (indices 3, 4) into a texture's real sub-rect —
