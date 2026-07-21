@@ -17,13 +17,19 @@
 //! (`_rt_HalfCompoBuffer*`) instead of the 1×1 white default. The renderer
 //! allocates the named FBOs and threads the composite front (§11.2).
 //!
+//! Effect `command:"copy"` passes ARE modeled (`CImage.cpp:683-718`): a
+//! material-less pass with `command:"copy"` plans the reference's virtual
+//! `commands/copy` material pass — texture slot 0 = the `source` FBO, routed at
+//! the `target` FBO — so the draw is a sampling blit between the named scratch
+//! buffers (sizes may differ; the quad resamples). `command:"swap"` is rejected
+//! exactly like the reference (`CImage.cpp:699` "Only copy command is
+//! supported").
+//!
 //! Simplifications vs the reference, each a documented seam (SPEC.md §V10):
-//! effect `command:"copy"`/swap buffer commands are not yet modeled — an effect
-//! pass with no material is skipped with a trace note. Puppet meshes and
-//! `colorBlendMode` extra passes are likewise deferred to the renderer's
-//! object-skip path.
+//! `colorBlendMode` extra passes are deferred to the renderer's object-skip
+//! path. Puppet meshes are handled via the [`Geometry`] roles below.
 
-use kirie_scene::material::{Blending, CullMode, DepthMode, Pass};
+use kirie_scene::material::{Blending, CullMode, DepthMode, Pass, PassCommand};
 use kirie_scene::object::{ImageObject, PassOverride};
 
 /// Where a planned pass reads its `g_Texture0` from.
@@ -145,6 +151,35 @@ struct SrcPass {
     binds: Vec<(u32, String)>,
 }
 
+/// The shader base name of the synthesized `command:"copy"` blit pass. The
+/// reference registers `shaders/commands/copy.vert/.frag` in its virtual asset
+/// filesystem (`WallpaperApplication.cpp:165-182`) — no on-disk container has
+/// them, so the renderer binds embedded sources when it sees this name.
+pub const COPY_COMMAND_SHADER: &str = "commands/copy";
+
+/// Synthesize the virtual `commands/copy` pass for a material-less effect pass
+/// with `command:"copy"` (`CImage.cpp:704-718`): blending Normal, no cull, no
+/// depth, texture slot 0 = the `source` FBO name, routed at the `target` FBO.
+/// Drawing the pass-space quad into the target while sampling the source is
+/// the reference's copy — a blit that also handles differing FBO sizes.
+fn copy_command_pass(source: &str, target: &str) -> SrcPass {
+    SrcPass {
+        pass: Pass {
+            blending: Blending::Normal,
+            cullmode: CullMode::NoCull,
+            depthtest: DepthMode::Disabled,
+            depthwrite: DepthMode::Disabled,
+            shader: COPY_COMMAND_SHADER.to_owned(),
+            textures: vec![Some(source.to_owned())],
+            usertextures: vec![],
+            combos: Default::default(),
+            constantshadervalues: Default::default(),
+        },
+        target: Some(target.to_owned()),
+        binds: Vec::new(),
+    }
+}
+
 /// The base material's passes (the layer's own draw, before any effect).
 fn base_passes(image: &ImageObject) -> Vec<SrcPass> {
     image
@@ -174,14 +209,36 @@ fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
             continue; // §7.1: `visible:false` effects skipped.
         }
         let Some(file) = &effect.resolved else { continue };
-        for (i, epass) in file.passes.iter().enumerate() {
-            let Some(mat) = &epass.resolved else {
-                if epass.command.is_some() {
-                    tracing::debug!(effect = %effect.file, "effect command pass not yet modeled; skipped");
+        // Per-position overrides pair with *material* passes only — a buffer
+        // command pass never consumes one (`CImage.cpp:719-736`: the reference
+        // advances `curOverride` in the material branch alone).
+        let mut ov_next = 0usize;
+        for epass in &file.passes {
+            // A pass without a material must be a buffer command
+            // (`CImage.cpp:683-718`): only `copy` with both `source` and
+            // `target` is supported; `swap` and malformed commands are
+            // rejected exactly like the reference (`CImage.cpp:684-701`).
+            if epass.material.is_none() {
+                match (&epass.command, &epass.source, &epass.target) {
+                    (Some(PassCommand::Copy), Some(source), Some(target)) => {
+                        out.push(copy_command_pass(source, target));
+                    }
+                    _ => {
+                        tracing::debug!(
+                            effect = %effect.file,
+                            command = ?epass.command,
+                            "unsupported effect command pass skipped (only copy; CImage.cpp:699)"
+                        );
+                    }
                 }
                 continue;
+            }
+            let ov = effect.passes.get(ov_next);
+            ov_next += 1;
+            let Some(mat) = &epass.resolved else {
+                tracing::debug!(effect = %effect.file, "effect pass material unresolved; skipped");
+                continue;
             };
-            let ov = effect.passes.get(i);
             // The effect-file `bind`s route named FBOs / the composite `previous`
             // into texture slots (§11.2). Only the first material pass of a multi
             // -pass material inherits them (the reference binds per effect pass).
@@ -472,6 +529,130 @@ mod tests {
         assert_eq!(plan.passes[2].input, PassInput::Fbo(1));
         assert_eq!(plan.passes[2].output, PassOutput::Scene);
         assert_eq!(plan.passes[2].geometry, Geometry::Scene);
+    }
+
+    /// A visible effect whose resolved file has exactly `epasses`.
+    fn effect_of(epasses: Vec<kirie_scene::material::EffectPass>) -> kirie_scene::object::Effect {
+        kirie_scene::object::Effect {
+            file: "effects/test/effect.json".into(),
+            id: 1,
+            name: "test".into(),
+            visible: UserSetting::literal(true),
+            passes: vec![],
+            resolved: Some(kirie_scene::material::EffectFile {
+                name: String::new(),
+                description: String::new(),
+                group: String::new(),
+                preview: String::new(),
+                dependencies: vec![],
+                fbos: vec![],
+                passes: epasses,
+            }),
+        }
+    }
+
+    /// An effect-file pass carrying a resolved single-pass material.
+    fn material_epass(shader: &str, target: Option<&str>) -> kirie_scene::material::EffectPass {
+        kirie_scene::material::EffectPass {
+            material: Some(format!("materials/effects/{shader}.json")),
+            resolved: Some(Material {
+                passes: vec![pass(shader, Blending::Normal)],
+            }),
+            bind: vec![],
+            command: None,
+            source: None,
+            target: target.map(str::to_owned),
+        }
+    }
+
+    /// A material-less buffer-command pass (`command`/`source`/`target`).
+    fn command_epass(
+        command: kirie_scene::material::PassCommand,
+        source: &str,
+        target: &str,
+    ) -> kirie_scene::material::EffectPass {
+        kirie_scene::material::EffectPass {
+            material: None,
+            resolved: None,
+            bind: vec![],
+            command: Some(command),
+            source: Some(source.to_owned()),
+            target: Some(target.to_owned()),
+        }
+    }
+
+    #[test]
+    fn copy_command_plans_the_virtual_blit_pass() {
+        // The motionblur shape (`assets/effects/motionblur/effect.json`):
+        // accumulate into FullCompoBuffer2, `command:"copy"` it back into
+        // FullCompoBuffer1, then combine. The copy must become the reference's
+        // virtual `commands/copy` pass — texture slot 0 = source, routed at
+        // target, blending Normal, no binds (`CImage.cpp:683-718`).
+        let mut img = image(vec![pass("base", Blending::Translucent)]);
+        img.effects = vec![effect_of(vec![
+            material_epass("motionblur_accumulation", Some("_rt_FullCompoBuffer2")),
+            command_epass(PassCommand::Copy, "_rt_FullCompoBuffer2", "_rt_FullCompoBuffer1"),
+            material_epass("motionblur_combine", None),
+        ])];
+        let plan = plan_image(&img, true);
+        assert_eq!(plan.passes.len(), 4, "base + accumulate + copy + combine");
+        let copy = &plan.passes[2];
+        assert_eq!(copy.shader, COPY_COMMAND_SHADER);
+        assert_eq!(
+            copy.pass.textures,
+            vec![Some("_rt_FullCompoBuffer2".to_owned())],
+            "slot 0 must be the copy source (`CImage.cpp:711`)"
+        );
+        assert_eq!(copy.target.as_deref(), Some("_rt_FullCompoBuffer1"));
+        assert_eq!(copy.blending, Blending::Normal);
+        assert!(copy.binds.is_empty());
+    }
+
+    #[test]
+    fn swap_command_pass_is_rejected_like_the_reference() {
+        // `CImage.cpp:699`: "Only copy command is supported for pass without
+        // material" — a swap plans nothing; the chain stays base-only.
+        let mut img = image(vec![pass("base", Blending::Normal)]);
+        img.effects = vec![effect_of(vec![command_epass(
+            PassCommand::Swap,
+            "_rt_SmokeDye1",
+            "_rt_SmokeDye2",
+        )])];
+        let plan = plan_image(&img, true);
+        assert_eq!(plan.passes.len(), 1, "swap contributes no pass");
+    }
+
+    #[test]
+    fn command_passes_do_not_consume_pass_overrides() {
+        // Overrides pair with material passes only (`CImage.cpp:719-736`):
+        // with file passes [material, copy, material] and overrides [o0, o1],
+        // the second material pass must receive o1, not the copy's slot.
+        use kirie_scene::object::PassOverride;
+        let mut img = image(vec![pass("base", Blending::Normal)]);
+        let mut effect = effect_of(vec![
+            material_epass("accumulate", Some("_rt_FullCompoBuffer2")),
+            command_epass(PassCommand::Copy, "_rt_FullCompoBuffer2", "_rt_FullCompoBuffer1"),
+            material_epass("combine", None),
+        ]);
+        let ov = |v: i64| PassOverride {
+            id: -1,
+            combos: [("MARK".to_owned(), v)].into_iter().collect(),
+            constantshadervalues: Default::default(),
+            textures: vec![],
+            usertextures: vec![],
+        };
+        effect.passes = vec![ov(1), ov(2)];
+        img.effects = vec![effect];
+        let plan = plan_image(&img, true);
+        assert_eq!(plan.passes.len(), 4);
+        assert_eq!(plan.passes[1].pass.combos.get("MARK"), Some(&1));
+        assert_eq!(
+            plan.passes[3].pass.combos.get("MARK"),
+            Some(&2),
+            "the combine pass takes the second override even though the copy \
+             command sits between the material passes"
+        );
+        assert!(plan.passes[2].pass.combos.is_empty(), "copy takes no override");
     }
 
     #[test]
