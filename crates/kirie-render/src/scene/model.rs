@@ -357,6 +357,8 @@ pub(super) fn draw_model(
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
     scratch: &mut Vec<u8>,
+    pointer: [f32; 2],
+    pointer_last: [f32; 2],
 ) {
     let (fov, near, far) = clamp_camera(camera.fov.value, camera.nearz, camera.farz);
     let projection = matrix::perspective(fov.to_radians(), aspect, near, far);
@@ -416,8 +418,8 @@ pub(super) fn draw_model(
             color: [1.0, 1.0, 1.0, 1.0],
             ambient,
             skylight,
-            pointer: [0.5, 0.5],
-            pointer_last: [0.5, 0.5],
+            pointer,
+            pointer_last,
             texel_size: texel,
             mvp,
             mvp_inverse: None,
@@ -643,6 +645,8 @@ mod tests {
             [1.0 / w as f32, 1.0 / h as f32],
             None,
             &mut Vec::new(),
+            [0.5, 0.5],
+            [0.5, 0.5],
         );
         queue.submit(Some(enc.finish()));
 
