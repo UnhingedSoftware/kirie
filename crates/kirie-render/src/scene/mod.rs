@@ -15,6 +15,7 @@
 //! - [`texture`] — `.tex` upload, the default white texture, name resolution.
 //! - [`extras`] — non-image object compositing: particles + text (docs §7.3-4).
 //! - [`model`] — 3D MODEL object compositing: `.mdl` meshes (docs §7.2).
+//! - `bundle` — kirie-bake prebaked-bundle cache glue for the load path.
 //! - [`fbo`] — the resize-stable FBO pool (docs §6; SPEC.md §V5).
 //! - [`renderer`] — [`SceneRenderer`], the per-frame compositor.
 
@@ -26,6 +27,7 @@ pub mod matrix;
 pub mod plan;
 pub mod uniforms;
 
+mod bundle;
 pub mod fbo;
 pub mod load;
 pub mod model;
