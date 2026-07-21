@@ -129,6 +129,9 @@ struct ObjectGpu {
     /// ping-pong FIRST each frame — even when invisible — and never to the
     /// scene; dependents bind `_rt_imageLayerComposite_<id>_a/b` from it.
     offscreen_donor: bool,
+    /// Per-layer parallax depth (`parallaxdepth`, docs §7.1): the layer's mvp
+    /// shifts by `(depth + amount) · displacement · scene_w` (CImage.cpp:1173).
+    parallax_depth: [f32; 2],
     // (video-backed textures live on SceneRenderer, not per object — one .tex
     // may be shared by several layers.)
     /// Ping-pong index holding the final composite after the full chain (the
@@ -172,6 +175,14 @@ pub struct SceneRenderer {
     /// render tick (the reference plays these — a frozen first frame was the
     /// 3445942378 divergence).
     video_textures: Vec<super::texture::VideoTexture>,
+    /// Surface-normalized pointer, top-left origin (T26; platform-fed). Centered
+    /// until the platform knows the cursor — the old hardcoded default.
+    pointer: [f32; 2],
+    /// Previous frame's pointer (`g_PointerPositionLast`).
+    pointer_last: [f32; 2],
+    /// Eased camera-parallax displacement (`CScene::m_parallaxDisplacement`):
+    /// `mix(disp, (pointer-0.5)·amount·influence, clamp(delay·dt, 0, 1))`.
+    parallax_disp: [f32; 2],
     /// The shared text pipeline, built only when the scene has drawable text.
     text_pipeline: Option<TextPipeline>,
     scene_fbo: Fbo,
@@ -563,6 +574,9 @@ impl SceneRenderer {
             sprite_scratch: Vec::new(),
             pack_scratch: Vec::new(),
             video_textures: registry.take_videos(),
+            pointer: [0.5, 0.5],
+            pointer_last: [0.5, 0.5],
+            parallax_disp: [0.0, 0.0],
             text_pipeline,
             scene_fbo,
             scene_snapshot,
@@ -1130,6 +1144,7 @@ fn build_object(
         reads_scene,
         offscreen_donor,
         final_front: comp_front,
+        parallax_depth: image.parallax_depth.value,
     })
 }
 
@@ -1169,7 +1184,7 @@ impl Renderer for SceneRenderer {
         // JS never touches these buffers). Frame-callback driven, so an occluded
         // output that gets no callbacks never ticks (V6 groundwork).
         if let Some(script) = &mut self.script {
-            let updates = script.tick(dt, spectrum.as_deref());
+            let updates = script.tick(dt, spectrum.as_deref(), self.pointer);
             if !updates.is_empty() {
                 // Keep the ancestor-visibility map live so a script hiding/showing
                 // a group also gates/ungates its descendants (docs §7.1).
@@ -1256,6 +1271,28 @@ impl Renderer for SceneRenderer {
         // Reused UBO-pack buffer (disjoint field from `items` below), so no pass
         // allocates its `_WEGlobals` bytes each frame (SPEC §V5).
         let pack_scratch = &mut self.pack_scratch;
+        // Pointer + parallax snapshots for the draw loops (disjoint fields).
+        let pointer = self.pointer;
+        let pointer_last = self.pointer_last;
+        let parallax = (
+            self.parallax_disp,
+            self.general.cameraparallaxamount.value,
+            self.proj_w as f32,
+        );
+
+        // Pointer rollover (`g_PointerPositionLast`) + camera parallax easing
+        // (CScene::renderFrame): `disp = mix(disp, (mouse-0.5)·amount·influence,
+        // clamp(delay·dt, 0, 1))` — `delay` is a rate despite the name.
+        self.pointer_last = self.pointer;
+        if self.general.cameraparallax.value {
+            let amount = self.general.cameraparallaxamount.value;
+            let influence = self.general.cameraparallaxmouseinfluence.value;
+            let t = (self.general.cameraparallaxdelay.value * dt).clamp(0.0, 1.0);
+            for axis in 0..2 {
+                let target = (self.pointer[axis] - 0.5) * amount * influence;
+                self.parallax_disp[axis] += (target - self.parallax_disp[axis]) * t;
+            }
+        }
 
         // Stream video-backed `.tex` frames (docs §10): drain what the decoder
         // has ready and upload only the NEWEST (no backlog), into the same
@@ -1311,6 +1348,9 @@ impl Renderer for SceneRenderer {
                     texel,
                     audio,
                     pack_scratch,
+                    pointer,
+                    pointer_last,
+                    parallax,
                 );
             }
         }
@@ -1348,6 +1388,9 @@ impl Renderer for SceneRenderer {
                         texel,
                         audio,
                         pack_scratch,
+                        pointer,
+                        pointer_last,
+                        parallax,
                     );
                 }
                 SceneItem::Particle(pg) => {
@@ -1511,6 +1554,12 @@ impl Renderer for SceneRenderer {
             apply_script_updates(&mut self.items, &updates);
         }
     }
+
+    /// Platform-fed pointer (T26): drives `g_PointerPosition*`, camera parallax
+    /// and SceneScript `pointer_screen` on the following frames.
+    fn set_pointer(&mut self, x: f32, y: f32) {
+        self.pointer = [x, y];
+    }
 }
 
 // ---- helpers ---------------------------------------------------------------
@@ -1573,7 +1622,21 @@ fn draw_image_object(
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
     scratch: &mut Vec<u8>,
+    pointer: [f32; 2],
+    pointer_last: [f32; 2],
+    parallax: ([f32; 2], f32, f32),
 ) {
+    // Camera parallax (CImage.cpp:1173): this layer's scene-space shift is
+    // `(depth + amount) · displacement · scene_width` per axis. Zero whenever
+    // parallax is off (displacement stays zero).
+    let (disp, amount, ref_size) = parallax;
+    let px = (object.parallax_depth[0] + amount) * disp[0] * ref_size;
+    let py = (object.parallax_depth[1] + amount) * disp[1] * ref_size;
+    let parallax_mvp = if px != 0.0 || py != 0.0 {
+        matrix::mul(&screen_mvp, &matrix::translation([px, py, 0.0]))
+    } else {
+        screen_mvp
+    };
     for pass in &object.passes {
         // Per-frame builtins for this pass.
         let mvp = match pass.geometry {
@@ -1581,7 +1644,7 @@ fn draw_image_object(
             // through the screen MVP; a copy-space puppet mesh maps through the
             // image's own ortho model matrix into its copy FBO; copy/pass quads
             // are already in NDC.
-            Geometry::Scene | Geometry::Puppet => screen_mvp,
+            Geometry::Scene | Geometry::Puppet => parallax_mvp,
             Geometry::PuppetCopy => pass.model_matrix,
             Geometry::Copy | Geometry::Pass => matrix::IDENTITY,
         };
@@ -1593,8 +1656,8 @@ fn draw_image_object(
             color: object.color,
             ambient,
             skylight,
-            pointer: [0.5, 0.5],
-            pointer_last: [0.5, 0.5],
+            pointer,
+            pointer_last,
             texel_size: texel,
             mvp,
             model: pass.model_matrix,

@@ -41,6 +41,7 @@ mod error;
 mod gpu;
 mod output;
 mod platform;
+mod pointer;
 mod renderer;
 mod test_pattern;
 mod x11;

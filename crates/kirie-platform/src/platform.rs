@@ -92,6 +92,8 @@ struct PlatformState {
     /// Preloaded renderers awaiting an instant [`RenderCommand::Swap`], keyed by
     /// (output name, preload key), stored with the format they were built for.
     preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
+    /// Global cursor poller (T26; Hyprland IPC — inert elsewhere).
+    pointer: crate::pointer::PointerPoll,
 }
 
 impl WaylandPlatform {
@@ -164,6 +166,7 @@ impl WaylandPlatform {
                 all_surfaces_closed: false,
                 cmd_tx,
                 preloaded: HashMap::new(),
+                pointer: crate::pointer::PointerPoll::start(),
             },
         })
     }
@@ -370,6 +373,9 @@ impl PlatformState {
             .as_ref()
             .map(|i| u32::try_from(i.scale_factor.max(1)).unwrap_or(1))
             .unwrap_or(1);
+        // Global logical position, for mapping the polled global cursor to
+        // surface-local pointer coordinates (T26).
+        let position = info.as_ref().map_or((0, 0), |i| (i.location.0, i.location.1));
 
         // Output selection: when a --screen-root list was supplied, only the
         // listed outputs get a surface. Every other output is left entirely
@@ -437,6 +443,7 @@ impl PlatformState {
             renderer: None,
             last_frame: None,
             format: None,
+            position,
         });
     }
 
@@ -570,6 +577,18 @@ impl PlatformState {
             .map(|prev| now.duration_since(prev).as_secs_f32())
             .unwrap_or(0.0);
         ctx.last_frame = Some(now);
+
+        // Pointer (T26): map the polled global cursor into this surface's
+        // normalized [0,1] coords (top-left origin). Unknown cursor / zero
+        // size ⇒ don't call — the renderer keeps its centered default.
+        if let Some((gx, gy)) = self.pointer.get() {
+            let (lw, lh) = ctx.logical_size;
+            if lw > 0 && lh > 0 {
+                let nx = ((gx - f64::from(ctx.position.0)) / f64::from(lw)).clamp(0.0, 1.0);
+                let ny = ((gy - f64::from(ctx.position.1)) / f64::from(lh)).clamp(0.0, 1.0);
+                renderer.set_pointer(nx as f32, ny as f32);
+            }
+        }
 
         renderer.render(&view, ctx.physical_size, dt);
 

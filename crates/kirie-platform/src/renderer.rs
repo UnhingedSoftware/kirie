@@ -61,6 +61,13 @@ pub trait Renderer {
     /// to the property's declared type. Default: no-op (renderers with no live
     /// properties, e.g. image/video/black, ignore it).
     fn set_property(&mut self, _key: &str, _value: &str) {}
+
+    /// Feed the pointer position for this output, surface-normalized `[0,1]`
+    /// with a top-left origin (T26). Called before [`Self::render`] whenever the
+    /// platform knows the cursor; never called when it doesn't (the renderer
+    /// keeps its centered default). Drives `g_PointerPosition*`, camera
+    /// parallax, SceneScript `pointer_screen` and the web backend's mouse.
+    fn set_pointer(&mut self, _x: f32, _y: f32) {}
 }
 
 /// Factory invoked once per output surface to build its [`Renderer`].

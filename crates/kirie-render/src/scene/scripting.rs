@@ -214,7 +214,7 @@ impl ScriptHost {
     /// array (docs/scripting-api.md §6.1). Never blocks the render thread beyond
     /// the bounded channel round-trip (SPEC.md §V3/§V4) and never panics on a
     /// throwing script (§V9).
-    pub fn tick(&mut self, dt: f32, audio: Option<&AudioSpectrum>) -> Vec<PropUpdate> {
+    pub fn tick(&mut self, dt: f32, audio: Option<&AudioSpectrum>, pointer: [f32; 2]) -> Vec<PropUpdate> {
         self.elapsed += f64::from(dt);
         let frame = HostFrame {
             runtime: self.elapsed,
@@ -222,8 +222,8 @@ impl ScriptHost {
             now: self.elapsed * 1000.0,
             res_x: f64::from(self.res[0]),
             res_y: f64::from(self.res[1]),
-            // No platform pointer at render() yet (T26): a centered pointer.
-            pointer_screen: [0.5, 0.5],
+            // Platform-fed pointer (T26), surface-normalized [0,1] top-left.
+            pointer_screen: pointer,
             audio: audio.map(|s| AudioBuffers {
                 audio16: s.audio16.to_vec(),
                 audio32: s.audio32.to_vec(),

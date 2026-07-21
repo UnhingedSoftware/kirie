@@ -263,6 +263,19 @@ impl Renderer for WebRenderer {
         self.queue.submit([encoder.finish()]);
     }
 
+    /// Platform-fed pointer (T26): forward to the page in browser pixels (the
+    /// reference drives CEF mouse events the same way).
+    fn set_pointer(&mut self, x: f32, y: f32) {
+        let px = (x * self.surface_size.width as f32) as i32;
+        let py = (y * self.surface_size.height as f32) as i32;
+        self.backend.send_pointer(crate::backend::PointerState {
+            x: px,
+            y: py,
+            left: false,
+            right: false,
+        });
+    }
+
     /// Live `setProperty` (doc §4.9): forward to the page as a one-entry
     /// `applyUserProperties` batch. Values are typed like the reference's
     /// encoder (`CWeb.cpp`): bools bare, numbers bare, everything else (colors

@@ -60,6 +60,9 @@ pub(crate) struct OutputContext {
     /// replacement renderer off the render thread (live `bg` swap / preload),
     /// where the surface itself must not be touched.
     pub format: Option<wgpu::TextureFormat>,
+    /// Global logical position of the output (compositor coordinates), for
+    /// mapping the polled global cursor into surface-local pointer coords (T26).
+    pub position: (i32, i32),
 }
 
 impl OutputContext {
