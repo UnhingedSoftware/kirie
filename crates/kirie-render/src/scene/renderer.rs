@@ -402,10 +402,20 @@ impl SceneRenderer {
         // `_rt_imageLayerComposite_<id>_a/b` (2155933185's hidden "planet N
         // texture" donors). Donors build FIRST so dependents' bind groups can
         // reference their composite views; they draw first each frame too.
+        // A donor is an image object referenced by a DIFFERENT object's
+        // `dependencies` — self-references are legal render-order no-ops
+        // (object.rs: "may self-reference") and must NOT strip a visible
+        // layer's scene draw (1388331347/1627026721 regressed exactly so).
         let donor_ids: std::collections::HashSet<i64> = scene
             .objects
             .iter()
-            .flat_map(|o| o.base.dependencies.iter().copied())
+            .flat_map(|o| {
+                o.base
+                    .dependencies
+                    .iter()
+                    .copied()
+                    .filter(move |dep| *dep != o.base.id)
+            })
             .filter(|id| {
                 scene
                     .objects
