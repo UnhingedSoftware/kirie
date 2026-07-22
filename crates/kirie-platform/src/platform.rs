@@ -508,6 +508,27 @@ impl PlatformState {
         if !ctx.configured {
             return;
         }
+
+        // `--fps` pacing MUST run before the swapchain acquire: an early frame
+        // callback re-requests the next callback and commits WITHOUT rendering.
+        // Acquiring first and early-returning drops the SurfaceTexture without
+        // presenting it — Vulkan has no un-acquire, so a monitor whose frame
+        // callbacks arrive faster than the cap (144Hz vs --fps 123) exhausts
+        // the swapchain within ~3 frames; every later acquire times out and
+        // the output freezes while the callback/commit cycle spins at 100%
+        // CPU (the live-desktop freeze this fixes).
+        if let (Some(min), Some(prev)) = (self.min_frame, ctx.last_frame)
+            && prev.elapsed() < min
+        {
+            if !ctx.frame_pending {
+                let qh = self.qh.clone();
+                ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
+                ctx.frame_pending = true;
+                ctx.wl_surface().commit();
+            }
+            return;
+        }
+
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
             return;
         };
@@ -570,21 +591,6 @@ impl PlatformState {
                 output_name: &ctx.name,
             })
         });
-
-        // `--fps` pacing: a frame callback earlier than the cap re-requests the
-        // next callback and commits WITHOUT re-rendering (no new attach keeps
-        // the old buffer — no flicker, near-zero GPU work).
-        if let (Some(min), Some(prev)) = (self.min_frame, ctx.last_frame)
-            && prev.elapsed() < min
-        {
-            if !ctx.frame_pending {
-                let qh = self.qh.clone();
-                ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
-                ctx.frame_pending = true;
-                ctx.wl_surface().commit();
-            }
-            return;
-        }
 
         // Per-output dt, seconds; 0 on the first frame
         // (docs/render-architecture.md §2.1 step 3, §2.3 per-output

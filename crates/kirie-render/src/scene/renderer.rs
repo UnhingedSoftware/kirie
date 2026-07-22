@@ -159,6 +159,11 @@ struct ObjectGpu {
     /// Per-layer parallax depth (`parallaxdepth`, docs §7.1): the layer's mvp
     /// shifts by `(depth + amount) · displacement · scene_w` (CImage.cpp:1173).
     parallax_depth: [f32; 2],
+    /// Quad center in centered scene space + Z angle, for the scene-pass
+    /// pointer-unprojection inverse (the reference's `rotModel` about
+    /// `m_sceneCenter`, CImage.cpp:1156-1165).
+    scene_center: [f32; 2],
+    angle_z: f32,
     // (video-backed textures live on SceneRenderer, not per object — one .tex
     // may be shared by several layers.)
     /// Ping-pong index holding the final composite after the full chain (the
@@ -1440,6 +1445,11 @@ fn build_object(
         offscreen_donor,
         final_front: comp_front,
         parallax_depth: image.parallax_depth.value,
+        scene_center: [
+            origin[0] - scene_size.0 as f32 / 2.0,
+            origin[1] - scene_size.1 as f32 / 2.0,
+        ],
+        angle_z: world_angle_z,
         atlas: layer_atlas,
     })
 }
@@ -2240,31 +2250,47 @@ fn draw_image_object(
             Geometry::Copy | Geometry::Pass => matrix::IDENTITY,
         };
         // Shaders unprojecting the pointer (xray: `mul(ndc, MVPInverse)` then
-        // `× 1/g_Texture0Resolution`) need the REFERENCE's inverse, which maps
-        // NDC into the pass's local space:
-        // - Scene/Puppet passes: the reference renders the image quad under
-        //   `ortho × model`, so its inverse is `inverse(screen_mvp × model)` —
-        //   kirie bakes the model into the vertices and feeds a pure-ortho
-        //   forward MVP, so the plain `inverse(mvp)` misses the model part.
-        // - Copy/Pass effect quads: pre-baked NDC with identity MVP; the
-        //   reference's ortho inverse maps NDC → image pixels of tex0.
+        // `× 1/g_Texture0Resolution`) need the REFERENCE's inverse per pass
+        // kind (CImage.cpp:826-830, 848-859, 1163-1180):
+        // - Scene/Puppet (final pass drawn to scene): the reference's
+        //   `m_modelViewProjectionScreenInverse = inverse(proj·lookAt·rotModel)`
+        //   where rotModel only rotates about the quad's scene center — size
+        //   and origin live in the vertices there just like kirie's baked
+        //   scene quad. So: `inverse(parallax_mvp × rot_about_center)`.
+        //   (The old `× pass.model_matrix` multiplied in the COPY ortho, which
+        //   is not a local→scene transform — it broke every pointer
+        //   unprojection, e.g. the xray reveal never appearing.)
+        // - Copy (first pass into the image FBO): `inverse(ortho(0,w,0,h))` =
+        //   the NDC → image-pixel map (CImage.cpp:388-390).
+        // - Pass (mid-chain effect quads and fullscreen passthrough): the
+        //   reference's `m_modelViewProjectionPass` is identity, so its
+        //   inverse is identity — `None` falls back to `inverse(mvp)` with
+        //   the identity Pass MVP.
         let mvp_inverse = match pass.geometry {
-            Geometry::Scene | Geometry::Puppet => Some(matrix::inverse(&matrix::mul(
-                &parallax_mvp,
-                &pass.model_matrix,
-            ))),
-            Geometry::Copy | Geometry::Pass => {
+            Geometry::Scene | Geometry::Puppet => {
+                let rot = if object.angle_z != 0.0 {
+                    let [cx, cy] = object.scene_center;
+                    let t_neg = matrix::translation([-cx, -cy, 0.0]);
+                    let r = matrix::rotation_z(-object.angle_z);
+                    let t_pos = matrix::translation([cx, cy, 0.0]);
+                    matrix::mul(&t_pos, &matrix::mul(&r, &t_neg))
+                } else {
+                    matrix::IDENTITY
+                };
+                Some(matrix::inverse(&matrix::mul(&parallax_mvp, &rot)))
+            }
+            Geometry::Copy => {
                 let (tw, th) = (pass.tex_resolution[0][0], pass.tex_resolution[0][1]);
                 (tw > 0.0 && th > 0.0).then(|| {
                     let mut m = matrix::IDENTITY;
                     m[0] = tw / 2.0; // x: (ndc+1)·w/2
-                    m[5] = th / 2.0; // y: (ndc+1)·h/2 (top-left UV space)
+                    m[5] = th / 2.0; // y: (ndc+1)·h/2
                     m[12] = tw / 2.0;
                     m[13] = th / 2.0;
                     m
                 })
             }
-            Geometry::PuppetCopy => None,
+            Geometry::Pass | Geometry::PuppetCopy => None,
         };
         let builtins = Builtins {
             time,
