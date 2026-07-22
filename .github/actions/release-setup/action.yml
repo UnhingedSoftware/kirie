@@ -1,0 +1,55 @@
+name: Release build setup
+description: >
+  Shared setup for the containerized release builds: apt build deps, rustup
+  (current stable, minimal), pip cmake (>=3.22 for shaderc's SPIRV-Tools on
+  debian:11), and the cargo/target cache. Uses plain actions/cache with a
+  restore-keys prefix fallback so a Cargo.lock change restores the previous
+  cache and rebuilds only the delta — the from-source static ffmpeg/shaderc
+  artifacts in target/ survive across releases (Swatinem/rust-cache never
+  restored inside these containers: every historical release logged
+  "No cache found").
+
+inputs:
+  cache-key:
+    description: Cache lineage prefix, e.g. release-debian11.
+    required: true
+  extra-apt:
+    description: Extra apt packages (space-separated), e.g. webkit for webview.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Install build dependencies
+      shell: bash
+      env:
+        DEBIAN_FRONTEND: noninteractive
+        PIP_NO_CACHE_DIR: "1"
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          build-essential clang ninja-build nasm git curl ca-certificates \
+          pkg-config python3 python3-pip binutils \
+          libasound2-dev libpulse-dev \
+          libxcb1-dev libwayland-dev libxkbcommon-dev libx11-dev libdbus-1-dev \
+          ${{ inputs.extra-apt }}
+        pip3 install "cmake<4"
+        cmake --version
+
+    - name: Install Rust (rustup, current stable)
+      shell: bash
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+        echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+    - name: Restore cargo + target cache
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ inputs.cache-key }}-${{ hashFiles('Cargo.lock') }}
+        restore-keys: |
+          ${{ inputs.cache-key }}-

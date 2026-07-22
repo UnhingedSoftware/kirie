@@ -1,17 +1,20 @@
 name: Release
 # Produces a fully-populated DRAFT release you review and Publish. Kick off from
 # Actions -> Release -> Run workflow (optionally type a version; blank = auto).
-# It computes the version + changelog, builds three artifacts, and creates the
-# draft with all of them + notes attached in one shot.
+# It computes the version + changelog, gates on the full test suite, builds the
+# artifacts, and creates the draft with all of them + notes attached in one shot.
 #
 # Artifacts (all with ffmpeg + shaderc statically linked via `--features portable`):
 #   kirie              - portable single binary. Only universal dynamic deps
 #                        (glibc, alsa, pulse, xcb); runs on any distro (glibc>=2.31).
 #   kirie-web-cef      - SINGLE self-extracting file with bundled Chromium: the
 #                        engine + the whole CEF runtime (libcef.so, resources,
-#                        locales) stripped, compressed and appended behind a
-#                        launcher stub. One executable, no runtime dir, no system
-#                        browser; self-extracts to cache on first run.
+#                        locales) + the kirie-webhost browser process + the CEF
+#                        subprocess helper, stripped, compressed and appended
+#                        behind a launcher stub. One executable, no runtime dir,
+#                        no system browser; self-extracts to cache on first run.
+#                        The ENGINE binary links no libcef - the browser runs
+#                        out-of-process in kirie-webhost.
 #   kirie-web-webview  - + wry/system webkit2gtk-4.1. Smaller, but REQUIRES the
 #                        target to have webkit2gtk-4.1 + libsoup-3.0 installed
 #                        (webkit can't be bundled). Built on glibc 2.35.
@@ -24,6 +27,12 @@ name: Release
 # wlr-layer-shell + X11 fallback, PulseAudio, memfd) - on Windows the original
 # Wallpaper Engine is the native app. A Windows port would be a new platform
 # backend, not a packaging change.
+#
+# Job shape: default + web-cef build IN ONE JOB (same debian:11 container,
+# same target dir - the web build reuses the whole dependency graph incl. the
+# from-source static ffmpeg/shaderc, so they compile once, not twice). The
+# webview variant needs ubuntu:22.04 (webkit2gtk-4.1) and stays separate.
+# Shared setup + the cargo/target cache live in .github/actions/release-setup.
 on:
   workflow_dispatch:
     inputs:
@@ -76,8 +85,7 @@ jobs:
           if-no-files-found: error
 
   # 1b. Test gate: no artifact ships from a tree with failing tests. This is
-  #     the full `cargo test --workspace` that used to run per-commit; per-commit
-  #     CI is lint-only now.
+  #     the full `cargo test --workspace` (per-commit CI is lint-only).
   test:
     runs-on: ubuntu-latest
     steps:
@@ -96,87 +104,40 @@ jobs:
             libshaderc-dev glslang-dev
       - run: cargo test --workspace
 
-  # 2. Build the three variants. ffmpeg + shaderc are compiled from source and
-  #    statically linked (the `portable` feature) in all of them. default + web-cef
-  #    build on debian:11 (glibc 2.31 floor); web-webview builds on ubuntu:22.04,
-  #    which ships webkit2gtk-4.1 (debian:11 only has 4.0). fail-fast:false so one
-  #    variant failing never blocks the others.
-  build:
+  # 2. default + web-cef in one debian:11 job (glibc 2.31 floor). The default
+  #    build compiles the full portable dependency graph (static ffmpeg +
+  #    shaderc); the web-cef build on top only adds the web crates + the two
+  #    CEF-linked binaries. Both artifacts upload from here.
+  build-linux:
     needs: [prepare, test]
     runs-on: ubuntu-latest
-    container: ${{ matrix.container }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: default
-            container: debian:11
-            features: portable
-            artifact: kirie
-          - variant: web-cef
-            container: debian:11
-            features: portable,web-cef
-            artifact: kirie-web-cef
-          - variant: web-webview
-            container: ubuntu:22.04
-            features: portable,web-webview
-            artifact: kirie-web-webview
-    name: build (${{ matrix.variant }})
+    container: debian:11
     defaults:
       run:
         shell: bash
     steps:
-      # Toolchain + build deps for the from-source static libs (nasm for ffmpeg;
-      # cmake/ninja/git/python for shaderc) and the -dev packages for the libs
-      # that stay dynamic. cmake comes from pip (<4) because debian:11's is 3.18
-      # but shaderc's SPIRV-Tools needs >=3.22.1.
-      - name: Install build dependencies
-        env:
-          DEBIAN_FRONTEND: noninteractive
+      - name: Install git (checkout prerequisite in a bare container)
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends \
-            build-essential clang ninja-build nasm git curl ca-certificates \
-            pkg-config python3 python3-pip \
-            libasound2-dev libpulse-dev \
-            libxcb1-dev libwayland-dev libxkbcommon-dev libx11-dev libdbus-1-dev
-          if [ "${{ matrix.variant }}" = "web-webview" ]; then
-            apt-get install -y --no-install-recommends libwebkit2gtk-4.1-dev libsoup-3.0-dev
-          fi
-          pip3 install "cmake<4"
-          cmake --version
-      - name: Install Rust (rustup, current stable)
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          apt-get install -y --no-install-recommends git ca-certificates
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/release-setup
         with:
-          key: portable-${{ matrix.variant }}
-          cache-on-failure: true
+          cache-key: release-debian11
+
       - name: Set crate version
         run: |
           v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
-      - name: Build (${{ matrix.variant }})
-        run: cargo build --release -p kirie --features ${{ matrix.features }}
-      # The CEF subprocess helper + the out-of-process web host are separate
-      # binaries that link libcef; the engine itself no longer does (the
-      # browser runs in the killable kirie-webhost child, frames via shm).
-      # kirie-pack refuses to pack without BOTH beside libcef.
-      - name: Build CEF helper + web host (web-cef only)
-        if: matrix.variant == 'web-cef'
-        run: |
-          cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
-          cargo build --release -p kirie-web --features cef --bin kirie-webhost
-      # Guard: ffmpeg + shaderc must be static in every variant. The ENGINE
-      # must also never link libcef anymore (the browser is out-of-process in
-      # kirie-webhost); webkit stays an expected dynamic dep of the webview
-      # variant only.
-      - name: Verify ffmpeg + shaderc are static
+
+      - name: Build default (portable)
+        run: cargo build --release -p kirie --features portable
+
+      # Guard: ffmpeg + shaderc must be static; the engine must never link
+      # libcef (the browser stays out-of-process in kirie-webhost).
+      - name: Verify static deps + no libcef in the engine
         run: |
           set -euo pipefail
-          apt-get install -y --no-install-recommends binutils >/dev/null
           needed="$(readelf -d target/release/kirie | grep NEEDED || true)"
           echo "$needed"
           if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
@@ -186,43 +147,96 @@ jobs:
             echo "::error::engine links libcef — the browser must stay out-of-process (kirie-webhost)"; exit 1
           fi
           echo "ok: ffmpeg + shaderc static; no libcef in the engine"
-      # Package. web-cef is shipped as a SINGLE self-extracting file: kirie-pack
-      # stages the engine + CEF runtime (libcef.so, ANGLE/swiftshader libs,
-      # icudtl.dat, *.pak, v8 snapshot, locales), strips debug symbols (libcef
-      # ships unstripped at ~1.3 GB → ~245 MB), trims locales to en-US, and packs
-      # it behind the launcher stub. One executable, no runtime dir, no
-      # LD_LIBRARY_PATH — it self-extracts to cache on first run. default +
-      # web-webview stay plain-binary tarballs.
-      - name: Package (${{ matrix.variant }})
-        id: package
+
+      - name: Package default tarball
         run: |
           set -euo pipefail
-          if [ "${{ matrix.variant }}" = "web-cef" ]; then
-            cargo build --release -p kirie-launcher
-            asset="${{ matrix.artifact }}-linux-x86_64"
-            ./target/release/kirie-pack target/release "$asset"
-            chmod +x "$asset"
-          else
-            dist="dist/${{ matrix.artifact }}"
-            mkdir -p "$dist"
-            cp target/release/kirie "$dist/${{ matrix.artifact }}"
-            cp README.md LICENSE "$dist/" 2>/dev/null || true
-            if [ "${{ matrix.variant }}" = "web-webview" ]; then
-              printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n\nLIMITATION: webkit2gtk has no offscreen-rendering path (upstream wont-fix),\nso WEB wallpapers cannot render in this variant - scenes/video/images only.\nUse the kirie-web-cef single-file build for web wallpapers.\n' > "$dist/REQUIREMENTS.txt"
-            fi
-            asset="${{ matrix.artifact }}-linux-x86_64.tar.gz"
-            tar -C dist -czf "$asset" "${{ matrix.artifact }}"
-          fi
-          echo "asset=$asset" >> "$GITHUB_OUTPUT"
+          dist="dist/kirie"
+          mkdir -p "$dist"
+          cp target/release/kirie "$dist/kirie"
+          cp README.md LICENSE "$dist/" 2>/dev/null || true
+          tar -C dist -czf kirie-linux-x86_64.tar.gz kirie
+
+      - name: Build web-cef (engine + helper + webhost)
+        run: |
+          cargo build --release -p kirie --features portable,web-cef
+          cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
+          cargo build --release -p kirie-web --features cef --bin kirie-webhost
+          cargo build --release -p kirie-launcher
+
+      - name: Package web-cef single file
+        run: |
+          set -euo pipefail
+          ./target/release/kirie-pack target/release kirie-web-cef-linux-x86_64
+          chmod +x kirie-web-cef-linux-x86_64
+
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}-linux-x86_64
-          path: ${{ steps.package.outputs.asset }}
+          name: kirie-linux-x86_64
+          path: kirie-linux-x86_64.tar.gz
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kirie-web-cef-linux-x86_64
+          path: kirie-web-cef-linux-x86_64
           if-no-files-found: error
 
-  # 3. Create/update the draft release once, with all built artifacts + notes.
+  # 3. webview variant: ubuntu:22.04 ships webkit2gtk-4.1 (debian:11 only 4.0).
+  build-webview:
+    needs: [prepare, test]
+    runs-on: ubuntu-latest
+    container: ubuntu:22.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Install git (checkout prerequisite in a bare container)
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/release-setup
+        with:
+          cache-key: release-ubuntu2204
+          extra-apt: libwebkit2gtk-4.1-dev libsoup-3.0-dev
+
+      - name: Set crate version
+        run: |
+          v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
+          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
+
+      - name: Build web-webview (portable)
+        run: cargo build --release -p kirie --features portable,web-webview
+
+      - name: Verify static deps
+        run: |
+          set -euo pipefail
+          needed="$(readelf -d target/release/kirie | grep NEEDED || true)"
+          echo "$needed"
+          if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
+            echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
+          fi
+          echo "ok: ffmpeg + shaderc statically linked"
+
+      - name: Package webview tarball
+        run: |
+          set -euo pipefail
+          dist="dist/kirie-web-webview"
+          mkdir -p "$dist"
+          cp target/release/kirie "$dist/kirie-web-webview"
+          cp README.md LICENSE "$dist/" 2>/dev/null || true
+          printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n\nLIMITATION: webkit2gtk has no offscreen-rendering path (upstream wont-fix),\nso WEB wallpapers cannot render in this variant - scenes/video/images only.\nUse the kirie-web-cef single-file build for web wallpapers.\n' > "$dist/REQUIREMENTS.txt"
+          tar -C dist -czf kirie-web-webview-linux-x86_64.tar.gz kirie-web-webview
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kirie-web-webview-linux-x86_64
+          path: kirie-web-webview-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # 4. Create/update the draft release once, with all built artifacts + notes.
   release:
-    needs: [prepare, build]
+    needs: [prepare, build-linux, build-webview]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
