@@ -62,6 +62,14 @@ pub struct HostedBackend {
     cached: Option<FrameBuffer>,
     /// Lines from the child's stdout (drained non-blocking on tick).
     status_rx: Receiver<String>,
+    /// Spawn parameters retained for crash auto-restart.
+    url: String,
+    size: WebSize,
+    /// Restart budget: a crashing page respawns a few times, then stays on
+    /// its last frame instead of crash-looping the browser.
+    restarts_left: u8,
+    /// Earliest instant a restart may happen (simple backoff).
+    restart_after: Instant,
 }
 
 impl HostedBackend {
@@ -125,8 +133,13 @@ impl HostedBackend {
     }
 }
 
-impl WebBackend for HostedBackend {
-    fn new(url: &str, size: WebSize) -> Result<Self, WebError> {
+/// Spawn the webhost child + status reader, returning the pieces the backend
+/// needs. Shared by the constructor and crash auto-restart.
+fn spawn_host(
+    url: &str,
+    size: WebSize,
+) -> Result<(Child, ChildStdin, Box<dyn AsRef<[u8]> + Send + Sync>, Receiver<String>), WebError> {
+    {
         let host = webhost_path()?;
         let mut child = Command::new(&host)
             .arg("--url")
@@ -183,6 +196,13 @@ impl WebBackend for HostedBackend {
         };
 
         tracing::info!(host = %host.display(), pid = child.id(), "web host process started");
+        Ok((child, stdin, shm, status_rx))
+    }
+}
+
+impl WebBackend for HostedBackend {
+    fn new(url: &str, size: WebSize) -> Result<Self, WebError> {
+        let (child, stdin, shm, status_rx) = spawn_host(url, size.clamped())?;
         Ok(Self {
             child,
             stdin,
@@ -190,6 +210,10 @@ impl WebBackend for HostedBackend {
             last_seq: 0,
             cached: None,
             status_rx,
+            url: url.to_owned(),
+            size: size.clamped(),
+            restarts_left: 3,
+            restart_after: Instant::now(),
         })
     }
 
@@ -200,6 +224,24 @@ impl WebBackend for HostedBackend {
             match self.status_rx.try_recv() {
                 Ok(_) => {}
                 Err(TryRecvError::Empty | TryRecvError::Disconnected) => break,
+            }
+        }
+        // Crash auto-restart: a died child (page/GPU crash) respawns with a
+        // small budget + backoff; past the budget the last frame stays up
+        // (still strictly better than the in-process design, where a browser
+        // crash took the whole engine down).
+        if let Ok(Some(status)) = self.child.try_wait() {
+            if self.restarts_left > 0 && Instant::now() >= self.restart_after {
+                self.restarts_left -= 1;
+                self.restart_after = Instant::now() + Duration::from_secs(5);
+                tracing::warn!(%status, left = self.restarts_left, "web host died; restarting");
+                if let Ok((child, stdin, shm, status_rx)) = spawn_host(&self.url, self.size) {
+                    self.child = child;
+                    self.stdin = stdin;
+                    self.shm = shm;
+                    self.status_rx = status_rx;
+                    self.last_seq = 0;
+                }
             }
         }
         self.poll_frame();
@@ -216,6 +258,7 @@ impl WebBackend for HostedBackend {
 
     fn resize(&mut self, size: WebSize) {
         let s = size.clamped();
+        self.size = s;
         self.send_line(&format!("resize {} {}", s.width, s.height));
     }
 
