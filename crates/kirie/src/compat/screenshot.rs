@@ -363,6 +363,7 @@ pub fn capture(
         }
         Wallpaper::Scene { dir } => {
             let options = kirie_render::SceneOptions {
+                render_scale: 1.0,
                 scaling: super::run::to_render_scaling(scaling),
                 clamp: super::run::to_render_clamp(clamp),
             };

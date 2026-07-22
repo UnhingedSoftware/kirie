@@ -53,6 +53,22 @@ use crate::compat::{list_props, screenshot, signals};
 #[cfg(feature = "web-cef")]
 use kirie_web::{WebBackend, WebRenderer, WebSize, cef::CefBackend};
 
+/// `--render-scale`, stored once at launch for every scene build (including
+/// live swaps/preloads, which share the same engine invocation). f32 bits in an
+/// atomic; 1.0 when unset. The reference treats render scale as engine-global
+/// too (FBOProvider root scale).
+static RENDER_SCALE_BITS: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0f32
+
+fn set_render_scale(scale: f32) {
+    let s = if scale.is_finite() { scale.clamp(0.25, 4.0) } else { 1.0 };
+    RENDER_SCALE_BITS.store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+fn render_scale() -> f32 {
+    f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
 /// Map the compat scaling enum to kirie-video's (doc §3.1 value table).
 #[must_use]
 pub fn to_video_scaling(mode: ScalingMode) -> kirie_video::ScalingMode {
@@ -224,6 +240,7 @@ struct Target {
 /// Run the per-screen wallpapers on the wayland presentation layer, with the
 /// control socket (if any) wired to a dedicated applier thread.
 fn run_wallpapers(args: CompatArgs) -> ExitCode {
+    set_render_scale(args.render_scale as f32);
     let window_mode = args.mode != WindowMode::DesktopBackground;
     let targets = build_targets(&args);
     if targets.is_empty() {
@@ -396,6 +413,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
 
     let present = kirie_platform::PresentOptions {
         screen_roots,
+        fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
         ..Default::default()
     };
 
@@ -1070,6 +1088,7 @@ fn build_for_spec(
         },
         RunSpec::Scene { dir, scaling, clamp } => {
             let options = kirie_render::SceneOptions {
+                render_scale: render_scale(),
                 scaling: to_render_scaling(*scaling),
                 clamp: to_render_clamp(*clamp),
             };

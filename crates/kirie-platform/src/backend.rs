@@ -43,6 +43,10 @@ pub struct PresentOptions {
     pub layer_namespace: String,
     /// Output/monitor names to place surfaces on. Empty = all outputs.
     pub screen_roots: Vec<String>,
+    /// `--fps` cap: skip rendering on frame callbacks that arrive early,
+    /// re-requesting the next callback so pacing stays compositor-driven
+    /// (the reference paces its GL swap the same way). `None`/0 = uncapped.
+    pub fps: Option<u32>,
 }
 
 impl Default for PresentOptions {
@@ -50,6 +54,7 @@ impl Default for PresentOptions {
         Self {
             layer_namespace: "linux-wallpaperengine".to_string(),
             screen_roots: Vec::new(),
+            fps: None,
         }
     }
 }

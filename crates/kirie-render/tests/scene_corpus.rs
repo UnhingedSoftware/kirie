@@ -309,6 +309,7 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
                 assets: assets.clone(),
             },
             SceneOptions {
+                render_scale: 1.0,
                 scaling: ScalingMode::Fill,
                 clamp: ClampMode::Clamp,
             },

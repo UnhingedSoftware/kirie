@@ -46,12 +46,27 @@ use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
 
 /// Presentation options for a scene wallpaper (same surface as image/video).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneOptions {
     /// Output scaling mode (docs/render-architecture.md §4).
     pub scaling: ScalingMode,
     /// Out-of-window UV behavior (docs/render-architecture.md §4).
     pub clamp: ClampMode,
+    /// `--render-scale`: every render target allocates at `logical × scale`
+    /// and the final blit downsamples — the reference's FBOProvider
+    /// supersampling (its AA; FBOProvider.h:25-29). Scene coordinates stay
+    /// logical. Clamped to [0.25, 4]; 1.0 = native.
+    pub render_scale: f32,
+}
+
+impl Default for SceneOptions {
+    fn default() -> Self {
+        SceneOptions {
+            scaling: ScalingMode::default(),
+            clamp: ClampMode::default(),
+            render_scale: 1.0,
+        }
+    }
 }
 
 /// An include resolver backed by an [`AssetSource`]: `#include "x.h"` →
@@ -423,8 +438,15 @@ impl SceneRenderer {
         // such layer draws) so sampling never reads the target being written —
         // the reference's shadow-copy trick, docs §6/§11 (SPEC.md §V5: no
         // per-frame alloc). Both share the projection size.
-        let scene_fbo = Fbo::new(device, "kirie-scene-fbo", proj_w, proj_h);
-        let scene_snapshot = Fbo::new(device, "kirie-scene-snapshot", proj_w, proj_h);
+        // Supersampling (`--render-scale`, reference FBOProvider.h:25-29): all
+        // render targets allocate at logical × scale; coordinates stay logical
+        // (the ortho is unchanged — a bigger target just rasterizes finer) and
+        // the final blit's linear sample downsamples. This is the reference's AA.
+        let rs = options.render_scale.clamp(0.25, 4.0);
+        let scale_dim = |d: u32| ((d as f32 * rs).round() as u32).max(1);
+        let (fbo_w, fbo_h) = (scale_dim(proj_w), scale_dim(proj_h));
+        let scene_fbo = Fbo::new(device, "kirie-scene-fbo", fbo_w, fbo_h);
+        let scene_snapshot = Fbo::new(device, "kirie-scene-snapshot", fbo_w, fbo_h);
 
         // Camera bloom (docs §5): when enabled, glow the composited scene with
         // the reproduced WE `camerabloom` effect just before the blit. Strength +
@@ -437,8 +459,8 @@ impl SceneRenderer {
             super::bloom::Bloom::new(
                 device,
                 queue,
-                proj_w,
-                proj_h,
+                fbo_w,
+                fbo_h,
                 &scene_fbo.view,
                 &scene_snapshot.view,
                 env_f("KIRIE_BLOOM_STRENGTH").unwrap_or(scene.general.bloomstrength.value),
@@ -509,6 +531,7 @@ impl SceneRenderer {
                     true,
                     &cross,
                     &mut param_cache,
+                    rs,
                 ) {
                     if let Some(front) = obj.final_front
                         && let Some(fbo) = obj.fbos[front].as_ref()
@@ -546,6 +569,7 @@ impl SceneRenderer {
                         false,
                         &cross,
                         &mut param_cache,
+                        rs,
                     ) {
                         items.push(SceneItem::Image(Box::new(obj)));
                     }
@@ -633,7 +657,7 @@ impl SceneRenderer {
         let model_depth = items
             .iter()
             .any(|it| matches!(it, SceneItem::Model(_)))
-            .then(|| super::model::create_depth_texture(device, proj_w, proj_h));
+            .then(|| super::model::create_depth_texture(device, fbo_w, fbo_h));
 
         Ok(SceneRenderer {
             device: device.clone(),
@@ -892,6 +916,7 @@ fn build_object(
     offscreen_donor: bool,
     cross: &std::collections::HashMap<String, wgpu::TextureView>,
     param_cache: &mut ParamCache,
+    fbo_scale: f32,
 ) -> Option<ObjectGpu> {
     // A dependency donor plans its full chain even when invisible — hoisting
     // renders its composite RT regardless of visibility (docs §5.6); only the
@@ -1096,10 +1121,12 @@ fn build_object(
     let n = built.len();
     // A dependency donor keeps its FULL chain in the ping-pong (its last pass
     // composites instead of drawing to scene), so it always needs the pair.
+    // FBO dims scale with `--render-scale` (coordinates stay logical).
+    let sdim = |d: u32| ((d as f32 * fbo_scale).round() as u32).max(1);
     let fbos = if n > 1 || offscreen_donor {
         [
-            Some(Fbo::new(device, "kirie-image-fbo-a", iw, ih)),
-            Some(Fbo::new(device, "kirie-image-fbo-b", iw, ih)),
+            Some(Fbo::new(device, "kirie-image-fbo-a", sdim(iw), sdim(ih))),
+            Some(Fbo::new(device, "kirie-image-fbo-b", sdim(iw), sdim(ih))),
         ]
     } else {
         [None, None]
@@ -1113,7 +1140,7 @@ fn build_object(
         let s = if decl.scale > 0.0 { decl.scale } else { 1.0 };
         let w = ((iw as f32 / s).round() as u32).max(1);
         let h = ((ih as f32 / s).round() as u32).max(1);
-        named_fbos.insert(decl.name.clone(), Fbo::new(device, "kirie-effect-fbo", w, h));
+        named_fbos.insert(decl.name.clone(), Fbo::new(device, "kirie-effect-fbo", sdim(w), sdim(h)));
     }
     // The two composite reference names for this object's id (both resolve to the
     // current composite front — the reference's `_a`/`_b` ping-pong pair).
@@ -1528,8 +1555,8 @@ impl Renderer for SceneRenderer {
         // `reads_scene` object always implies `Some` here (both set at build).
         let snap_tex = self.scene_snapshot.as_ref().map(|s| &s.texture);
         let copy_extent = wgpu::Extent3d {
-            width: self.proj_w,
-            height: self.proj_h,
+            width: self.scene_fbo.width,
+            height: self.scene_fbo.height,
             depth_or_array_layers: 1,
         };
         let audio = spectrum.as_deref();

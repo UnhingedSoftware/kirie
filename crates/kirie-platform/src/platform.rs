@@ -82,6 +82,8 @@ struct PlatformState {
     /// alone (no surface), so unconfigured monitors are not blacked out
     /// (SPEC V6: skipped outputs cost zero render work).
     screen_roots: Vec<String>,
+    /// Minimum frame interval from `PresentOptions::fps` (`None` = uncapped).
+    min_frame: Option<std::time::Duration>,
     /// Set when the compositor closed the last layer surface — treated as
     /// abnormal, mirroring WaylandOpenGLDriver.cpp:234-274
     /// (docs/render-architecture.md §2.3).
@@ -163,6 +165,7 @@ impl WaylandPlatform {
                 layer: Layer::Background,
                 namespace: options.layer_namespace,
                 screen_roots: options.screen_roots,
+                min_frame: options.fps.filter(|f| *f > 0).map(|f| std::time::Duration::from_secs_f64(1.0 / f64::from(f))),
                 all_surfaces_closed: false,
                 cmd_tx,
                 preloaded: HashMap::new(),
@@ -567,6 +570,21 @@ impl PlatformState {
                 output_name: &ctx.name,
             })
         });
+
+        // `--fps` pacing: a frame callback earlier than the cap re-requests the
+        // next callback and commits WITHOUT re-rendering (no new attach keeps
+        // the old buffer — no flicker, near-zero GPU work).
+        if let (Some(min), Some(prev)) = (self.min_frame, ctx.last_frame)
+            && prev.elapsed() < min
+        {
+            if !ctx.frame_pending {
+                let qh = self.qh.clone();
+                ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
+                ctx.frame_pending = true;
+                ctx.wl_surface().commit();
+            }
+            return;
+        }
 
         // Per-output dt, seconds; 0 on the first frame
         // (docs/render-architecture.md §2.1 step 3, §2.3 per-output
