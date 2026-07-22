@@ -40,6 +40,21 @@ runs:
         export PATH="$HOME/.local/bin:$PATH"
         cmake --version
 
+    - name: Ensure modern nasm (ffmpeg 8 x86 asm needs >= 2.15)
+      shell: bash
+      run: |
+        set -euo pipefail
+        if nasm -v 2>/dev/null | grep -qE 'version 2\.(1[5-9]|[2-9][0-9])'; then
+          echo "system nasm ok: $(nasm -v)"
+        else
+          echo "system nasm too old ($(nasm -v 2>/dev/null || echo none)) - building 2.16.03"
+          curl -sLO https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/nasm-2.16.03.tar.xz
+          tar xf nasm-2.16.03.tar.xz
+          (cd nasm-2.16.03 && ./configure --prefix="$HOME/.local" >/dev/null && make -j"$(nproc)" >/dev/null && make install >/dev/null)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/nasm" -v
+        fi
+
     - name: Install Rust (rustup, current stable)
       shell: bash
       run: |
