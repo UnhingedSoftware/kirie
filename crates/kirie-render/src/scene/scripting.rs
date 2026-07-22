@@ -9,17 +9,21 @@
 //! [`kirie_script::SceneOp`]s + property results *out*, translating them into
 //! [`PropUpdate`]s the render loop applies to its live objects.
 //!
-//! # Scope (v1 slice)
+//! # Scope
 //!
-//! Only the object-leaf properties that flow into the per-object builtin
-//! uniforms (`g_Alpha`, `g_Brightness`, `g_Color`) and object visibility, plus
-//! text content, are wired back. Transform ops (`origin`/`scale`/`angles`),
-//! camera transforms, particle rate and `createLayer`/`sortLayer` are collected
-//! but not yet applied — they require a geometry/scene rebuild the 2D
-//! compositor does not do per-frame (tracked as a gap, see the crate report).
-//! An input pointer position from the platform is not delivered to the
-//! [`kirie_platform::Renderer`] trait yet (`render(dt)` only), so scripts read a
-//! centered pointer until that hook exists (T26).
+//! The object-leaf properties that flow into the per-object builtin uniforms
+//! (`g_Alpha`, `g_Brightness`, `g_Color`), object visibility and text content
+//! are wired back, plus the scene ops: runtime layers (`createLayer` +
+//! transform/color ops driving their solid quads), the runtime camera override
+//! (`setCameraTransforms` → the perspective camera 3D models re-read each
+//! frame; the 2D ortho screen MVP is untouched, reference `Camera.h:24-26`),
+//! z-order moves (`sortLayer` → the reference's single reordered render list)
+//! and reparenting (`setParent` → the ancestor-visibility gate). Remaining
+//! limits: scene-object transform ops (`origin`/`scale`/`angles` on *baked*
+//! objects) require a geometry rebuild the 2D compositor does not do
+//! per-frame, and a reparent does not re-anchor a baked transform (`world_xf`
+//! composes parent chains at build) — visibility gating is the live part
+//! (both tracked).
 
 use std::collections::BTreeMap;
 
@@ -94,6 +98,50 @@ pub struct PropUpdate {
     pub value: ScriptValue,
 }
 
+/// The merged runtime camera override a frame's `thisScene.setCameraTransforms`
+/// calls produced (reference `scene_set_camera_transforms`,
+/// `Scripting/SceneObject.cpp:261-286`): each field is independent — the
+/// reference only writes the members present on the argument object, so a
+/// partial call leaves the others at their current (possibly earlier-overridden)
+/// value. Multiple calls in one tick merge last-wins per field, exactly as the
+/// reference's sequential setter calls would.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct CameraOp {
+    /// New eye position, if overridden.
+    pub eye: Option<[f32; 3]>,
+    /// New look-at center, if overridden.
+    pub center: Option<[f32; 3]>,
+    /// New up vector, if overridden.
+    pub up: Option<[f32; 3]>,
+    /// New vertical fov (degrees), if overridden.
+    pub fov: Option<f32>,
+}
+
+/// Merge one `SetCameraTransforms` op into the pending override (last-wins per
+/// field — mirrors the reference applying each present member immediately,
+/// `SceneObject.cpp:272-286`).
+fn merge_camera(
+    slot: &mut Option<CameraOp>,
+    eye: Option<[f32; 3]>,
+    center: Option<[f32; 3]>,
+    up: Option<[f32; 3]>,
+    fov: Option<f32>,
+) {
+    let dst = slot.get_or_insert_with(CameraOp::default);
+    if eye.is_some() {
+        dst.eye = eye;
+    }
+    if center.is_some() {
+        dst.center = center;
+    }
+    if up.is_some() {
+        dst.up = up;
+    }
+    if fov.is_some() {
+        dst.fov = fov;
+    }
+}
+
 /// The per-scene script host: the engine plus the frame snapshot it re-marshals
 /// each tick.
 pub struct ScriptHost {
@@ -115,6 +163,20 @@ pub struct ScriptHost {
     /// Runtime layers created by scripts this session (`thisScene.createLayer`),
     /// drained by the renderer via [`Self::take_created`]: (synthetic id, path).
     created: Vec<(i64, String)>,
+    /// Pending runtime camera override (`thisScene.setCameraTransforms`),
+    /// merged across the tick's ops, drained via [`Self::take_camera`].
+    camera_op: Option<CameraOp>,
+    /// True when a `sortLayer` op reordered [`Self::layers`] since the renderer
+    /// last drained the order via [`Self::take_layer_order`].
+    order_dirty: bool,
+    /// Applied `setParent` ops — `(layer id, new parent id)` — drained via
+    /// [`Self::take_parent_updates`].
+    parent_updates: Vec<(i64, i64)>,
+    /// True when [`Self::scene`] changed since the retained frame last copied it
+    /// (a script fov override — reference `getCameraTransforms` reports the
+    /// overridden fov via `getFov()`, `SceneObject.cpp:257`): the per-tick
+    /// refresh must re-clone the scene state.
+    scene_dirty: bool,
     /// The retained [`HostFrame`] recycled across ticks: sent boxed to the
     /// script thread and handed back with the output
     /// ([`ScriptEngine::tick_reuse`]), so the audio band buffers, the layer
@@ -146,7 +208,17 @@ impl ScriptHost {
         // drive (docs §6.2 `getLayer`/`getLayerCount`).
         let mut pending: Vec<Pending> = Vec::new();
         let mut layers: Vec<LayerState> = Vec::with_capacity(model.scene.objects.len());
-        for object in &model.scene.objects {
+        // RENDER order (docs §5.7: declaration order, stable-sorted by
+        // `sortorder` under `general.customsortorder` — same walk as the item
+        // build): the getLayer(i)/sortLayer index space is the scriptable
+        // subset of the *render* order (`CScene::getScriptableLayerIndex`,
+        // CScene.cpp:524-536), not declaration order.
+        let mut render_order: Vec<usize> = (0..model.scene.objects.len()).collect();
+        if model.scene.general.customsortorder {
+            render_order.sort_by_key(|&i| model.scene.objects[i].base.sortorder);
+        }
+        for &oi in &render_order {
+            let object = &model.scene.objects[oi];
             let id = object.base.id;
             layers.push(layer_state(object));
             match &object.kind {
@@ -229,6 +301,10 @@ impl ScriptHost {
             res: [res.0 as f32, res.1 as f32],
             elapsed: 0.0,
             created: Vec::new(),
+            camera_op: None,
+            order_dirty: false,
+            parent_updates: Vec::new(),
+            scene_dirty: false,
             frame: None,
             user_props_dirty: false,
         })
@@ -251,10 +327,11 @@ impl ScriptHost {
             Some(f) => f,
             None => {
                 let mut f = Box::new(HostFrame::default());
-                // Static for the scene's lifetime — set once, never refreshed.
+                // Refreshed below only when dirtied (fov override / setProperty).
                 f.scene = self.scene.clone();
                 f.user_props = self.user_props.clone();
                 self.user_props_dirty = false;
+                self.scene_dirty = false;
                 f
             }
         };
@@ -293,6 +370,11 @@ impl ScriptHost {
         if self.user_props_dirty {
             frame.user_props.clone_from(&self.user_props);
             self.user_props_dirty = false;
+        }
+        // Scene state only changes on a script fov override (see `scene_dirty`).
+        if self.scene_dirty {
+            frame.scene.clone_from(&self.scene);
+            self.scene_dirty = false;
         }
 
         let output = match self.engine.tick_reuse(frame, Vec::new()) {
@@ -370,31 +452,112 @@ impl ScriptHost {
                 });
             }
         }
-        // Imperative scene ops (docs §6.2/§8): leaf writes + runtime layers.
+        // Imperative scene ops (docs §6.2/§8): leaf writes, runtime layers,
+        // camera overrides.
         for op in output.ops {
-            if let SceneOp::CreateLayer { layer_id, path, .. } = &op {
-                self.created.push((*layer_id, path.clone()));
-                continue;
-            }
-            if let SceneOp::SetProperty {
-                layer_id,
-                name,
-                value,
-            } = op
-                && let Some(target) = PropTarget::from_field(&name)
-            {
-                self.record_layer(layer_id, target, &value);
-                updates.push(PropUpdate {
-                    object_id: layer_id,
-                    target,
+            match op {
+                SceneOp::SetProperty {
+                    layer_id,
+                    name,
                     value,
-                });
+                } => {
+                    if let Some(target) = PropTarget::from_field(&name) {
+                        self.record_layer(layer_id, target, &value);
+                        updates.push(PropUpdate {
+                            object_id: layer_id,
+                            target,
+                            value,
+                        });
+                    }
+                }
+                SceneOp::CreateLayer { layer_id, path, .. } => {
+                    // Mirror host.js's synthetic record into the retained layer
+                    // list so next tick's marshal keeps the JS proxy readable
+                    // (the marshal overwrites `__host.layers` wholesale) and the
+                    // new layer enters the sort space at the end — the reference
+                    // appends created layers to the render order (top).
+                    self.layers.push(LayerState {
+                        id: layer_id,
+                        name: path.clone(),
+                        origin: Some([0.0; 3]),
+                        scale: Some([1.0; 3]),
+                        angles: Some([0.0; 3]),
+                        visible: Some(true),
+                        alpha: Some(1.0),
+                        color: Some([1.0; 3]),
+                        ..LayerState::default()
+                    });
+                    self.created.push((layer_id, path));
+                }
+                SceneOp::SetCameraTransforms {
+                    eye,
+                    center,
+                    up,
+                    fov,
+                } => {
+                    merge_camera(&mut self.camera_op, eye, center, up, fov);
+                    // `getCameraTransforms` reports the BASE eye/center/up but
+                    // the *overridden* fov (`getBaseEye`/`getFov`,
+                    // `SceneObject.cpp:252-257`) — mirror only fov into the
+                    // scene snapshot scripts read next tick.
+                    if let Some(f) = fov {
+                        self.scene.camera.fov = f;
+                        self.scene.fov = f;
+                        self.scene_dirty = true;
+                    }
+                }
+                SceneOp::SortLayer { layer_id, index } => {
+                    // The host's layer list is the authoritative scriptable
+                    // order (getLayer(i) indexes it); apply the reference move
+                    // here, then hand the renderer the new order to mirror.
+                    if sort_layer_apply(&mut self.layers, layer_id, index) {
+                        self.order_dirty = true;
+                    }
+                }
+                SceneOp::SetParent { layer_id, parent } => {
+                    // Keep the retained snapshot in step with host.js, which
+                    // already updated its own record this tick (including a
+                    // null detach — the JS-side read shows it).
+                    if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer_id) {
+                        l.parent = parent;
+                    }
+                    if let Some(u) = parent_update(layer_id, parent) {
+                        self.parent_updates.push(u);
+                    }
+                }
             }
-            // Transform / camera / createLayer / sortLayer ops are collected by
-            // the engine but not applied by the 2D compositor yet (see module
-            // docs); dropping them keeps the scene stable rather than diverging.
         }
         updates
+    }
+
+    /// Drain the tick's merged runtime camera override, if any
+    /// (`thisScene.setCameraTransforms`). The renderer applies it to the live
+    /// perspective camera the 3D models re-read every frame; the 2D
+    /// orthographic screen MVP is deliberately untouched (reference
+    /// `Camera.h:24-26`).
+    pub fn take_camera(&mut self) -> Option<CameraOp> {
+        self.camera_op.take()
+    }
+
+    /// Drain the full scriptable-layer order (ids, bottom → top) when a
+    /// `sortLayer` op reordered it this tick; `None` when unchanged. The
+    /// renderer stable-sorts its drawable items to these relative positions and
+    /// renumbers runtime layers, mirroring the reference's single reordered
+    /// `m_objectsByRenderOrder` (`CScene::moveLayerToScriptableIndex`,
+    /// CScene.cpp:538-562).
+    pub fn take_layer_order(&mut self) -> Option<Vec<i64>> {
+        if !self.order_dirty {
+            return None;
+        }
+        self.order_dirty = false;
+        Some(self.layers.iter().map(|l| l.id).collect())
+    }
+
+    /// Drain the tick's applied `setParent` ops: `(layer id, new parent id)`.
+    /// The renderer feeds these into the ancestor-visibility gate so hiding the
+    /// new parent group hides the reparented layer (docs §7.1).
+    pub fn take_parent_updates(&mut self) -> Vec<(i64, i64)> {
+        std::mem::take(&mut self.parent_updates)
     }
 
     /// Keep the cached layer snapshot in step with an applied value so next
@@ -444,6 +607,39 @@ impl ScriptHost {
             PropTarget::Brightness => {}
         }
     }
+}
+
+/// The render-side effect of one `setParent` op. The reference applies only a
+/// resolved, NON-self parent (`layer_set_parent`,
+/// `ScriptableObjectAdapter.cpp:226-229`: `if (parentId >= 0 && parentId !=
+/// self->getId ())`): a null or unresolvable argument leaves the C++ object
+/// untouched — there is no detach path — and self-parenting is ignored.
+fn parent_update(layer_id: i64, parent: Option<i64>) -> Option<(i64, i64)> {
+    match parent {
+        Some(p) if p != layer_id => Some((layer_id, p)),
+        _ => None,
+    }
+}
+
+/// `thisScene.sortLayer` — the reference's `CScene::moveLayerToScriptableIndex`
+/// (CScene.cpp:538-562) over the script layer list: remove the layer, then
+/// re-insert just before the layer now at `index`; a negative or past-the-end
+/// index appends (top). Every kirie script layer is scriptable, so the
+/// "index-th scriptable layer" of the reference is simply position `index`.
+/// Returns `false` (list untouched) when `layer_id` is unknown — the reference
+/// returns early when the layer is not in its render order (CScene.cpp:540-543).
+fn sort_layer_apply(layers: &mut Vec<LayerState>, layer_id: i64, index: i64) -> bool {
+    let Some(pos) = layers.iter().position(|l| l.id == layer_id) else {
+        return false;
+    };
+    let layer = layers.remove(pos);
+    let at = if index < 0 {
+        layers.len()
+    } else {
+        (index as usize).min(layers.len())
+    };
+    layers.insert(at, layer);
+    true
 }
 
 /// Flatten a `scriptproperties` map to the effective values the engine's
@@ -527,6 +723,7 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
 /// Snapshot scene-level read-only members (docs §6.2 `thisScene`).
 fn scene_state(model: &SceneModel) -> SceneState {
     let g = &model.scene.general;
+    let cam = &model.scene.camera;
     SceneState {
         clearcolor: [
             g.clearcolor.value[0],
@@ -547,6 +744,20 @@ fn scene_state(model: &SceneModel) -> SceneState {
         // SceneState reports these as ints (docs §6.2 `thisScene.bloomstrength`).
         bloomstrength: g.bloomstrength.value as i64,
         bloomthreshold: g.bloomthreshold.value as i64,
+        fov: cam.fov.value,
+        nearz: cam.nearz,
+        farz: cam.farz,
+        // The authored (BASE) camera: `getCameraTransforms` must return this
+        // stable base each frame, never a runtime override — a camera-controller
+        // script recomputes from it and would drift if fed its own output
+        // (reference `Camera.h:35-38`, `SceneObject.cpp:252-256`). Only the fov
+        // member tracks the override (`getFov`, `SceneObject.cpp:257`).
+        camera: kirie_script::CameraState {
+            eye: cam.eye,
+            center: cam.center,
+            up: cam.up,
+            fov: cam.fov.value,
+        },
         ..SceneState::default()
     }
 }
@@ -578,7 +789,7 @@ pub fn as_f32(v: &ScriptValue) -> Option<f32> {
     }
 }
 
-/// Coerce a script value to an RGB triple (color).
+/// Coerce a script value to a vec3 (origin/scale/angles).
 pub fn as_vec3(v: &ScriptValue) -> Option<[f32; 3]> {
     match v {
         ScriptValue::Vec3(a) => Some(*a),
@@ -587,6 +798,7 @@ pub fn as_vec3(v: &ScriptValue) -> Option<[f32; 3]> {
     }
 }
 
+/// Coerce a script value to an RGB triple (color).
 pub fn as_rgb(v: &ScriptValue) -> Option<[f32; 3]> {
     match v {
         ScriptValue::Vec3(c) => Some(*c),
@@ -594,5 +806,104 @@ pub fn as_rgb(v: &ScriptValue) -> Option<[f32; 3]> {
         ScriptValue::Vec2(c) => Some([c[0], c[1], 0.0]),
         ScriptValue::Float(f) => Some([*f as f32; 3]),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn layer_list(ids: &[i64]) -> Vec<LayerState> {
+        ids.iter()
+            .map(|&id| LayerState {
+                id,
+                ..LayerState::default()
+            })
+            .collect()
+    }
+
+    fn ids(layers: &[LayerState]) -> Vec<i64> {
+        layers.iter().map(|l| l.id).collect()
+    }
+
+    /// Move down: remove-then-insert means the target position is counted in
+    /// the list *without* the moved layer (CScene.cpp:544-561).
+    #[test]
+    fn sort_layer_moves_toward_bottom() {
+        let mut layers = layer_list(&[10, 20, 30, 40]);
+        assert!(sort_layer_apply(&mut layers, 30, 0));
+        assert_eq!(ids(&layers), [30, 10, 20, 40]);
+    }
+
+    #[test]
+    fn sort_layer_moves_toward_top() {
+        let mut layers = layer_list(&[10, 20, 30, 40]);
+        assert!(sort_layer_apply(&mut layers, 10, 2));
+        assert_eq!(ids(&layers), [20, 30, 10, 40]);
+    }
+
+    /// A negative index appends (top) — the reference leaves `insertPos` at
+    /// `end()` (CScene.cpp:546-548).
+    #[test]
+    fn sort_layer_negative_index_appends() {
+        let mut layers = layer_list(&[10, 20, 30]);
+        assert!(sort_layer_apply(&mut layers, 10, -1));
+        assert_eq!(ids(&layers), [20, 30, 10]);
+    }
+
+    /// A past-the-end index appends too — the reference's walk runs out of
+    /// scriptable layers before reaching `index` (CScene.cpp:549-560).
+    #[test]
+    fn sort_layer_past_end_appends() {
+        let mut layers = layer_list(&[10, 20, 30]);
+        assert!(sort_layer_apply(&mut layers, 20, 99));
+        assert_eq!(ids(&layers), [10, 30, 20]);
+    }
+
+    /// An unknown id leaves the list untouched (CScene.cpp:540-543).
+    #[test]
+    fn sort_layer_unknown_id_is_a_noop() {
+        let mut layers = layer_list(&[10, 20, 30]);
+        assert!(!sort_layer_apply(&mut layers, 77, 0));
+        assert_eq!(ids(&layers), [10, 20, 30]);
+    }
+
+    /// Re-inserting at the layer's own position is stable.
+    #[test]
+    fn sort_layer_same_position_is_stable() {
+        let mut layers = layer_list(&[10, 20, 30]);
+        assert!(sort_layer_apply(&mut layers, 20, 1));
+        assert_eq!(ids(&layers), [10, 20, 30]);
+    }
+
+    /// The reference applies only a resolved, non-self parent
+    /// (`ScriptableObjectAdapter.cpp:226-229`): null (kirie's `None`) has no
+    /// C++-side effect — there is no detach path — and self-parenting is
+    /// ignored.
+    #[test]
+    fn set_parent_filters_like_the_reference() {
+        assert_eq!(parent_update(3, Some(7)), Some((3, 7)));
+        assert_eq!(parent_update(3, Some(3)), None); // self-parent ignored
+        assert_eq!(parent_update(3, None), None); // null detach is a no-op
+    }
+
+    /// Partial `setCameraTransforms` calls merge per field, last-wins — the
+    /// reference applies each present member as it lands
+    /// (`SceneObject.cpp:272-286`), so two calls in one tick behave like the
+    /// second overwriting only the fields it names.
+    #[test]
+    fn camera_ops_merge_last_wins_per_field() {
+        let mut slot = None;
+        merge_camera(&mut slot, Some([1.0, 2.0, 3.0]), None, None, Some(60.0));
+        merge_camera(&mut slot, None, Some([4.0, 5.0, 6.0]), None, Some(45.0));
+        assert_eq!(
+            slot,
+            Some(CameraOp {
+                eye: Some([1.0, 2.0, 3.0]),
+                center: Some([4.0, 5.0, 6.0]),
+                up: None,
+                fov: Some(45.0),
+            })
+        );
     }
 }
