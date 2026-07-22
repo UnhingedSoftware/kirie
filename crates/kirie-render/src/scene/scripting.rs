@@ -13,14 +13,17 @@
 //!
 //! The object-leaf properties that flow into the per-object builtin uniforms
 //! (`g_Alpha`, `g_Brightness`, `g_Color`), object visibility and text content
-//! are wired back, plus: runtime layers (`createLayer` + transform/color ops
-//! driving their solid quads) and the runtime camera override
+//! are wired back, plus the scene ops: runtime layers (`createLayer` +
+//! transform/color ops driving their solid quads), the runtime camera override
 //! (`setCameraTransforms` → the perspective camera 3D models re-read each
-//! frame; the 2D ortho screen MVP is untouched, reference `Camera.h:24-26`).
-//! `setParent`/`sortLayer` render-side application is the remaining gap (see
-//! `process_output`). Scene-object transform ops (`origin`/`scale`/`angles` on
-//! *baked* objects) still require a geometry rebuild the 2D compositor does not
-//! do per-frame (tracked).
+//! frame; the 2D ortho screen MVP is untouched, reference `Camera.h:24-26`),
+//! z-order moves (`sortLayer` → the reference's single reordered render list)
+//! and reparenting (`setParent` → the ancestor-visibility gate). Remaining
+//! limits: scene-object transform ops (`origin`/`scale`/`angles` on *baked*
+//! objects) require a geometry rebuild the 2D compositor does not do
+//! per-frame, and a reparent does not re-anchor a baked transform (`world_xf`
+//! composes parent chains at build) — visibility gating is the live part
+//! (both tracked).
 
 use std::collections::BTreeMap;
 
@@ -166,6 +169,9 @@ pub struct ScriptHost {
     /// True when a `sortLayer` op reordered [`Self::layers`] since the renderer
     /// last drained the order via [`Self::take_layer_order`].
     order_dirty: bool,
+    /// Applied `setParent` ops — `(layer id, new parent id)` — drained via
+    /// [`Self::take_parent_updates`].
+    parent_updates: Vec<(i64, i64)>,
     /// True when [`Self::scene`] changed since the retained frame last copied it
     /// (a script fov override — reference `getCameraTransforms` reports the
     /// overridden fov via `getFov()`, `SceneObject.cpp:257`): the per-tick
@@ -297,6 +303,7 @@ impl ScriptHost {
             created: Vec::new(),
             camera_op: None,
             order_dirty: false,
+            parent_updates: Vec::new(),
             scene_dirty: false,
             frame: None,
             user_props_dirty: false,
@@ -507,9 +514,17 @@ impl ScriptHost {
                         self.order_dirty = true;
                     }
                 }
-                // setParent render-side application lands with the reparent
-                // bridge (tracked gap, see module docs).
-                SceneOp::SetParent { .. } => {}
+                SceneOp::SetParent { layer_id, parent } => {
+                    // Keep the retained snapshot in step with host.js, which
+                    // already updated its own record this tick (including a
+                    // null detach — the JS-side read shows it).
+                    if let Some(l) = self.layers.iter_mut().find(|l| l.id == layer_id) {
+                        l.parent = parent;
+                    }
+                    if let Some(u) = parent_update(layer_id, parent) {
+                        self.parent_updates.push(u);
+                    }
+                }
             }
         }
         updates
@@ -536,6 +551,13 @@ impl ScriptHost {
         }
         self.order_dirty = false;
         Some(self.layers.iter().map(|l| l.id).collect())
+    }
+
+    /// Drain the tick's applied `setParent` ops: `(layer id, new parent id)`.
+    /// The renderer feeds these into the ancestor-visibility gate so hiding the
+    /// new parent group hides the reparented layer (docs §7.1).
+    pub fn take_parent_updates(&mut self) -> Vec<(i64, i64)> {
+        std::mem::take(&mut self.parent_updates)
     }
 
     /// Keep the cached layer snapshot in step with an applied value so next
@@ -584,6 +606,18 @@ impl ScriptHost {
             // so there is nothing to mirror.
             PropTarget::Brightness => {}
         }
+    }
+}
+
+/// The render-side effect of one `setParent` op. The reference applies only a
+/// resolved, NON-self parent (`layer_set_parent`,
+/// `ScriptableObjectAdapter.cpp:226-229`: `if (parentId >= 0 && parentId !=
+/// self->getId ())`): a null or unresolvable argument leaves the C++ object
+/// untouched — there is no detach path — and self-parenting is ignored.
+fn parent_update(layer_id: i64, parent: Option<i64>) -> Option<(i64, i64)> {
+    match parent {
+        Some(p) if p != layer_id => Some((layer_id, p)),
+        _ => None,
     }
 }
 
@@ -840,6 +874,17 @@ mod tests {
         let mut layers = layer_list(&[10, 20, 30]);
         assert!(sort_layer_apply(&mut layers, 20, 1));
         assert_eq!(ids(&layers), [10, 20, 30]);
+    }
+
+    /// The reference applies only a resolved, non-self parent
+    /// (`ScriptableObjectAdapter.cpp:226-229`): null (kirie's `None`) has no
+    /// C++-side effect — there is no detach path — and self-parenting is
+    /// ignored.
+    #[test]
+    fn set_parent_filters_like_the_reference() {
+        assert_eq!(parent_update(3, Some(7)), Some((3, 7)));
+        assert_eq!(parent_update(3, Some(3)), None); // self-parent ignored
+        assert_eq!(parent_update(3, None), None); // null detach is a no-op
     }
 
     /// Partial `setCameraTransforms` calls merge per field, last-wins — the

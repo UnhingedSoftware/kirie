@@ -789,6 +789,25 @@ impl SceneRenderer {
                 self.camera.fov.value = f;
             }
         }
+        for (id, parent) in script.take_parent_updates() {
+            // Live reparent (`thisLayer.setParent` → `layer_set_parent`,
+            // `ScriptableObjectAdapter.cpp:193-230`): the reference just
+            // rewrites the data object's `parent` field; kirie's functional
+            // equivalent is the ancestor-visibility gate (docs §7.1), fed by
+            // `parent_by_id` + each image's stored parent. Transform
+            // inheritance stays build-baked (`world_xf` composes the parent
+            // chain into the object's quad at build) — a reparent does NOT
+            // re-anchor a baked transform; visibility gating is the part
+            // scripts use (documented limit).
+            self.parent_by_id.insert(id, Some(parent));
+            for item in &mut self.items {
+                if let SceneItem::Image(o) = item
+                    && o.id == id
+                {
+                    o.parent = Some(parent);
+                }
+            }
+        }
         if let Some(order) = script.take_layer_order() {
             // Live z-order (`thisScene.sortLayer` →
             // `CScene::moveLayerToScriptableIndex`, CScene.cpp:538-562): the
@@ -1758,6 +1777,16 @@ impl Renderer for SceneRenderer {
             for id in runtime_draw_order(&self.runtime_layers) {
                 let l = &self.runtime_layers[&id];
                 if !l.visible || l.alpha <= 0.0 {
+                    continue;
+                }
+                // A script may parent a runtime layer under a scene group
+                // (`setParent`); the reference gates every object by its
+                // ancestors' visibility (docs §7.1), so gate the bars too.
+                if !ancestors_visible(
+                    &self.parent_by_id,
+                    &self.visible_by_id,
+                    self.parent_by_id.get(&id).copied().flatten(),
+                ) {
                     continue;
                 }
                 let cx = l.origin[0] - sw / 2.0;
@@ -2992,6 +3021,23 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A live `setParent` moves the visibility gating: an object under a
+    /// visible group draws; after reparenting under a hidden group, the
+    /// ancestor walk gates it off (docs §7.1; `layer_set_parent` rewrites the
+    /// data object's `parent`, `ScriptableObjectAdapter.cpp:226-229`).
+    #[test]
+    fn reparent_moves_visibility_gating() {
+        let mut parent_by_id: HashMap<i64, Option<i64>> =
+            [(1, None), (2, None), (3, Some(1))].into_iter().collect();
+        let visible_by_id: HashMap<i64, bool> =
+            [(1, true), (2, false), (3, true)].into_iter().collect();
+        let start = |p: &HashMap<i64, Option<i64>>| p.get(&3).copied().flatten();
+        assert!(ancestors_visible(&parent_by_id, &visible_by_id, start(&parent_by_id)));
+        // The script host emits (3, 2); the renderer rewrites the map.
+        parent_by_id.insert(3, Some(2));
+        assert!(!ancestors_visible(&parent_by_id, &visible_by_id, start(&parent_by_id)));
     }
 
     /// Runtime layers draw in creation order by default: synthetic ids descend
