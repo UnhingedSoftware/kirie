@@ -69,6 +69,18 @@ fn render_scale() -> f32 {
     f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+/// `--disable-parallax`, stored once at launch like [`RENDER_SCALE_BITS`]
+/// (the reference keeps it engine-global in settings.mouse.disableparallax).
+static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn set_disable_parallax(on: bool) {
+    DISABLE_PARALLAX.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn disable_parallax() -> bool {
+    DISABLE_PARALLAX.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Map the compat scaling enum to kirie-video's (doc §3.1 value table).
 #[must_use]
 pub fn to_video_scaling(mode: ScalingMode) -> kirie_video::ScalingMode {
@@ -241,6 +253,7 @@ struct Target {
 /// control socket (if any) wired to a dedicated applier thread.
 fn run_wallpapers(args: CompatArgs) -> ExitCode {
     set_render_scale(args.render_scale as f32);
+    set_disable_parallax(args.disable_parallax);
     let window_mode = args.mode != WindowMode::DesktopBackground;
     let targets = build_targets(&args);
     if targets.is_empty() {
@@ -1091,6 +1104,7 @@ fn build_for_spec(
                 render_scale: render_scale(),
                 scaling: to_render_scaling(*scaling),
                 clamp: to_render_clamp(*clamp),
+                disable_parallax: disable_parallax(),
             };
             match kirie_render::load_workshop_scene(
                 target,

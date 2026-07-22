@@ -57,6 +57,10 @@ pub struct SceneOptions {
     /// supersampling (its AA; FBOProvider.h:25-29). Scene coordinates stay
     /// logical. Clamped to [0.25, 4]; 1.0 = native.
     pub render_scale: f32,
+    /// `--disable-parallax`: gates the camera-parallax displacement update
+    /// (CScene.cpp:329) and the per-layer parallax translation
+    /// (CImage.cpp:1168), matching the reference's mouse.disableparallax.
+    pub disable_parallax: bool,
 }
 
 impl Default for SceneOptions {
@@ -65,6 +69,7 @@ impl Default for SceneOptions {
             scaling: ScalingMode::default(),
             clamp: ClampMode::default(),
             render_scale: 1.0,
+            disable_parallax: false,
         }
     }
 }
@@ -1570,17 +1575,25 @@ impl Renderer for SceneRenderer {
         // Pointer + parallax snapshots for the draw loops (disjoint fields).
         let pointer = self.pointer;
         let pointer_last = self.pointer_last;
-        let parallax = (
-            self.parallax_disp,
-            self.general.cameraparallaxamount.value,
-            self.proj_w as f32,
-        );
+        // `--disable-parallax` zeroes the per-layer translation outright
+        // (CImage.cpp:1168 checks the flag every frame, so any residual
+        // displacement stops applying immediately).
+        let parallax = if self.options.disable_parallax {
+            ([0.0, 0.0], 0.0, self.proj_w as f32)
+        } else {
+            (
+                self.parallax_disp,
+                self.general.cameraparallaxamount.value,
+                self.proj_w as f32,
+            )
+        };
 
         // Pointer rollover (`g_PointerPositionLast`) + camera parallax easing
         // (CScene::renderFrame): `disp = mix(disp, (mouse-0.5)·amount·influence,
-        // clamp(delay·dt, 0, 1))` — `delay` is a rate despite the name.
+        // clamp(delay·dt, 0, 1))` — gated on `--disable-parallax` exactly like
+        // the reference (CScene.cpp:329). `delay` is a rate despite the name.
         self.pointer_last = self.pointer;
-        if self.general.cameraparallax.value {
+        if self.general.cameraparallax.value && !self.options.disable_parallax {
             let amount = self.general.cameraparallaxamount.value;
             let influence = self.general.cameraparallaxmouseinfluence.value;
             let t = (self.general.cameraparallaxdelay.value * dt).clamp(0.0, 1.0);

@@ -366,6 +366,7 @@ pub fn capture(
                 render_scale: 1.0,
                 scaling: super::run::to_render_scaling(scaling),
                 clamp: super::run::to_render_clamp(clamp),
+                disable_parallax: false,
             };
             kirie_render::load_workshop_scene(
                 &render_target,
