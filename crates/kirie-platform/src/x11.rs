@@ -333,6 +333,7 @@ impl X11Platform {
                 queue: &queue,
                 format: texture.texture.format(),
                 output_name: &ctx.name,
+                size: (ctx.physical_size.width, ctx.physical_size.height),
             })
         });
 

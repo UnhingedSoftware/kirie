@@ -100,6 +100,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .namespace
             .unwrap_or_else(|| PresentOptions::default().layer_namespace),
         screen_roots: args.screen_roots,
+        ..PresentOptions::default()
     };
 
     let mut platform = match (args.backend, args.window) {

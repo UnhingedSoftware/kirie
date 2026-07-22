@@ -356,7 +356,7 @@ impl SceneRenderer {
         }
         let general = scene.general.clone();
 
-        let (proj_w, proj_h) = projection_size(model);
+        let (proj_w, proj_h) = projection_size(model, target.size);
         if proj_w == 0 || proj_h == 0 {
             return Err(super::SceneError::BadProjection {
                 width: proj_w,
@@ -2424,17 +2424,22 @@ fn screen_camera_mvp(proj: (u32, u32), eye: [f32; 3], center: [f32; 3], up: [f32
 }
 
 /// Compute the scene projection size (docs §5): explicit ortho size, else an
-/// auto size from image extents, else a 1080p fallback.
-fn projection_size(model: &SceneModel) -> (u32, u32) {
+/// auto size from image extents, else the output size.
+fn projection_size(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     match model.scene.camera.projection {
         Projection::Orthogonal { width, height } if width > 0 && height > 0 => (width as u32, height as u32),
-        _ => auto_projection(model),
+        _ => auto_projection(model, output),
     }
 }
 
 /// Auto projection: `2 × max(|origin| + size/2)` over image objects
-/// (docs §5, `CScene.cpp:44-75`); falls back to 1920×1080 when empty.
-fn auto_projection(model: &SceneModel) -> (u32, u32) {
+/// (docs §5, `CScene.cpp:44-75`); when there are no image extents (pure-3D
+/// scenes like Starscape) the reference falls back to the OUTPUT size
+/// (CScene.cpp:70 `getStableOutputSize`) — a fixed 1080p here renders the
+/// whole scene into an undersized FBO that upscales blurrily/pixelated on
+/// larger outputs. 1920×1080 remains only as the last resort when the output
+/// size is unknown (headless capture before configure).
+fn auto_projection(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     let mut ext_w = 0.0f32;
     let mut ext_h = 0.0f32;
     for object in &model.scene.objects {
@@ -2447,7 +2452,13 @@ fn auto_projection(model: &SceneModel) -> (u32, u32) {
     }
     let w = (ext_w * 2.0).round() as u32;
     let h = (ext_h * 2.0).round() as u32;
-    if w == 0 || h == 0 { (1920, 1080) } else { (w, h) }
+    if w > 0 && h > 0 {
+        (w, h)
+    } else if output.0 > 0 && output.1 > 0 {
+        output
+    } else {
+        (1920, 1080)
+    }
 }
 
 /// The base material's first-pass texture-slot-0 name (docs §7.1), if any.

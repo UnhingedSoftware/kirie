@@ -153,6 +153,7 @@ fn stretch_renders_content_upright() {
         queue: &queue,
         format: FORMAT,
         output_name: "test",
+        size: (256, 256),
     };
     let mut renderer = ImageRenderer::new(
         &target,
@@ -202,6 +203,7 @@ fn atlas_frames_advance_on_schedule() {
         queue: &queue,
         format: FORMAT,
         output_name: "test",
+        size: (256, 256),
     };
     let mut renderer = ImageRenderer::new(
         &target,
@@ -255,6 +257,7 @@ fn fit_with_border_letterboxes_transparent_black() {
         queue: &queue,
         format: FORMAT,
         output_name: "test",
+        size: (256, 256),
     };
     let mut renderer = ImageRenderer::new(
         &target,

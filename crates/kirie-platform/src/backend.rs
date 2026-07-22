@@ -47,6 +47,11 @@ pub struct PresentOptions {
     /// re-requesting the next callback so pacing stays compositor-driven
     /// (the reference paces its GL swap the same way). `None`/0 = uncapped.
     pub fps: Option<u32>,
+    /// `--playback-speed`/`--clock`: scales every scene's frame delta — the
+    /// reference multiplies its clock (`g_Time`) by this
+    /// (WallpaperApplication.cpp:908), so animations run faster/slower
+    /// without changing the render FPS. Videos apply their own rate.
+    pub playback_speed: f64,
 }
 
 impl Default for PresentOptions {
@@ -55,6 +60,7 @@ impl Default for PresentOptions {
             layer_namespace: "linux-wallpaperengine".to_string(),
             screen_roots: Vec::new(),
             fps: None,
+            playback_speed: 1.0,
         }
     }
 }

@@ -335,6 +335,7 @@ pub fn capture(
         queue: &gpu.queue,
         format,
         output_name: "screenshot",
+        size: (capture_size.width, capture_size.height),
     };
 
     let mut renderer: Box<dyn Renderer> = match wallpaper {

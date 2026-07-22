@@ -22,7 +22,10 @@ use kirie_platform::{CaptureFn, RenderCommand};
 
 use super::run::SwapCtx;
 use crossbeam_channel::{Receiver, Sender, select};
-use kirie_ipc::{Command, CommandOutcome, IpcEvent, ScalingMode as IpcScaling, ScreenStatus, StatusSnapshot};
+use kirie_ipc::{
+    ClampMode as IpcClamp, Command, CommandOutcome, IpcEvent, ScalingMode as IpcScaling,
+    ScreenStatus, SetOption, StatusSnapshot,
+};
 use kirie_video::{ScalingMode as VideoScaling, VideoControl};
 
 /// A live-control handle registered by the render factory as each wallpaper is
@@ -249,6 +252,11 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     c.set_speed(f64::from(s));
                 }
             }
+            // Scenes: scale the render clock (the reference multiplies g_Time
+            // by playbackSpeed, WallpaperApplication.cpp:908).
+            if let Some(cmd_tx) = cmd_sender(state) {
+                let _ = cmd_tx.send(RenderCommand::SetSpeed(s));
+            }
             CommandOutcome::Ok
         }
         Command::Volume(v) => {
@@ -270,10 +278,38 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             }
             CommandOutcome::Ok
         }
-        // Recognized `set` keys always ack (doc §4.6); their live effect on a
-        // running engine is partial/absent in P3, applied honestly where a
-        // handle exists (none of these have one for video).
-        Command::Set(_opt) => CommandOutcome::Ok,
+        // Recognized `set` keys always ack (doc §4.6). Live effects mirror the
+        // reference's setOption (WallpaperApplication.cpp:1318-1358): fps
+        // retargets the pacing cap; renderscale/disableparallax update the
+        // engine-global and rebuild the on-screen wallpapers (FBO sizes /
+        // parallax gates are baked at build time there too).
+        Command::Set(opt) => {
+            match opt {
+                SetOption::Fps(n) => {
+                    if let Some(cmd_tx) = cmd_sender(state) {
+                        let fps = u32::try_from(n).ok().filter(|f| *f > 0);
+                        let _ = cmd_tx.send(RenderCommand::SetFps(fps));
+                    }
+                }
+                SetOption::RenderScale(v) => {
+                    let clamped = if v.is_finite() { v.clamp(0.25, 4.0) } else { 1.0 };
+                    if (clamped - super::run::render_scale()).abs() > f32::EPSILON {
+                        super::run::set_render_scale(v);
+                        rebuild_current(state);
+                    }
+                }
+                SetOption::DisableParallax(on) => {
+                    if on != super::run::disable_parallax() {
+                        super::run::set_disable_parallax(on);
+                        rebuild_current(state);
+                    }
+                }
+                // noautomute/disablemouse/nofullscreenpause/audiodevice: ack
+                // only for now (follow-up: live audio-device re-init).
+                _ => {}
+            }
+            CommandOutcome::Ok
+        }
         // Live wallpaper swap (doc §4.7): build the new wallpaper off the render
         // thread and swap it in — instant if it was `preload`ed, otherwise the
         // old wallpaper keeps rendering until the build finishes. Errors only if
@@ -425,23 +461,39 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
         }
         Command::Scaling { screen, mode } => {
             // doc §4.10: mode already validated by the parser; error only if
-            // the screen has no recorded background. Live effect via the video
-            // control where present.
+            // the screen has no recorded background. Videos retarget live via
+            // their control; scenes/images bake scaling at build time, so
+            // retarget the build params and rebuild — the reference's
+            // setScreenScaling invalidates + setBackground the same way
+            // (WallpaperApplication.cpp:1237-1259).
             match state.screens.get(&screen) {
                 Some(entry) if entry.bg.is_some() => {
                     if let Some(c) = &entry.control {
                         c.set_scaling(map_scaling(mode));
+                    }
+                    if let Some((_, build_ctx)) = swap_parts(state)
+                        && build_ctx.set_scaling(scaling_to_args(mode))
+                    {
+                        rebuild_current(state);
                     }
                     CommandOutcome::Ok
                 }
                 _ => CommandOutcome::Error,
             }
         }
-        Command::Clamp { screen, .. } => {
-            // Same error semantics as scaling (doc §4.11). kirie-video has no
-            // live clamp control, so this only validates the screen.
+        Command::Clamp { screen, mode } => {
+            // Same error semantics as scaling (doc §4.11); clamp is baked at
+            // build time for every type, so retarget + rebuild
+            // (WallpaperApplication.cpp:1261-1276).
             match state.screens.get(&screen) {
-                Some(entry) if entry.bg.is_some() => CommandOutcome::Ok,
+                Some(entry) if entry.bg.is_some() => {
+                    if let Some((_, build_ctx)) = swap_parts(state)
+                        && build_ctx.set_clamp(clamp_to_args(mode))
+                    {
+                        rebuild_current(state);
+                    }
+                    CommandOutcome::Ok
+                }
                 _ => CommandOutcome::Error,
             }
         }
@@ -471,6 +523,79 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             });
             CommandOutcome::Ok
         }
+    }
+}
+
+/// The live-swap parts (render-command sender + build params), if the platform
+/// is up.
+fn swap_parts(state: &AppState) -> Option<(kirie_platform::CommandSender, Arc<super::run::BuildContext>)> {
+    state
+        .swap
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())))
+}
+
+/// Just the render-command sender.
+fn cmd_sender(state: &AppState) -> Option<kirie_platform::CommandSender> {
+    swap_parts(state).map(|(tx, _)| tx)
+}
+
+/// Rebuild every screen's current wallpaper with the present build params —
+/// the reference's rebuild-after-set (renderscale/scaling/clamp all invalidate
+/// the cached build and call setBackground again,
+/// WallpaperApplication.cpp:1237-1355). Deliberately bypasses the preload
+/// stash: anything stashed was built with the old params.
+fn rebuild_current(state: &mut AppState) {
+    let Some((cmd_tx, build_ctx)) = swap_parts(state) else {
+        return;
+    };
+    // A rebuild swap supersedes any pending debounced property-rebuild.
+    state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let props: Vec<(String, String)> = state
+        .properties
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let screens: Vec<(String, std::path::PathBuf)> = state
+        .screens
+        .iter()
+        .filter_map(|(s, e)| e.bg.clone().map(|b| (s.clone(), b)))
+        .collect();
+    for (screen, path) in screens {
+        #[cfg(feature = "web-cef")]
+        let props_web = props.clone();
+        if let Some(build) = build_ctx.build_fn(screen.clone(), &path, props.clone()) {
+            let _ = cmd_tx.send(RenderCommand::Build {
+                screen,
+                stash: None,
+                build,
+            });
+            continue;
+        }
+        #[cfg(feature = "web-cef")]
+        if let Some(build_local) = build_ctx.build_local_fn(screen.clone(), &path, props_web) {
+            let _ = cmd_tx.send(RenderCommand::SwapLocal { screen, build_local });
+        }
+    }
+}
+
+/// Map the IPC scaling enum to the compat CLI's (shared arg surface).
+fn scaling_to_args(mode: IpcScaling) -> super::args::ScalingMode {
+    match mode {
+        IpcScaling::Stretch => super::args::ScalingMode::Stretch,
+        IpcScaling::Fit => super::args::ScalingMode::Fit,
+        IpcScaling::Fill => super::args::ScalingMode::Fill,
+        IpcScaling::Default => super::args::ScalingMode::Default,
+    }
+}
+
+/// Map the IPC clamp enum to the compat CLI's.
+fn clamp_to_args(mode: IpcClamp) -> super::args::ClampMode {
+    match mode {
+        IpcClamp::Clamp => super::args::ClampMode::Clamp,
+        IpcClamp::Border => super::args::ClampMode::Border,
+        IpcClamp::Repeat => super::args::ClampMode::Repeat,
     }
 }
 

@@ -60,12 +60,12 @@ use kirie_web::{WebBackend, WebRenderer, WebSize, cef::CefBackend};
 static RENDER_SCALE_BITS: std::sync::atomic::AtomicU32 =
     std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0f32
 
-fn set_render_scale(scale: f32) {
+pub(crate) fn set_render_scale(scale: f32) {
     let s = if scale.is_finite() { scale.clamp(0.25, 4.0) } else { 1.0 };
     RENDER_SCALE_BITS.store(s.to_bits(), std::sync::atomic::Ordering::Relaxed);
 }
 
-fn render_scale() -> f32 {
+pub(crate) fn render_scale() -> f32 {
     f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
@@ -73,11 +73,11 @@ fn render_scale() -> f32 {
 /// (the reference keeps it engine-global in settings.mouse.disableparallax).
 static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn set_disable_parallax(on: bool) {
+pub(crate) fn set_disable_parallax(on: bool) {
     DISABLE_PARALLAX.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-fn disable_parallax() -> bool {
+pub(crate) fn disable_parallax() -> bool {
     DISABLE_PARALLAX.load(std::sync::atomic::Ordering::Relaxed)
 }
 
@@ -400,8 +400,8 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         .map(|s| (s.scaling, s.clamp))
         .unwrap_or((args.window_scaling, args.window_clamp));
     let build_ctx = Arc::new(BuildContext {
-        scaling: bg_scaling,
-        clamp: bg_clamp,
+        scaling: Mutex::new(bg_scaling),
+        clamp: Mutex::new(bg_clamp),
         volume,
         silent,
         registrar: registrar.clone(),
@@ -427,6 +427,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let present = kirie_platform::PresentOptions {
         screen_roots,
         fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
+        playback_speed: args.playback_speed,
         ..Default::default()
     };
 
@@ -1137,8 +1138,13 @@ fn build_for_spec(
 /// besides the per-command screen/spec/properties). Cheap clones of the launch
 /// params, so the factory keeps its own copies.
 pub(crate) struct BuildContext {
-    scaling: ScalingMode,
-    clamp: ClampMode,
+    /// Output scaling/clamp used for every (re)build. Mutexes so the IPC
+    /// `scaling`/`clamp` commands can retarget them live — the reference
+    /// stores per-screen modes and rebuilds the wallpaper
+    /// (WallpaperApplication.cpp:1237-1276); kirie runs one engine per
+    /// monitor, so engine-global is per-screen in practice.
+    scaling: Mutex<ScalingMode>,
+    clamp: Mutex<ClampMode>,
     volume: i64,
     silent: bool,
     registrar: Option<crossbeam_channel::Sender<Register>>,
@@ -1147,6 +1153,39 @@ pub(crate) struct BuildContext {
 }
 
 impl BuildContext {
+    fn scaling(&self) -> ScalingMode {
+        self.scaling.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    fn clamp(&self) -> ClampMode {
+        self.clamp.lock().map(|g| *g).unwrap_or_default()
+    }
+
+    /// Live `scaling` retarget (doc §4.10) — the next (re)build uses it.
+    /// Returns whether the mode actually changed (callers skip the rebuild
+    /// when the daemon re-pushes an unchanged setting on every switch).
+    pub(crate) fn set_scaling(&self, mode: ScalingMode) -> bool {
+        match self.scaling.lock() {
+            Ok(mut g) if *g != mode => {
+                *g = mode;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Live `clamp` retarget (doc §4.11) — the next (re)build uses it.
+    /// Returns whether the mode actually changed.
+    pub(crate) fn set_clamp(&self, mode: ClampMode) -> bool {
+        match self.clamp.lock() {
+            Ok(mut g) if *g != mode => {
+                *g = mode;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Report an engine-driven background change (playlist rotation) to the
     /// IPC applier so socket `status` reflects the on-screen path — the
     /// reference's `setBackground` updates `screenBackgrounds` the same way
@@ -1172,8 +1211,8 @@ impl BuildContext {
         let target = make_target(
             screen.clone(),
             path.to_string_lossy().into_owned(),
-            self.scaling,
-            self.clamp,
+            self.scaling(),
+            self.clamp(),
         );
         match &target.spec {
             RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
@@ -1182,12 +1221,13 @@ impl BuildContext {
         }
         let ctx = self.clone();
         let spec = target.spec;
-        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name| {
+        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size| {
             let rt = RenderTarget {
                 device,
                 queue,
                 format,
                 output_name: name,
+                size,
             };
             build_for_spec(
                 &rt,
@@ -1220,22 +1260,24 @@ impl BuildContext {
         let target = make_target(
             screen,
             path.to_string_lossy().into_owned(),
-            self.scaling,
-            self.clamp,
+            self.scaling(),
+            self.clamp(),
         );
         let RunSpec::Web { url, dir } = target.spec else {
             return None;
         };
         let silent = self.silent;
-        let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name| {
-            let rt = RenderTarget {
-                device,
-                queue,
-                format,
-                output_name: name,
-            };
-            build_web(&rt, &url, &dir, silent, &properties)
-        });
+        let build: kirie_platform::BuildLocalFn =
+            Box::new(move |device, queue, format, name, size| {
+                let rt = RenderTarget {
+                    device,
+                    queue,
+                    format,
+                    output_name: name,
+                    size,
+                };
+                build_web(&rt, &url, &dir, silent, &properties)
+            });
         Some(build)
     }
 }

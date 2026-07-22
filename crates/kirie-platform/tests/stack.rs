@@ -50,6 +50,7 @@ fn test_pattern_renders_headless() {
         queue: &queue,
         format,
         output_name: "offscreen-test",
+        size: (64, 64),
     });
 
     let texture = device.create_texture(&wgpu::TextureDescriptor {

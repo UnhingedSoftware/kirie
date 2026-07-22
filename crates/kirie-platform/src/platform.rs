@@ -83,7 +83,12 @@ struct PlatformState {
     /// (SPEC V6: skipped outputs cost zero render work).
     screen_roots: Vec<String>,
     /// Minimum frame interval from `PresentOptions::fps` (`None` = uncapped).
+    /// Live-updated by [`RenderCommand::SetFps`].
     min_frame: Option<std::time::Duration>,
+    /// Playback-speed clock scale applied to every frame delta
+    /// (`PresentOptions::playback_speed`; live-updated by
+    /// [`RenderCommand::SetSpeed`]).
+    playback_speed: f32,
     /// Set when the compositor closed the last layer surface — treated as
     /// abnormal, mirroring WaylandOpenGLDriver.cpp:234-274
     /// (docs/render-architecture.md §2.3).
@@ -166,6 +171,11 @@ impl WaylandPlatform {
                 namespace: options.layer_namespace,
                 screen_roots: options.screen_roots,
                 min_frame: options.fps.filter(|f| *f > 0).map(|f| std::time::Duration::from_secs_f64(1.0 / f64::from(f))),
+                playback_speed: if options.playback_speed > 0.0 {
+                    options.playback_speed as f32
+                } else {
+                    1.0
+                },
                 all_surfaces_closed: false,
                 cmd_tx,
                 preloaded: HashMap::new(),
@@ -233,13 +243,14 @@ impl PlatformState {
                 let Some(ctx) = self.output_for(&screen) else { return };
                 let Some(format) = ctx.format else { return }; // no frame drawn yet
                 let name = ctx.name.clone();
+                let size = (ctx.physical_size.width, ctx.physical_size.height);
                 let device = gpu.device.clone();
                 let queue = gpu.queue.clone();
                 let tx = self.cmd_tx.clone();
                 // Build off the render thread — the current wallpaper keeps
                 // rendering. The worker sends the result back as `Install`.
                 std::thread::spawn(move || {
-                    let renderer = build(&device, &queue, format, &name);
+                    let renderer = build(&device, &queue, format, &name, size);
                     let _ = tx.send(RenderCommand::Install { screen: name, stash, renderer });
                 });
             }
@@ -304,10 +315,22 @@ impl PlatformState {
                 let Some(idx) = self.output_index(&screen) else { return };
                 let Some(format) = self.outputs[idx].format else { return };
                 let name = self.outputs[idx].name.clone();
+                let size = (
+                    self.outputs[idx].physical_size.width,
+                    self.outputs[idx].physical_size.height,
+                );
                 let device = gpu.device.clone();
                 let queue = gpu.queue.clone();
-                let renderer = build_local(&device, &queue, format, &name);
+                let renderer = build_local(&device, &queue, format, &name, size);
                 self.install_renderer(idx, renderer);
+            }
+            RenderCommand::SetFps(fps) => {
+                self.min_frame = fps
+                    .filter(|f| *f > 0)
+                    .map(|f| std::time::Duration::from_secs_f64(1.0 / f64::from(f)));
+            }
+            RenderCommand::SetSpeed(speed) => {
+                self.playback_speed = if speed > 0.0 { speed } else { 1.0 };
             }
             RenderCommand::Screenshot { screen, capture } => {
                 // Capture the live frame on the render thread: the warm renderer
@@ -589,17 +612,20 @@ impl PlatformState {
                 queue: &queue,
                 format: texture.texture.format(),
                 output_name: &ctx.name,
+                size: (ctx.physical_size.width, ctx.physical_size.height),
             })
         });
 
         // Per-output dt, seconds; 0 on the first frame
         // (docs/render-architecture.md §2.1 step 3, §2.3 per-output
-        // cadence).
+        // cadence). Scaled by the playback-speed clock — the reference scales
+        // g_Time the same way (WallpaperApplication.cpp:908).
         let now = Instant::now();
         let dt = ctx
             .last_frame
             .map(|prev| now.duration_since(prev).as_secs_f32())
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            * self.playback_speed;
         ctx.last_frame = Some(now);
 
         // Pointer (T26): map the polled global cursor into this surface's

@@ -36,6 +36,12 @@ pub struct RenderTarget<'a> {
     pub format: wgpu::TextureFormat,
     /// Compositor-reported output name (e.g. `DP-1`), if known.
     pub output_name: &'a str,
+    /// Output physical size in pixels, `(0, 0)` when not yet known. Scenes
+    /// with no orthogonal projection and no image extents size their auto
+    /// projection from this, like the reference's output-size fallback
+    /// (CScene.cpp:70 `getStableOutputSize`); a hardcoded 1920×1080 there
+    /// upscales blurrily on larger outputs.
+    pub size: (u32, u32),
 }
 
 /// A per-output frame producer driven by compositor frame callbacks.
@@ -79,7 +85,13 @@ pub type RendererFactory = Box<dyn FnMut(&RenderTarget<'_>) -> Box<dyn Renderer>
 /// back to the render thread. The app supplies this (it owns the build logic);
 /// the platform just runs it on a worker and swaps the result in.
 pub type BuildFn = Box<
-    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str) -> Box<dyn Renderer + Send>
+    dyn FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            wgpu::TextureFormat,
+            &str,
+            (u32, u32),
+        ) -> Box<dyn Renderer + Send>
         + Send,
 >;
 
@@ -91,7 +103,8 @@ pub type BuildFn = Box<
 /// it blocks the render loop for the build's duration (a brief hitch), so it's
 /// reserved for backends that genuinely cannot build off-thread.
 pub type BuildLocalFn = Box<
-    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str) -> Box<dyn Renderer> + Send,
+    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str, (u32, u32)) -> Box<dyn Renderer>
+        + Send,
 >;
 
 /// Captures the current frame of an already-built, warm renderer to disk, on the
@@ -181,4 +194,13 @@ pub enum RenderCommand {
         /// Raw value string (the renderer parses it to the declared type).
         value: String,
     },
+    /// Live `set fps` (doc §4.6): update the frame-pacing cap. `None` (or 0
+    /// upstream) = uncapped — render at compositor rate, like the reference's
+    /// `settings.render.maximumFPS = 0`.
+    SetFps(Option<u32>),
+    /// Live `speed` (doc §4.3): the playback-speed clock scale applied to every
+    /// scene's frame delta — the reference scales `g_Time` by playbackSpeed
+    /// (WallpaperApplication.cpp:908), animating faster/slower without changing
+    /// render FPS. Videos get their own rate via `VideoControl::set_speed`.
+    SetSpeed(f32),
 }
