@@ -91,7 +91,24 @@ jobs:
       - name: Build (${{ matrix.variant }})
         run: cargo build -p kirie --features ${{ matrix.features }}
 
-      # The CEF subprocess helper is a separate binary that also links libcef.
-      - name: Build CEF helper (web-cef only)
+      # The CEF subprocess helper + the out-of-process web host are separate
+      # binaries that link libcef (the engine itself no longer does).
+      - name: Build CEF helper + web host (web-cef only)
         if: matrix.variant == 'web-cef'
-        run: cargo build -p kirie-web --features cef --bin kirie-cef-helper
+        run: |
+          cargo build -p kirie-web --features cef --bin kirie-cef-helper
+          cargo build -p kirie-web --features cef --bin kirie-webhost
+
+      - name: Test kirie-web (cef) (web-cef only)
+        if: matrix.variant == 'web-cef'
+        run: cargo test -p kirie-web --features cef --lib
+
+      # Pack smoke: kirie-pack validates the complete runtime file set
+      # (engine, helper, webhost, libcef + resources). A binary missing from
+      # the staging list fails HERE instead of on the release run.
+      - name: Pack smoke (web-cef only)
+        if: matrix.variant == 'web-cef'
+        run: |
+          cargo build -p kirie-launcher
+          ./target/debug/kirie-pack target/debug /tmp/kirie-ci-pack
+          test -s /tmp/kirie-ci-pack

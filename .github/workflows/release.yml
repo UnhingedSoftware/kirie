@@ -15,6 +15,15 @@ name: Release
 #   kirie-web-webview  - + wry/system webkit2gtk-4.1. Smaller, but REQUIRES the
 #                        target to have webkit2gtk-4.1 + libsoup-3.0 installed
 #                        (webkit can't be bundled). Built on glibc 2.35.
+#                        NOTE: webkit2gtk has NO offscreen-rendering path
+#                        (upstream won't-fix), so web wallpapers cannot
+#                        composite in this variant - it is scenes/video only.
+#                        Prefer kirie-web-cef for working web wallpapers.
+#
+# No Windows artifacts: kirie's presentation layer is Linux-native (Wayland
+# wlr-layer-shell + X11 fallback, PulseAudio, memfd) - on Windows the original
+# Wallpaper Engine is the native app. A Windows port would be a new platform
+# backend, not a packaging change.
 on:
   workflow_dispatch:
     inputs:
@@ -130,12 +139,19 @@ jobs:
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
       - name: Build (${{ matrix.variant }})
         run: cargo build --release -p kirie --features ${{ matrix.features }}
-      # The CEF subprocess helper is a separate binary that also links libcef.
-      - name: Build CEF helper (web-cef only)
+      # The CEF subprocess helper + the out-of-process web host are separate
+      # binaries that link libcef; the engine itself no longer does (the
+      # browser runs in the killable kirie-webhost child, frames via shm).
+      # kirie-pack refuses to pack without BOTH beside libcef.
+      - name: Build CEF helper + web host (web-cef only)
         if: matrix.variant == 'web-cef'
-        run: cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
-      # Guard: ffmpeg + shaderc must be static in every variant. (libcef / webkit
-      # are expected dynamic deps for the web variants and are not flagged.)
+        run: |
+          cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
+          cargo build --release -p kirie-web --features cef --bin kirie-webhost
+      # Guard: ffmpeg + shaderc must be static in every variant. The ENGINE
+      # must also never link libcef anymore (the browser is out-of-process in
+      # kirie-webhost); webkit stays an expected dynamic dep of the webview
+      # variant only.
       - name: Verify ffmpeg + shaderc are static
         run: |
           set -euo pipefail
@@ -145,7 +161,10 @@ jobs:
           if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
             echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
           fi
-          echo "ok: ffmpeg + shaderc statically linked"
+          if echo "$needed" | grep -iq 'libcef'; then
+            echo "::error::engine links libcef — the browser must stay out-of-process (kirie-webhost)"; exit 1
+          fi
+          echo "ok: ffmpeg + shaderc static; no libcef in the engine"
       # Package. web-cef is shipped as a SINGLE self-extracting file: kirie-pack
       # stages the engine + CEF runtime (libcef.so, ANGLE/swiftshader libs,
       # icudtl.dat, *.pak, v8 snapshot, locales), strips debug symbols (libcef
@@ -168,7 +187,7 @@ jobs:
             cp target/release/kirie "$dist/${{ matrix.artifact }}"
             cp README.md LICENSE "$dist/" 2>/dev/null || true
             if [ "${{ matrix.variant }}" = "web-webview" ]; then
-              printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n' > "$dist/REQUIREMENTS.txt"
+              printf 'Requires webkit2gtk-4.1 and libsoup-3.0 installed on the system.\nDebian/Ubuntu: apt install libwebkit2gtk-4.1-0 libsoup-3.0-0\nArch: pacman -S webkit2gtk-4.1 libsoup3\n\nLIMITATION: webkit2gtk has no offscreen-rendering path (upstream wont-fix),\nso WEB wallpapers cannot render in this variant - scenes/video/images only.\nUse the kirie-web-cef single-file build for web wallpapers.\n' > "$dist/REQUIREMENTS.txt"
             fi
             asset="${{ matrix.artifact }}-linux-x86_64.tar.gz"
             tar -C dist -czf "$asset" "${{ matrix.artifact }}"
