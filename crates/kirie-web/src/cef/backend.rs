@@ -53,12 +53,6 @@ use super::registry::{BrowserEntry, BrowserId, BrowserRegistry};
 /// (docs/subsystems-misc.md §3.5); 60 is CEF's documented cap.
 const FRAME_RATE: i32 = 60;
 
-/// How long [`CefBackend::shutdown`] waits for the CEF thread to confirm its
-/// browser closed before giving up (a wedged thread must not hang the caller;
-/// the close command stays queued and is still honoured whenever the thread
-/// gets to it).
-const CLOSE_WAIT: Duration = Duration::from_secs(10);
-
 /// A command sent from a backend handle to the shared CEF thread.
 enum Command {
     /// Create a windowless browser; reply with its id (or the failure).
