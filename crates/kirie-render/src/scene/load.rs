@@ -271,6 +271,89 @@ pub fn load_workshop_scene(
     }
 }
 
+/// Start the background pre-baker over a workshop root: every scene item gets
+/// its defaults-resolved bundle baked ahead of time (idle single-thread pool;
+/// new/updated items via the directory watcher), so the FIRST switch to a
+/// never-seen wallpaper already hits the bundle cache. Baking uses the exact
+/// same descriptor + defaults-resolution as [`load_workshop_scene`]'s miss
+/// path, so keys always line up. Returns `None` (silently) when the cache or
+/// root is unavailable — pre-baking is a pure accelerator, never a dependency.
+///
+/// Keep the returned handle alive for the engine's lifetime; dropping it
+/// stops the pool.
+pub fn start_background_prebake(
+    workshop_root: &Path,
+    assets_dir: Option<&Path>,
+) -> Option<kirie_bake::BackgroundBaker> {
+    let cache = kirie_bake::Cache::open_default().ok()?;
+    let assets_a: Option<std::path::PathBuf> = assets_dir.map(std::path::Path::to_path_buf);
+    let assets_b = assets_a.clone();
+
+    let source_fn: kirie_bake::SourceFn = std::sync::Arc::new(move |item: &Path| {
+        let pkg_path = item.join("scene.pkg");
+        let pkg = kirie_bake::map_readonly(&pkg_path)
+            .map_err(|e| kirie_bake::BakeError::Io { path: pkg_path.clone(), source: e })?;
+        let project = std::fs::read(item.join("project.json")).ok();
+        Ok(super::bundle::bundle_source(
+            (*pkg).as_ref(),
+            project.as_deref(),
+            assets_a.as_deref(),
+        ))
+    });
+
+    let content_fn: kirie_bake::ContentFn = std::sync::Arc::new(move |item: &Path, _src: &[u8]| {
+        let pkg_path = item.join("scene.pkg");
+        let map = kirie_bake::map_readonly(&pkg_path)
+            .map_err(|e| kirie_bake::BakeError::Io { path: pkg_path.clone(), source: e })?;
+        let pkg = OwnedPkg::from_external(map)
+            .map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
+        // Shader translation warms per-wallpaper caches; keep the same
+        // per-item cache dir convention as the real load.
+        kirie_shader::translate::set_cache_dir(Some(item.join(".kirie-cache")));
+        let scene = {
+            let bytes = pkg
+                .read_name(b"scene.json")
+                .map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
+            Scene::from_slice(bytes).map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?
+        };
+        let project = std::fs::read(item.join("project.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .and_then(|value| Project::from_value(value).ok());
+        let defaults = project
+            .as_ref()
+            .map(PropertyBag::from_project)
+            .unwrap_or_default();
+        let mut model = SceneModel::resolve(scene, &defaults);
+        let source = CompositeSource {
+            pkg: &pkg,
+            assets: assets_b.as_deref(),
+        };
+        let _ = model.load_assets(&source, &defaults);
+        let mut content = kirie_bake::BundleContent::new();
+        content
+            .set_scene_model(&model)
+            .map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
+        Ok(content)
+    });
+
+    let mut baker =
+        kirie_bake::BackgroundBaker::start(kirie_bake::BakerConfig::new(cache, source_fn, content_fn));
+    let mut queued = 0usize;
+    if let Ok(entries) = std::fs::read_dir(workshop_root) {
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if dir.join("scene.pkg").is_file() {
+                baker.enqueue(&dir);
+                queued += 1;
+            }
+        }
+    }
+    let _ = baker.watch(workshop_root);
+    tracing::info!(root = %workshop_root.display(), queued, "background pre-bake started");
+    Some(baker)
+}
+
 /// A minimal renderer that clears its surface to a fixed color — the best-effort
 /// fallback for a scene whose objects all skipped. Reuses no per-frame heap
 /// allocation (SPEC.md §V5): a single clear pass per frame.

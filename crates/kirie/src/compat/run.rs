@@ -311,6 +311,11 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
 
     // Per-screen build specs owned by the factory (must be `'static`).
     let specs: Vec<(String, RunSpec)> = targets.into_iter().map(|t| (t.screen, t.spec)).collect();
+    // Captured before `specs` moves into the renderer factory below.
+    let prebake_root: Option<PathBuf> = specs.iter().find_map(|(_, spec)| match spec {
+        RunSpec::Scene { dir, .. } => dir.parent().map(std::path::Path::to_path_buf),
+        _ => None,
+    });
     let volume = args.volume;
     let silent = args.silent;
     // `--set-property` overrides (scene user properties), captured for the
@@ -429,6 +434,19 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
         playback_speed: args.playback_speed,
         ..Default::default()
+    };
+
+    // Background pre-bake (idle, single thread): warm the bundle + shader
+    // caches for every sibling workshop item, so the FIRST switch to a
+    // never-seen wallpaper loads like a warm one. Root = the current
+    // background's workshop directory parent; skipped for non-workshop paths
+    // or with KIRIE_NO_PREBAKE=1. The handle lives for the engine's lifetime.
+    let _prebaker = if std::env::var_os("KIRIE_NO_PREBAKE").is_none() {
+        prebake_root.as_deref().and_then(|root| {
+            kirie_render::start_background_prebake(root, resolve::we_assets_dir().as_deref())
+        })
+    } else {
+        None
     };
 
     let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {

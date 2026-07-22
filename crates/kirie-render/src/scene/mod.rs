@@ -38,5 +38,5 @@ pub mod text;
 pub mod texture;
 
 pub use error::SceneError;
-pub use load::{SceneLoadError, load_workshop_scene};
+pub use load::{SceneLoadError, load_workshop_scene, start_background_prebake};
 pub use renderer::{SceneOptions, SceneRenderer};
