@@ -19,7 +19,7 @@ use crate::user::{ConstantValues, UserRef, UserSetting};
 /// A `Name` binding overwrites the value with the property's value (kept if the
 /// property is undeclared); a `Conditional` binding sets the value to the §3.3
 /// boolean `property == condition`. Script drivers are left for the runtime.
-fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &PropertyBag) {
+pub fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &PropertyBag) {
     match &us.user {
         Some(UserRef::Name(name)) => {
             if let Some(v) = bag.get(name) {
@@ -254,6 +254,22 @@ impl SceneModel {
             object.resolve(bag);
         }
         SceneModel { scene }
+    }
+
+    /// Re-resolve the whole model against `bag` in place. Bindings persist
+    /// after resolution (docs §3.2 — `UserSetting` keeps its `user` ref), so
+    /// this collapses every binding to the new bag's values: it is exactly the
+    /// resolution pass [`SceneModel::resolve`] + [`SceneModel::load_assets`]
+    /// perform, re-runnable. This is what lets a prebaked bundle store the
+    /// DEFAULTS-resolved model once and serve every property override without
+    /// re-baking (scene/bundle.rs), and what a live `setProperty` rebuild
+    /// avoids re-parsing for.
+    pub fn reresolve(&mut self, bag: &PropertyBag) {
+        self.scene.general.resolve(bag);
+        resolve_us(&mut self.scene.camera.fov, bag);
+        for object in &mut self.scene.objects {
+            object.resolve(bag);
+        }
     }
 
     /// Load every referenced material / effect / model / particle file from

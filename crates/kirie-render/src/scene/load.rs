@@ -146,8 +146,16 @@ pub fn load_workshop_scene(
     // folder isn't writable (best-effort). Set per-thread, so the off-thread
     // preload/swap build uses it too.
     kirie_shader::translate::set_cache_dir(Some(scene_dir.join(".kirie-cache")));
-    let pkg =
-        OwnedPkg::from_path(scene_dir.join("scene.pkg")).map_err(|e| SceneLoadError::Pkg(e.to_string()))?;
+    // mmap the pkg instead of reading it onto the heap: the bytes stay in the
+    // page cache (evictable, shared, no RSS spike for multi-hundred-MB
+    // packages) and the blake3 key hash streams straight over the mapping.
+    // Falls back to the heap read if the mmap fails (exotic filesystems).
+    let pkg_path = scene_dir.join("scene.pkg");
+    let pkg = match kirie_bake::map_readonly(&pkg_path) {
+        Ok(map) => OwnedPkg::from_external(map),
+        Err(_) => OwnedPkg::from_path(&pkg_path),
+    }
+    .map_err(|e| SceneLoadError::Pkg(e.to_string()))?;
 
     // Missing/unreadable project.json → empty bag (property defaults), matching
     // the corpus loader and the C++ tolerance of a scene without user props.
@@ -195,27 +203,24 @@ pub fn load_workshop_scene(
     };
 
     // Phase 3.1: consult the prebaked bundle cache before doing any scene work.
-    // The key folds in the pkg + project.json content AND the resolved property
-    // set (the bundle stores the RESOLVED model — see scene/bundle.rs). A hit
-    // skips scene.json parse, property resolution and every asset-JSON load; a
-    // miss builds the model as before and bakes it inline, best-effort. Shader
-    // translation and texture decode still run in SceneRenderer::new either way
-    // (Phase 3.4: shader warm-load is covered by kirie-shader's own
-    // content-addressed `.kirie-cache` set above, which the bundle path leaves
-    // untouched; folding translated modules into the bundle awaits a
-    // shader-provider seam in pipeline.rs and the shader-cache rekey).
+    // The key folds in the pkg + project.json content only — deliberately NOT
+    // the property values. The bundle stores the DEFAULTS-resolved model (all
+    // bindings retained), and the loader applies the caller's actual values
+    // via `SceneModel::reresolve` below — the same resolution pass re-run. So
+    // a property change (fov, colors, x-ray combos, …) reuses the one baked
+    // bundle instead of re-baking per value combination. A hit skips
+    // scene.json parse and every asset-JSON load; a miss builds against the
+    // DEFAULT bag, bakes, and then reresolves. Shader translation and texture
+    // decode still run in SceneRenderer::new either way (kirie-shader's own
+    // content-addressed `.kirie-cache` keeps shaders warm).
     let bundle_cache = kirie_bake::Cache::open_default().ok();
-    let bundle_src = super::bundle::bundle_source(
-        pkg.as_bytes(),
-        project_bytes.as_deref(),
-        assets_dir,
-        &user_props,
-    );
+    let bundle_src =
+        super::bundle::bundle_source(pkg.as_bytes(), project_bytes.as_deref(), assets_dir);
     let baked = bundle_cache
         .as_ref()
         .and_then(|cache| super::bundle::try_load_model(cache, &bundle_src));
 
-    let model = if let Some(model) = baked {
+    let mut model = if let Some(model) = baked {
         model
     } else {
         let scene = {
@@ -225,10 +230,16 @@ pub fn load_workshop_scene(
             Scene::from_slice(bytes).map_err(|e| SceneLoadError::Parse(e.to_string()))?
         };
 
-        let mut model = SceneModel::resolve(scene, &bag);
+        // Resolve + load against the project DEFAULTS (no user overrides), so
+        // the baked artifact is property-independent.
+        let defaults = project
+            .as_ref()
+            .map(PropertyBag::from_project)
+            .unwrap_or_default();
+        let mut model = SceneModel::resolve(scene, &defaults);
         // Asset load problems are non-fatal (missing textures/shaders degrade to
         // per-object skips inside the renderer); surface them at trace level.
-        let problems = model.load_assets(&source, &bag);
+        let problems = model.load_assets(&source, &defaults);
         for p in &problems {
             tracing::debug!(path = %p.path, reason = %p.reason, "scene asset problem");
         }
@@ -237,6 +248,10 @@ pub fn load_workshop_scene(
         }
         model
     };
+    // Apply the actual property values (defaults + `--set-property` overrides)
+    // over the defaults-resolved model — bindings persist, so this is exactly
+    // the resolution the direct path used to do with the full bag.
+    model.reresolve(&bag);
 
     match SceneRenderer::new(target, &model, &source, options, audio, &user_props) {
         Ok(renderer) => Ok(Box::new(renderer)),

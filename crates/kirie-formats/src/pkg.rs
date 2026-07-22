@@ -232,8 +232,40 @@ impl<'a> Pkg<'a> {
 /// loading from a path; same semantics as [`Pkg`].
 #[derive(Debug, Clone)]
 pub struct OwnedPkg {
-    data: Vec<u8>,
+    data: PkgData,
     raw: RawPkg,
+}
+
+/// The backing bytes of an [`OwnedPkg`]: a heap buffer, or any external
+/// owned byte source (a caller's read-only mmap — the page-cache-backed path
+/// that keeps a multi-hundred-MB pkg out of process RSS).
+enum PkgData {
+    Vec(Vec<u8>),
+    External(Box<dyn AsRef<[u8]> + Send + Sync>),
+}
+
+impl PkgData {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            PkgData::Vec(v) => v,
+            PkgData::External(b) => (**b).as_ref(),
+        }
+    }
+}
+
+impl std::fmt::Debug for PkgData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PkgData({} bytes)", self.as_slice().len())
+    }
+}
+
+impl Clone for PkgData {
+    /// External backings (mmaps) clone by materializing onto the heap — the
+    /// only way to duplicate an opaque byte source. Rare (nothing on the load
+    /// path clones a pkg).
+    fn clone(&self) -> Self {
+        PkgData::Vec(self.as_slice().to_vec())
+    }
 }
 
 impl OwnedPkg {
@@ -250,20 +282,33 @@ impl OwnedPkg {
     /// Parse a `scene.pkg` archive from an owned byte buffer.
     pub fn from_vec(data: Vec<u8>) -> Result<Self, PkgError> {
         let raw = parse_raw(&data)?;
-        Ok(Self { data, raw })
+        Ok(Self {
+            data: PkgData::Vec(data),
+            raw,
+        })
+    }
+
+    /// Parse a `scene.pkg` archive backed by an external owned byte source
+    /// (e.g. a read-only mmap) without copying it onto the heap.
+    pub fn from_external(data: Box<dyn AsRef<[u8]> + Send + Sync>) -> Result<Self, PkgError> {
+        let raw = parse_raw((*data).as_ref())?;
+        Ok(Self {
+            data: PkgData::External(data),
+            raw,
+        })
     }
 
     /// The raw bytes of the whole package.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
-        &self.data
+        self.data.as_slice()
     }
 
     /// The full magic/version string (docs/format-pkg.md §4). See
     /// [`Pkg::magic`].
     #[must_use]
     pub fn magic(&self) -> &[u8] {
-        slice(&self.data, &self.raw.magic)
+        slice(self.data.as_slice(), &self.raw.magic)
     }
 
     /// The version suffix after `PKGV` (docs/format-pkg.md §4). See
@@ -289,7 +334,7 @@ impl OwnedPkg {
     /// Iterate the entry table in on-disk order (docs/format-pkg.md §5).
     pub fn entries(&self) -> impl Iterator<Item = Entry<'_>> {
         self.raw.entries.iter().map(|e| Entry {
-            name: slice(&self.data, &e.name),
+            name: slice(self.data.as_slice(), &e.name),
             offset: e.offset,
             len: e.len,
         })
@@ -306,7 +351,7 @@ impl OwnedPkg {
     /// [`Pkg::read`].
     pub fn read(&self, entry: &Entry<'_>) -> Result<&[u8], PkgError> {
         read_payload(
-            &self.data,
+            self.data.as_slice(),
             self.raw.base_offset,
             entry.name,
             entry.offset,
@@ -322,7 +367,7 @@ impl OwnedPkg {
         })?;
         // Re-borrow the payload directly to decouple its lifetime from `entry`.
         read_payload(
-            &self.data,
+            self.data.as_slice(),
             self.raw.base_offset,
             entry.name,
             entry.offset,

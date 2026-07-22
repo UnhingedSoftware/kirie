@@ -38,6 +38,28 @@ pub mod gc;
 pub mod key;
 
 pub use baker::{BackgroundBaker, BakeOutcome, BakerConfig, ContentFn, PauseFn, SourceFn, never_pause};
+
+/// Memory-map a file read-only, boxed as opaque bytes.
+///
+/// This lives here because kirie-bake is the one crate with the §V2 `unsafe`
+/// exception for `memmap2` (see the module docs) — `forbid(unsafe_code)`
+/// callers (kirie-formats/kirie-render) use it to back large read-only inputs
+/// (a multi-hundred-MB `scene.pkg`) with the page cache instead of a heap
+/// `Vec`, so the bytes are evictable and never counted as process RSS.
+///
+/// SAFETY of the map itself: the file is opened read-only and the mapping is
+/// private; kirie treats workshop content as immutable while an engine runs —
+/// the same assumption the bundle/shader caches already make. An external
+/// truncation during use would fault, exactly like the cache mmaps above.
+pub fn map_readonly(
+    path: &std::path::Path,
+) -> std::io::Result<Box<dyn AsRef<[u8]> + Send + Sync>> {
+    let f = std::fs::File::open(path)?;
+    // SAFETY: read-only mapping of a file kirie never writes while mapped
+    // (workshop content is immutable per the crate contract above).
+    let map = unsafe { memmap2::Mmap::map(&f) }?;
+    Ok(Box::new(map))
+}
 pub use bundle::{
     BUNDLE_MAGIC, BakedBundle, BakedMip, BakedReflection, BakedShader, BakedStage, BakedTable, BakedTexture,
     BundleContent, BundleHeader,

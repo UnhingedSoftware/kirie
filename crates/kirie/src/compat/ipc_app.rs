@@ -409,19 +409,24 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
             if let Some((cmd_tx, build_ctx)) = sc {
+                // Impact slot: starts `true` (assume structural); the render
+                // thread clears it when the renderer applied the change fully
+                // live (visibility flips, material constants, camera, general,
+                // script handlers — the overwhelming majority).
+                let structural = Arc::new(std::sync::atomic::AtomicBool::new(true));
                 let _ = cmd_tx.send(RenderCommand::SetProperty {
                     screen: screen.clone(),
                     key,
                     value,
+                    structural: structural.clone(),
                 });
-                // The instant path above covers direct bindings, camera, general
-                // and script `applyUserProperties` handlers — but a scene whose
-                // scripts capture `engine.userProperties` at init only re-reads
-                // them on a reload, which is what the C++ engine does on every
-                // `setProperty`. Match it with a DEBOUNCED rebuild-swap: same
-                // end-state as the reference reload, no relaunch, no black gap,
-                // and a slider drag coalesces to one rebuild. Skipped for `stage`
-                // (empty screen: record-only by design) and web (no build_fn —
+                // Structural properties (vertex-baked transforms, effect
+                // visibility rewiring the pass chain, particle sims) still
+                // need the reference's reload semantics — a DEBOUNCED
+                // rebuild-swap (no relaunch, no black gap, slider drags
+                // coalesce). The render thread's impact verdict gates it: a
+                // fully-live change skips the rebuild entirely. Skipped for
+                // `stage` (empty screen: record-only) and web (no build_fn —
                 // the reference itself crashes CEF reloading web on property).
                 if !screen.is_empty()
                     && let Some(path) = state.screens.get(&screen).and_then(|e| e.bg.clone())
@@ -439,6 +444,9 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                         std::thread::sleep(std::time::Duration::from_millis(350));
                         if gen_slot.load(Ordering::SeqCst) != generation {
                             return; // superseded by a newer property change
+                        }
+                        if !structural.load(Ordering::SeqCst) {
+                            return; // applied fully live — no rebuild needed
                         }
                         if let Some(build) = build_ctx.build_fn(screen_c.clone(), &path, props) {
                             // Distinct key: a preload stashed under the plain path

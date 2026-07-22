@@ -291,14 +291,21 @@ impl PlatformState {
                     }
                 }
             }
-            RenderCommand::SetProperty { screen, key, value } => {
+            RenderCommand::SetProperty { screen, key, value, structural } => {
                 // Live property change: update the output's renderer in place and
                 // repaint so it shows next frame (no reload). No-op if the output
                 // or its renderer isn't up yet.
                 let Some(idx) = self.output_index(&screen) else { return };
                 let ctx = &mut self.outputs[idx];
                 if let Some(renderer) = ctx.renderer.as_mut() {
-                    renderer.set_property(&key, &value);
+                    // The flag starts `true` (assume structural) so a debounce
+                    // that fires before this command was processed still
+                    // rebuilds; an explicit Live verdict clears it.
+                    let impact = renderer.set_property(&key, &value);
+                    structural.store(
+                        impact == crate::renderer::PropertyImpact::NeedsRebuild,
+                        std::sync::atomic::Ordering::SeqCst,
+                    );
                     if ctx.configured && !ctx.frame_pending {
                         let qh = self.qh.clone();
                         ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());

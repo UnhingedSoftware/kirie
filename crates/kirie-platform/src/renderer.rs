@@ -66,7 +66,14 @@ pub trait Renderer {
     /// next frame — no reload. `value` is the raw string; the renderer parses it
     /// to the property's declared type. Default: no-op (renderers with no live
     /// properties, e.g. image/video/black, ignore it).
-    fn set_property(&mut self, _key: &str, _value: &str) {}
+    ///
+    /// Returns whether the change applied fully live or the property is bound
+    /// to something structural (vertex-baked transform, pass-chain wiring,
+    /// particle sim) that still needs a rebuild-swap to show. The app skips
+    /// the debounced rebuild for [`PropertyImpact::Live`] answers.
+    fn set_property(&mut self, _key: &str, _value: &str) -> PropertyImpact {
+        PropertyImpact::Live
+    }
 
     /// Feed the pointer position for this output, surface-normalized `[0,1]`
     /// with a top-left origin (T26). Called before [`Self::render`] whenever the
@@ -74,6 +81,16 @@ pub trait Renderer {
     /// keeps its centered default). Drives `g_PointerPosition*`, camera
     /// parallax, SceneScript `pointer_screen` and the web backend's mouse.
     fn set_pointer(&mut self, _x: f32, _y: f32) {}
+}
+
+/// How a live property change landed (see [`Renderer::set_property`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropertyImpact {
+    /// Fully applied in place — visible next frame, no rebuild needed.
+    Live,
+    /// The property binds something baked at build time; a rebuild-swap is
+    /// needed for the change to (fully) show.
+    NeedsRebuild,
 }
 
 /// Factory invoked once per output surface to build its [`Renderer`].
@@ -193,6 +210,12 @@ pub enum RenderCommand {
         key: String,
         /// Raw value string (the renderer parses it to the declared type).
         value: String,
+        /// Impact slot the render thread fills after applying: `false` when
+        /// the renderer reported [`PropertyImpact::Live`] (fully applied —
+        /// the app's debounced rebuild then skips), left/set `true` for
+        /// NeedsRebuild or when the command wasn't processed in time (the
+        /// safe default: create it as `true`).
+        structural: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     /// Live `set fps` (doc §4.6): update the frame-pacing cap. `None` (or 0
     /// upstream) = uncapped — render at compositor rate, like the reference's

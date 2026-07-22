@@ -13,19 +13,19 @@
 //!
 //! kirie-bake keys a bundle by `blake3(source) ⊕ BAKE_FORMAT_VERSION ⊕
 //! TRANSLATOR_VERSION` over opaque `source` bytes. The bundle stores the
-//! **resolved** model (property bindings collapsed, `cache.rs` stores it as
-//! JSON), so the source descriptor MUST pin every input that resolution reads:
+//! **DEFAULTS-resolved** model — property bindings collapsed against the
+//! project's declared defaults, with every binding retained (`UserSetting`
+//! keeps its `user` ref). The loader then applies the caller's actual
+//! property values via [`SceneModel::reresolve`], which is the same
+//! resolution pass re-run. So the key pins only what the *bake* reads, and a
+//! property change NEVER re-bakes (one bundle per wallpaper, not one per
+//! property combination):
 //!
 //! - the full `scene.pkg` content (scene.json + all pkg-borne asset JSON) —
 //!   folded in as its blake3 digest, not the raw bytes, so composing the
 //!   descriptor never copies a multi-hundred-MB package;
-//! - the `project.json` content (declares the properties and their types);
-//! - the **resolved user-property set** — the sorted `(name, value)` pairs
-//!   after `--set-property` overrides are applied. Two override spellings that
-//!   resolve to the same values share a bundle; any value change is a miss.
-//!   Values are encoded with a variant tag + the §3.3 condition-string form
-//!   (`f32`/`f64` `Display` round-trips exactly, so distinct numbers never
-//!   alias);
+//! - the `project.json` content (declares the properties, their types AND the
+//!   default values the bake resolves against);
 //! - the builtin-assets directory *path* (presence + location). `load_assets`
 //!   falls back to it for asset JSON not present in the pkg. Its contents are
 //!   treated as immutable per WE install — the same assumption the shader
@@ -48,12 +48,14 @@ use std::path::Path;
 use std::time::Instant;
 
 use kirie_bake::{BundleContent, Cache};
-use kirie_scene::{PropertyValue, SceneModel};
+use kirie_scene::SceneModel;
 
 /// Domain tag + descriptor-layout version. Bump the trailing byte whenever the
 /// descriptor encoding below changes so every existing bundle keys to a
 /// different directory (mirrors kirie-bake's no-migration §V8 stance).
-const DESCRIPTOR_TAG: &[u8] = b"kirie-scene-bundle-src\x01";
+/// `\x02`: property values dropped from the key — the bundle stores the
+/// defaults-resolved model and the loader reresolves.
+const DESCRIPTOR_TAG: &[u8] = b"kirie-scene-bundle-src\x02";
 
 /// Append a length-prefixed byte string (u32 LE length).
 fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
@@ -61,33 +63,16 @@ fn push_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(bytes);
 }
 
-/// The variant tag disambiguating same-string values of different types (e.g.
-/// `Bool(true)` vs `Text("true")`), belt-and-braces on top of `project.json`
-/// (already in the descriptor) pinning each property's declared type.
-fn value_tag(v: &PropertyValue) -> u8 {
-    match v {
-        PropertyValue::Bool(_) => 0,
-        PropertyValue::Number(_) => 1,
-        PropertyValue::Color(_) => 2,
-        PropertyValue::Combo(_) => 3,
-        PropertyValue::Text(_) => 4,
-    }
-}
-
 /// Compose the canonical bundle-source descriptor for a workshop scene — the
 /// opaque `source` bytes kirie-bake keys on. See the module docs for what each
-/// component pins and why. Property order is canonicalized (sorted by name) so
-/// the caller's iteration order never changes the key.
+/// component pins and why. Deliberately property-independent: one bundle
+/// serves every override combination via [`SceneModel::reresolve`].
 pub(crate) fn bundle_source(
     pkg_bytes: &[u8],
     project_bytes: Option<&[u8]>,
     assets_dir: Option<&Path>,
-    props: &[(String, PropertyValue)],
 ) -> Vec<u8> {
-    let mut sorted: Vec<&(String, PropertyValue)> = props.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut src = Vec::with_capacity(128 + sorted.len() * 48);
+    let mut src = Vec::with_capacity(128);
     src.extend_from_slice(DESCRIPTOR_TAG);
     src.extend_from_slice(blake3::hash(pkg_bytes).as_bytes());
     match project_bytes {
@@ -103,12 +88,6 @@ pub(crate) fn bundle_source(
             push_bytes(&mut src, dir.as_os_str().as_encoded_bytes());
         }
         None => src.push(0),
-    }
-    src.extend_from_slice(&u32::try_from(sorted.len()).unwrap_or(u32::MAX).to_le_bytes());
-    for (name, value) in sorted {
-        push_bytes(&mut src, name.as_bytes());
-        src.push(value_tag(value));
-        push_bytes(&mut src, value.as_condition_string().as_bytes());
     }
     src
 }
@@ -168,7 +147,7 @@ pub(crate) fn store_model(cache: &Cache, source: &[u8], model: &SceneModel) {
 mod tests {
     use std::path::PathBuf;
 
-    use kirie_scene::{PropertyBag, Scene};
+    use kirie_scene::{PropertyBag, PropertyValue, Scene};
 
     use super::*;
 
@@ -255,7 +234,7 @@ mod tests {
             other => panic!("expected image object, got {other:?}"),
         }
 
-        let source = bundle_source(b"pkg-bytes", Some(b"project-bytes"), None, &props);
+        let source = bundle_source(b"pkg-bytes", Some(b"project-bytes"), None);
         store_model(&cache, &source, &direct);
         let baked = try_load_model(&cache, &source).expect("bundle hit after bake");
 
@@ -267,50 +246,39 @@ mod tests {
         );
     }
 
-    /// The key folds in the *resolved* property values: the same pkg/project
-    /// with a different property value is a clean miss, never a stale hit.
+    /// THE determinism guard for the property-independent key: a model baked
+    /// against the DEFAULTS bag and then `reresolve`d against the override bag
+    /// is identical to one resolved directly against the override bag — so one
+    /// bundle can serve every property combination.
     #[test]
-    fn property_value_change_is_a_miss() {
-        let tmp = TmpDir::new("propmiss");
+    fn defaults_bake_plus_reresolve_equals_direct() {
+        let tmp = TmpDir::new("reresolve");
         let cache = Cache::with_root(&tmp.0);
 
-        let props_off = vec![("show".to_owned(), PropertyValue::Bool(false))];
-        let props_on = vec![("show".to_owned(), PropertyValue::Bool(true))];
-        let src_off = bundle_source(b"pkg", Some(b"proj"), None, &props_off);
-        let src_on = bundle_source(b"pkg", Some(b"proj"), None, &props_on);
-        assert_ne!(src_off, src_on, "descriptor differs on property value");
+        // The real loader's bag always carries every project-declared default;
+        // mirror that (a bag MISSING a property leaves the current value, so
+        // an empty bag cannot restore anything).
+        let mut defaults = PropertyBag::new();
+        defaults.insert("show", PropertyValue::Bool(true));
+        let baked_model = build_direct(&defaults);
+        assert!(baked_model.scene.objects[0].base.visible.value, "default visible");
+        let source = bundle_source(b"pkg", Some(b"proj"), None);
+        store_model(&cache, &source, &baked_model);
 
-        let mut bag = PropertyBag::new();
-        bag.insert("show", PropertyValue::Bool(false));
-        store_model(&cache, &src_off, &build_direct(&bag));
+        // Load the same bundle and apply an override.
+        let mut overridden = PropertyBag::new();
+        overridden.insert("show", PropertyValue::Bool(false));
+        let mut from_bundle = try_load_model(&cache, &source).expect("hit");
+        from_bundle.reresolve(&overridden);
 
-        assert!(try_load_model(&cache, &src_off).is_some(), "same values hit");
-        assert!(try_load_model(&cache, &src_on).is_none(), "changed value misses");
-    }
+        let direct = build_direct(&overridden);
+        assert_eq!(from_bundle, direct, "defaults-bake + reresolve == direct resolve");
+        assert!(!from_bundle.scene.objects[0].base.visible.value, "override applied");
 
-    /// Property iteration order never changes the key (sorted canonical form).
-    #[test]
-    fn property_order_is_canonical() {
-        let ab = vec![
-            ("alpha".to_owned(), PropertyValue::Number(1.0)),
-            ("beta".to_owned(), PropertyValue::Text("x".to_owned())),
-        ];
-        let ba: Vec<_> = ab.iter().rev().cloned().collect();
-        assert_eq!(
-            bundle_source(b"p", None, None, &ab),
-            bundle_source(b"p", None, None, &ba)
-        );
-    }
-
-    /// Same condition-string, different type → different key (variant tag).
-    #[test]
-    fn value_type_is_part_of_the_key() {
-        let as_bool = vec![("v".to_owned(), PropertyValue::Bool(true))];
-        let as_text = vec![("v".to_owned(), PropertyValue::Text("true".to_owned()))];
-        assert_ne!(
-            bundle_source(b"p", None, None, &as_bool),
-            bundle_source(b"p", None, None, &as_text)
-        );
+        // And back again — bindings survive any number of re-resolutions.
+        let mut back = from_bundle;
+        back.reresolve(&defaults);
+        assert_eq!(back, baked_model, "reresolve to defaults round-trips");
     }
 
     /// The builtin-assets dir identity (presence + path) is part of the key:
@@ -318,9 +286,9 @@ mod tests {
     /// assets dir must never serve the other's resolved model.
     #[test]
     fn assets_dir_identity_is_part_of_the_key() {
-        let none = bundle_source(b"p", None, None, &[]);
-        let a = bundle_source(b"p", None, Some(Path::new("/opt/we/assets")), &[]);
-        let b = bundle_source(b"p", None, Some(Path::new("/mnt/we/assets")), &[]);
+        let none = bundle_source(b"p", None, None);
+        let a = bundle_source(b"p", None, Some(Path::new("/opt/we/assets")));
+        let b = bundle_source(b"p", None, Some(Path::new("/mnt/we/assets")));
         assert_ne!(none, a);
         assert_ne!(a, b);
     }
@@ -329,16 +297,16 @@ mod tests {
     #[test]
     fn source_content_is_part_of_the_key() {
         assert_ne!(
-            bundle_source(b"pkg-1", Some(b"proj"), None, &[]),
-            bundle_source(b"pkg-2", Some(b"proj"), None, &[])
+            bundle_source(b"pkg-1", Some(b"proj"), None),
+            bundle_source(b"pkg-2", Some(b"proj"), None)
         );
         assert_ne!(
-            bundle_source(b"pkg", Some(b"proj-1"), None, &[]),
-            bundle_source(b"pkg", Some(b"proj-2"), None, &[])
+            bundle_source(b"pkg", Some(b"proj-1"), None),
+            bundle_source(b"pkg", Some(b"proj-2"), None)
         );
         assert_ne!(
-            bundle_source(b"pkg", Some(b"proj"), None, &[]),
-            bundle_source(b"pkg", None, None, &[])
+            bundle_source(b"pkg", Some(b"proj"), None),
+            bundle_source(b"pkg", None, None)
         );
     }
 }

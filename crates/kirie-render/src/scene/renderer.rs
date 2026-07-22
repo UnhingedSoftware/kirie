@@ -327,6 +327,37 @@ pub struct SceneRenderer {
     /// `object id → live visibility` over every object (incl. non-drawn groups),
     /// kept current by script visibility updates (docs §7.1 ancestor gating).
     visible_by_id: HashMap<i64, bool>,
+    /// Retained property-bound `visible` settings per object (base + image
+    /// level). Every object is BUILT regardless of visibility (like the
+    /// reference's CScene ctor), so a live `setProperty` on an x-ray combo /
+    /// layer toggle just re-resolves these and flips the chains — no rebuild.
+    visibility_bindings: Vec<VisBinding>,
+    /// Retained property-bound effect `visible` settings with their planned
+    /// state (see [`EffectVisBinding`]).
+    effect_vis_bindings: Vec<EffectVisBinding>,
+    /// Property names bound to genuinely structural positions (effect
+    /// visibility, object transforms, particle/text/animation-layer settings)
+    /// — the only properties whose change still needs the debounced
+    /// rebuild-swap. Everything else applies fully live.
+    structural_props: std::collections::HashSet<String>,
+}
+
+/// One object's retained `visible` bindings (see
+/// [`SceneRenderer::visibility_bindings`]).
+struct VisBinding {
+    id: i64,
+    base: kirie_scene::user::UserSetting<bool>,
+    image: Option<kirie_scene::user::UserSetting<bool>>,
+}
+
+/// One effect's retained `visible` binding plus the visibility the pass chain
+/// was PLANNED with. An effect toggle only forces a rebuild when the resolved
+/// value diverges from the planned one (the chain physically lacks/contains
+/// the passes); toggling a hidden object's effect back and forth while the
+/// object-level flip already applied live stays a background alignment.
+struct EffectVisBinding {
+    us: kirie_scene::user::UserSetting<bool>,
+    planned: bool,
 }
 
 impl SceneRenderer {
@@ -724,6 +755,9 @@ impl SceneRenderer {
             model_depth,
             parent_by_id,
             visible_by_id,
+            visibility_bindings: collect_visibility_bindings(scene),
+            effect_vis_bindings: collect_effect_vis_bindings(scene),
+            structural_props: collect_structural_props(scene),
         })
     }
 
@@ -928,9 +962,14 @@ fn build_object(
     param_cache: &mut ParamCache,
     fbo_scale: f32,
 ) -> Option<ObjectGpu> {
-    // A dependency donor plans its full chain even when invisible — hoisting
-    // renders its composite RT regardless of visibility (docs §5.6); only the
-    // scene draw is suppressed (donors never emit a Scene pass).
+    // Every object plans + builds its full chain regardless of visibility —
+    // the reference's CScene ctor `createObject`s every object and CImage
+    // checks visibility per frame at render. Building hidden objects too is
+    // what lets a property-bound visibility (x-ray combos, layer-switcher
+    // toggles) flip live with NO rebuild: `set_property` re-resolves the
+    // retained bindings and the draw loop just skips hidden chains (V6).
+    // `visible` seeds the runtime flag; donors additionally never emit a
+    // Scene pass (docs §5.6).
     let visible = offscreen_donor || (image.visible.value && object.base.visible.value);
     // The `colorBlendMode` compatibility material, loaded at setup like the
     // reference's `MaterialParser::load(project, "materials/util/
@@ -941,7 +980,7 @@ fn build_object(
         .flatten()
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .map(|v| kirie_scene::material::Material::from_value(&v));
-    let chain = plan::plan_image(image, visible, offscreen_donor, color_blend.as_ref());
+    let chain = plan::plan_image(image, true, offscreen_donor, color_blend.as_ref());
     if chain.passes.is_empty() {
         return None;
     }
@@ -1440,7 +1479,7 @@ fn build_object(
         alpha: image.alpha.value,
         brightness: image.brightness.value,
         color: image.color.value,
-        visible: true,
+        visible,
         reads_scene,
         offscreen_donor,
         final_front: comp_front,
@@ -1452,6 +1491,109 @@ fn build_object(
         angle_z: world_angle_z,
         atlas: layer_atlas,
     })
+}
+
+/// Collect every object's property-bound `visible` settings (base + image
+/// level) for live re-resolution. Objects without any binding are skipped —
+/// only scripts can change those, via the existing script path.
+fn collect_visibility_bindings(scene: &kirie_scene::Scene) -> Vec<VisBinding> {
+    scene
+        .objects
+        .iter()
+        .filter_map(|o| {
+            let image = match &o.kind {
+                ObjectKind::Image(img) => Some(img.visible.clone()),
+                _ => None,
+            };
+            let bound = o.base.visible.user.is_some()
+                || image.as_ref().is_some_and(|us| us.user.is_some());
+            bound.then(|| VisBinding {
+                id: o.base.id,
+                base: o.base.visible.clone(),
+                image,
+            })
+        })
+        .collect()
+}
+
+/// Collect every property-bound effect `visible` with the visibility the pass
+/// chain was planned with (its current resolved value at build).
+fn collect_effect_vis_bindings(scene: &kirie_scene::Scene) -> Vec<EffectVisBinding> {
+    let mut out = Vec::new();
+    for o in &scene.objects {
+        if let ObjectKind::Image(img) = &o.kind {
+            for eff in &img.effects {
+                if eff.visible.user.is_some() {
+                    out.push(EffectVisBinding {
+                        us: eff.visible.clone(),
+                        planned: eff.visible.value,
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Property names bound to structural positions — values baked into vertices,
+/// pass chains, or simulations at build time. A `setProperty` on one of these
+/// still needs the debounced rebuild-swap; anything else applies fully live.
+fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::HashSet<String> {
+    use kirie_scene::user::UserSetting;
+    let mut out = std::collections::HashSet::new();
+    fn add<T>(out: &mut std::collections::HashSet<String>, us: &UserSetting<T>) {
+        if let Some(user) = &us.user {
+            out.insert(user.name().to_owned());
+        }
+    }
+    for o in &scene.objects {
+        // Transforms are baked into the scene-space quad vertices.
+        add(&mut out, &o.base.origin);
+        add(&mut out, &o.base.scale);
+        add(&mut out, &o.base.angles);
+        match &o.kind {
+            ObjectKind::Image(img) => {
+                add(&mut out, &img.scale);
+                add(&mut out, &img.angles);
+                // colorBlendMode appends a pass (combo baked into a pipeline).
+                add(&mut out, &img.color_blend_mode);
+                // Effect visibility is handled dynamically (EffectVisBinding:
+                // rebuild only on planned-state divergence), not here.
+                for layer in &img.animationlayers {
+                    add(&mut out, &layer.rate);
+                    add(&mut out, &layer.visible);
+                    add(&mut out, &layer.blend);
+                    add(&mut out, &layer.animation);
+                }
+            }
+            ObjectKind::Particle(p) => {
+                // Emitter params are baked into the running simulation.
+                add(&mut out, &p.scale);
+                add(&mut out, &p.angles);
+                add(&mut out, &p.visible);
+                let ov = &p.instanceoverride;
+                add(&mut out, &ov.enabled);
+                add(&mut out, &ov.alpha);
+                add(&mut out, &ov.size);
+                add(&mut out, &ov.lifetime);
+                add(&mut out, &ov.rate);
+                add(&mut out, &ov.speed);
+                add(&mut out, &ov.count);
+                add(&mut out, &ov.color);
+                add(&mut out, &ov.colorn);
+            }
+            ObjectKind::Text(t) => {
+                add(&mut out, &t.text);
+                add(&mut out, &t.pointsize);
+                add(&mut out, &t.scale);
+                add(&mut out, &t.color);
+                add(&mut out, &t.alpha);
+                add(&mut out, &t.visible);
+            }
+            _ => {}
+        }
+    }
+    out
 }
 
 /// Whether every ancestor of a layer (walking `parent` up the chain) is visible
@@ -1945,9 +2087,10 @@ impl Renderer for SceneRenderer {
     /// Object visibility/transform bindings are not yet re-resolved live (they
     /// still apply on the next scene load); the render-uniform properties users
     /// tweak (colors, shader constants, fov, bloom) are covered.
-    fn set_property(&mut self, key: &str, value: &str) {
+    fn set_property(&mut self, key: &str, value: &str) -> kirie_platform::PropertyImpact {
         if !self.bag.set_from_str(key, value) {
-            return; // unknown key or unparseable — nothing changed
+            // unknown key or unparseable — nothing changed
+            return kirie_platform::PropertyImpact::Live;
         }
         // Material constants → shader params (the bulk: colors, hue, coloring…).
         for item in &mut self.items {
@@ -1990,6 +2133,27 @@ impl Renderer for SceneRenderer {
                 self.general.bloomthreshold.value,
             );
         }
+        // Object/image visibility bindings (x-ray combos, layer toggles):
+        // every chain is built regardless of visibility, so re-resolving the
+        // retained bindings and flipping the runtime flags IS the whole
+        // change — the draw loop skips hidden chains per frame like the
+        // reference's CImage::render visibility check. No rebuild.
+        for vb in &mut self.visibility_bindings {
+            kirie_scene::resolve::resolve_us(&mut vb.base, &self.bag);
+            let mut vis = vb.base.value;
+            if let Some(img) = &mut vb.image {
+                kirie_scene::resolve::resolve_us(img, &self.bag);
+                vis = vis && img.value;
+            }
+            self.visible_by_id.insert(vb.id, vis);
+            for item in &mut self.items {
+                if let SceneItem::Image(o) = item
+                    && o.id == vb.id
+                {
+                    o.visible = vis;
+                }
+            }
+        }
         // Script-driven properties (a SceneScript's `applyUserProperties` — e.g. a
         // `coloring` combo that recolors the scene, or a layer-switcher combo):
         // fire the change handler and apply its typed updates live (docs §5.3).
@@ -2011,6 +2175,22 @@ impl Renderer for SceneRenderer {
         if !updates.is_empty() {
             apply_runtime_updates(&mut self.runtime_layers, &updates);
             apply_script_updates(&mut self.items, &updates);
+        }
+        // Effect-visibility divergence: the chain physically lacks (or still
+        // contains) passes the new value wants. The object-level flip above
+        // already applied live, so the rebuild is a quiet background
+        // alignment, not the visible switch.
+        let mut effect_diverged = false;
+        for eb in &mut self.effect_vis_bindings {
+            kirie_scene::resolve::resolve_us(&mut eb.us, &self.bag);
+            if eb.us.value != eb.planned {
+                effect_diverged = true;
+            }
+        }
+        if effect_diverged || self.structural_props.contains(key) {
+            kirie_platform::PropertyImpact::NeedsRebuild
+        } else {
+            kirie_platform::PropertyImpact::Live
         }
     }
 

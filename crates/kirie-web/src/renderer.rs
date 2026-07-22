@@ -280,7 +280,7 @@ impl Renderer for WebRenderer {
     /// `applyUserProperties` batch. Values are typed like the reference's
     /// encoder (`CWeb.cpp`): bools bare, numbers bare, everything else (colors
     /// are "r g b" strings there too) as a JSON string.
-    fn set_property(&mut self, key: &str, value: &str) {
+    fn set_property(&mut self, key: &str, value: &str) -> kirie_platform::PropertyImpact {
         let typed = match value.trim() {
             "true" => "true".to_owned(),
             "false" => "false".to_owned(),
@@ -290,6 +290,7 @@ impl Renderer for WebRenderer {
         let name = key.replace('\\', "\\\\").replace('"', "\\\"");
         let json = format!("{{\"{name}\":{{\"value\":{typed}}}}}");
         self.backend.apply_properties(&json);
+        kirie_platform::PropertyImpact::Live
     }
 }
 
