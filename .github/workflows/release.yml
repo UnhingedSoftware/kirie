@@ -75,13 +75,34 @@ jobs:
           path: RELEASE_NOTES.md
           if-no-files-found: error
 
+  # 1b. Test gate: no artifact ships from a tree with failing tests. This is
+  #     the full `cargo test --workspace` that used to run per-commit; per-commit
+  #     CI is lint-only now.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential clang libclang-dev cmake ninja-build pkg-config \
+            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
+            libavfilter-dev libswscale-dev libswresample-dev \
+            libasound2-dev libpulse-dev \
+            libwayland-dev libxkbcommon-dev libxcb1-dev \
+            libshaderc-dev glslang-dev
+      - run: cargo test --workspace
+
   # 2. Build the three variants. ffmpeg + shaderc are compiled from source and
   #    statically linked (the `portable` feature) in all of them. default + web-cef
   #    build on debian:11 (glibc 2.31 floor); web-webview builds on ubuntu:22.04,
   #    which ships webkit2gtk-4.1 (debian:11 only has 4.0). fail-fast:false so one
   #    variant failing never blocks the others.
   build:
-    needs: prepare
+    needs: [prepare, test]
     runs-on: ubuntu-latest
     container: ${{ matrix.container }}
     strategy:

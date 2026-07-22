@@ -8,12 +8,14 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Lint + test on the DEFAULT (no-web) variant — the build that must stay
-  # green on a machine without libcef/webkit2gtk. clippy --all-targets
-  # type-checks every bin/test/example, and `cargo test` builds + links the
-  # test binaries, so a broken build cannot pass; no separate full `cargo
-  # build` needed.
-  test:
+  # Per-commit gate: format + lint only (fast, cheap). clippy --all-targets
+  # type-checks every bin/test/example across the workspace with -D warnings.
+  # `cargo test` runs as the release gate instead (release.yml), and the
+  # release's web-cef build exercises the CEF helper/webhost/pack path.
+  #
+  # The system deps are still required: clippy compiles dependency build
+  # scripts (ffmpeg-sys, shaderc-sys, cpal...), which need the headers.
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,10 +24,6 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
 
-      # System libraries the (non-web) kirie workspace links: FFmpeg
-      # (kirie-video), ALSA + PulseAudio (kirie-audio/cpal), xcb (x11rb), shaderc
-      # (kirie-shader), and Wayland (kirie-platform). clang/libclang is needed by
-      # the ffmpeg-sys bindgen step.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -39,73 +37,3 @@ jobs:
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
-
-  # Full build safe check of the two web backends, so neither rots between
-  # releases. Each installs only its own deps and actually builds (links) the
-  # kirie binary with that feature. fail-fast:false so one backend breaking still
-  # reports the other.
-  build-variants:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: web-cef
-            features: web-cef
-          - variant: web-webview
-            features: web-webview
-    name: build (${{ matrix.variant }})
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.variant }}
-
-      - name: Install base system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            build-essential clang libclang-dev cmake ninja-build pkg-config curl \
-            libavcodec-dev libavformat-dev libavutil-dev libavdevice-dev \
-            libavfilter-dev libswscale-dev libswresample-dev \
-            libasound2-dev libpulse-dev \
-            libwayland-dev libxkbcommon-dev libxcb1-dev \
-            libshaderc-dev glslang-dev
-
-      - name: Install webkit2gtk (web-webview only)
-        if: matrix.variant == 'web-webview'
-        run: |
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libsoup-3.0-dev
-
-      - name: Clippy (${{ matrix.variant }})
-        run: cargo clippy -p kirie --features ${{ matrix.features }} --all-targets -- -D warnings
-
-      - name: Build (${{ matrix.variant }})
-        run: cargo build -p kirie --features ${{ matrix.features }}
-
-      # The CEF subprocess helper + the out-of-process web host are separate
-      # binaries that link libcef (the engine itself no longer does).
-      - name: Build CEF helper + web host (web-cef only)
-        if: matrix.variant == 'web-cef'
-        run: |
-          cargo build -p kirie-web --features cef --bin kirie-cef-helper
-          cargo build -p kirie-web --features cef --bin kirie-webhost
-
-      - name: Test kirie-web (cef) (web-cef only)
-        if: matrix.variant == 'web-cef'
-        run: cargo test -p kirie-web --features cef --lib
-
-      # Pack smoke: kirie-pack validates the complete runtime file set
-      # (engine, helper, webhost, libcef + resources). A binary missing from
-      # the staging list fails HERE instead of on the release run.
-      - name: Pack smoke (web-cef only)
-        if: matrix.variant == 'web-cef'
-        run: |
-          cargo build -p kirie-launcher
-          ./target/debug/kirie-pack target/debug /tmp/kirie-ci-pack
-          test -s /tmp/kirie-ci-pack
