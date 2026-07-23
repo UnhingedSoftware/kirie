@@ -80,7 +80,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             // Bare `kirie`: keep the version probe (a real engine would error
             // with "At least one background ID must be specified", but the
             // daemon never invokes kirie without arguments).
-            println!(concat!("kirie ", env!("CARGO_PKG_VERSION"), "-dev"));
+            println!(concat!("kirie ", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
         Some(sub) if sub == "info" || sub == "extract" => run_subcommand(args),
