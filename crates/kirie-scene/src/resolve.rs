@@ -36,6 +36,46 @@ pub fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &Property
     }
 }
 
+/// Resolve a script's `scriptproperties` map in place: each entry may be a
+/// plain value or a `{user, value}` setting (docs §3.2/§3.3). The script
+/// engine receives PLAIN values — handing it the raw binding object made JS
+/// truthiness read `{user, value: false}` as `true` (3421423611's clock
+/// showed seconds and 24h time with both bound `false`).
+pub fn resolve_script_properties(props: &mut serde_json::Map<String, serde_json::Value>, bag: &PropertyBag) {
+    use serde_json::Value;
+    for v in props.values_mut() {
+        let Value::Object(o) = v else { continue };
+        let Some(fallback) = o.get("value").cloned() else {
+            continue;
+        };
+        let resolved = match o.get("user") {
+            // `"user": "propname"` — the property's current value, else the
+            // literal fallback.
+            Some(Value::String(name)) => bag.get(name).map_or(fallback, |pv| match pv {
+                crate::property::PropertyValue::Bool(b) => Value::Bool(*b),
+                crate::property::PropertyValue::Number(n) => {
+                    serde_json::Number::from_f64(*n).map_or(Value::Null, Value::Number)
+                }
+                other => Value::String(other.as_condition_string()),
+            }),
+            // `"user": {"name": …, "condition": …}` — §3.3 boolean.
+            Some(Value::Object(u)) => {
+                let name = u.get("name").and_then(Value::as_str);
+                let condition = u.get("condition").and_then(Value::as_str);
+                match (name, condition) {
+                    (Some(name), Some(condition)) => match bag.get(name) {
+                        Some(pv) => Value::Bool(pv.as_condition_string() == condition),
+                        None => fallback,
+                    },
+                    _ => fallback,
+                }
+            }
+            _ => fallback,
+        };
+        *v = resolved;
+    }
+}
+
 /// Resolve a `constantshadervalues` map in place.
 /// Re-resolve a material pass's `constantshadervalues` against `bag` in place.
 /// Bindings persist after the initial resolve (docs §3.2), so a live
@@ -94,6 +134,9 @@ impl Object {
                 resolve_us(&mut t.color, bag);
                 resolve_us(&mut t.alpha, bag);
                 resolve_us(&mut t.visible, bag);
+                if let Some(sb) = &mut t.text.script {
+                    resolve_script_properties(&mut sb.properties, bag);
+                }
             }
             ObjectKind::Sound(_)
             | ObjectKind::Model(_)

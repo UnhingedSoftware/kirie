@@ -92,17 +92,23 @@ pub struct TextScriptState {
     pub handle: Option<u32>,
 }
 
-/// Re-rasterization context retained per text object.
+/// Re-rasterization context retained per text object. Layout parameters are
+/// stored pre-resolved (raster pixel size, wrap box, effective padding, the
+/// bitmap-pixel→scene-unit quad factors) so [`TextGpu::retext`] reproduces
+/// [`build_text`]'s layout exactly.
 struct TextRebuild {
     current: String,
     font: String,
-    pointsize: f32,
-    compensate: f32,
-    size: [f32; 2],
+    /// FreeType/cosmic pixel size the string is shaped at.
+    raster_px: f32,
+    /// Wrap-box width in raster pixels; 0 = never wrap (`limitwidth` false).
+    box_w: f32,
     halign: String,
     valign: String,
+    /// Effective padding in raster pixels (0 without a wrap box).
     padding: f32,
-    scale: [f32; 2],
+    /// Bitmap-pixel → scene-unit factor per axis (`scale / raster_scale`).
+    quad_scale: [f32; 2],
     origin: [f32; 2],
     scene_size: (u32, u32),
     bundled: Option<String>,
@@ -136,11 +142,11 @@ impl TextGpu {
             fonts,
             &rb.current,
             &rb.font,
-            rb.pointsize * rb.compensate,
-            [rb.size[0] * rb.compensate, rb.size[1] * rb.compensate],
+            rb.raster_px,
+            [rb.box_w, 0.0],
             &rb.halign,
             &rb.valign,
-            rb.padding * rb.compensate,
+            rb.padding,
             rb.bundled.as_deref(),
         ) else {
             return;
@@ -149,12 +155,10 @@ impl TextGpu {
             return;
         }
         let texture = text::upload(device, queue, &raster);
-        // Quad = rasterized block × object scale, exactly the reference
-        // (CText render): rasterizing at `pointsize × compensate` and then
-        // scaling down by the sub-1 object scale lands the glyphs at their
-        // intended on-screen size (CText.cpp:203-212).
-        let sx = raster.width as f32 * rb.scale[0];
-        let sy = raster.height as f32 * rb.scale[1];
+        // Quad = rasterized block mapped back into scene units (see
+        // build_text: bitmap px × scale / raster_scale).
+        let sx = raster.width as f32 * rb.quad_scale[0];
+        let sy = raster.height as f32 * rb.quad_scale[1];
         let quad = scene_space_quad(rb.origin[0], rb.origin[1], sx, sy, rb.scene_size);
         let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let mut verts = Vec::with_capacity(4 * 20);
@@ -382,12 +386,11 @@ pub fn build_text_pipeline(device: &wgpu::Device) -> TextPipeline {
 /// text is skipped, never panics). Shaping happens here (build time), not per
 /// frame (SPEC.md §V5).
 ///
-/// The quad is sized from the *rasterized* block (the WE `size` box when set,
-/// else the measured glyph extent) times the object's `scale`, and centered on
-/// the object origin under `CText`'s vflip-aware convention (see
-/// [`scene_space_quad`]): text lands `origin.y` rows from the **top** of the
-/// scene, the opposite mirror of the image-layer convention — exactly the
-/// reference's deliberate CImage/CText asymmetry (`CText.cpp:407-419`).
+/// The quad is sized from the rasterized block (glyphs shaped at
+/// `pointsize × 300/72 × scale` — WE points are 300 DPI, back-solved from
+/// editor previews) and centered on the object origin in the same Y-up
+/// convention as image layers (see [`scene_space_quad`]). Word wrap happens
+/// only when `limitwidth` is set, at `maxwidth` scene units.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn build_text(
@@ -408,27 +411,44 @@ pub fn build_text(
     // Load the wallpaper's own packaged font (docs §13) so shaping uses it
     // instead of a system substitute; `None` keeps the fallback path.
     let bundled = fonts.bundled_family(&tobj.font, source);
-    // WE text objects often pair a modest pointsize with a sub-1 object scale
-    // (0.09–0.9); rasterizing at the raw pointsize and then scaling the quad
-    // down renders ~2–10px glyphs (invisible/tiny). The reference compensates
-    // by rasterizing at `pointsize / avgScale` so the post-scale on-screen
-    // size matches the intended pointsize (CText.cpp:203-212). The box/padding
-    // scale with it so alignment stays proportional.
-    let avg_scale = (tobj.scale.value[0] + tobj.scale.value[1]) * 0.5;
-    let compensate = if avg_scale > 0.0 && avg_scale < 1.0 {
-        (1.0 / avg_scale).min(32.0)
+    // Windows text sizing, back-solved from editor previews of real
+    // wallpapers (3587565260's clock: pointsize 22, scale 1.3485 measures
+    // 123±2 px em on a 1919-unit-high scene ⇒ px/pt ≈ 4.17 = 300/72; both
+    // its width and height solve to the same factor): the on-screen glyph em
+    // is `pointsize × 300/72 × scale` scene units — WE points are 300 DPI.
+    // Rasterize with the object scale folded in (crisp glyphs instead of a
+    // stretched quad) and map bitmap pixels back by `scale / raster_scale`.
+    const WE_PT_TO_PX: f32 = 300.0 / 72.0;
+    let scale_x = tobj.scale.value[0];
+    let scale_y = tobj.scale.value[1];
+    if scale_x <= 0.0 || scale_y <= 0.0 {
+        return None;
+    }
+    let raster_scale = ((scale_x + scale_y) * 0.5).clamp(0.05, 32.0);
+    let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
+    // Wrap only when the author asked for it: `limitwidth` gates word wrap
+    // at `maxwidth` scene units. The editor's `size` box is a gizmo, not a
+    // layout constraint — wrapping at it broke single-line text (3421423611's
+    // "WEDNESDAY" wrapped after 8 glyphs). Padding insets only within a box.
+    let box_w = if tobj.limitwidth {
+        tobj.maxwidth * raster_scale / scale_x
     } else {
-        1.0
+        0.0
+    };
+    let padding = if tobj.limitwidth {
+        tobj.padding as f32 * raster_scale
+    } else {
+        0.0
     };
     let raster = text::rasterize(
         fonts,
         &tobj.text.value,
         &tobj.font,
-        tobj.pointsize.value * compensate,
-        [tobj.size[0] * compensate, tobj.size[1] * compensate],
+        raster_px,
+        [box_w, 0.0],
         &tobj.horizontalalign,
         &tobj.verticalalign,
-        tobj.padding as f32 * compensate,
+        padding,
         bundled.as_deref(),
     )?;
     // Nothing visible would draw (whitespace-only text, or no font faces
@@ -438,11 +458,12 @@ pub fn build_text(
     }
     let texture = text::upload(device, queue, &raster);
 
-    // Scene-space quad: the coverage block's pixel size × object scale, centered
-    // on the origin (docs §7.1) — the compensation above makes the scaled-down
-    // block land at the intended pointsize.
-    let sx = raster.width as f32 * tobj.scale.value[0];
-    let sy = raster.height as f32 * tobj.scale.value[1];
+    // Scene-space quad: bitmap pixels mapped back into scene units
+    // (× scale / raster_scale — near-1 for uniform scales), centered on the
+    // origin in the image-layer Y-up convention.
+    let quad_scale = [scale_x / raster_scale, scale_y / raster_scale];
+    let sx = raster.width as f32 * quad_scale[0];
+    let sy = raster.height as f32 * quad_scale[1];
     let origin = object.base.origin.value;
     let quad = scene_space_quad(origin[0], origin[1], sx, sy, scene_size);
     // UVs: TL, BL, TR, BR — v = 0 at the top row of the bitmap.
@@ -509,13 +530,12 @@ pub fn build_text(
         rebuild: TextRebuild {
             current: tobj.text.value.clone(),
             font: tobj.font.clone(),
-            pointsize: tobj.pointsize.value,
-            compensate,
-            size: tobj.size,
+            raster_px,
+            box_w,
             halign: tobj.horizontalalign.clone(),
             valign: tobj.verticalalign.clone(),
-            padding: tobj.padding as f32,
-            scale: [tobj.scale.value[0], tobj.scale.value[1]],
+            padding,
+            quad_scale,
             origin: [origin[0], origin[1]],
             scene_size,
             bundled,
@@ -555,32 +575,35 @@ pub fn draw_text(
 }
 
 /// The **text** scene-space quad (TL, BL, TR, BR triangle strip) for a glyph
-/// block of pixel size `sx × sy` at text `origin` — `CText`'s vflip-aware
-/// placement (`CText.cpp:407-419` + `uploadQuadVertices`, `CText.cpp:341-353`),
-/// mapped into kirie's scene space.
+/// block of pixel size `sx × sy` centered on the text `origin`.
 ///
-/// The reference composites in a Y-mirrored GL space and presents the frame
-/// vertically flipped (`WaylandOutput.cpp:34` `renderVFlip = true`); kirie
-/// composites in the mirrored (Y-up) space and presents unflipped (see the
-/// image `scene_space_quad` note in `renderer.rs`), so every reference Y maps
-/// through `y → -y`:
+/// Text origins use the SAME Y-up convention as image layers (the origin is
+/// the block center; on screen the text sits `origin.y` rows from the scene
+/// BOTTOM). Windows-truth, verified against editor previews of real
+/// wallpapers (3587565260's clock: origin (3215, 1870) in a 3413x1919 scene
+/// renders 49 units from the top ⇔ Y-up; 3421423611's three text objects
+/// mirror-match the same way). The Linux C++ port's `CText` placed text
+/// `origin.y` rows from the TOP instead — that port's text path is an
+/// admitted phase-1 reimplementation ("multi-line wrapping, alignment, and
+/// padding come with Phase 2", CText.cpp:233-234), not reversed reference
+/// behavior, and its convention mirrored every text object about the
+/// horizontal center.
 ///
-/// * center — reference `gl_origin.y = origin.y - scene_h/2`
-///   (`CText.cpp:416-419`, **not** the CImage-style `scene_h/2 - origin.y`)
-///   ⇒ kirie `cy = scene_h/2 - origin.y`. On screen the text sits `origin.y`
-///   rows from the **top** — text origins are Y-down/top-left, the opposite
-///   mirror of image layers (whose origins are Y-up; both mirrors verified
-///   against the presented oracle frame).
-/// * orientation — the reference puts glyph-top (`uv.v = 0`, FT's top row) on
-///   the quad's `-hy` edge (`CText.cpp:345-351`) ⇒ kirie's `+hh` (top) edge,
-///   keeping glyphs upright. The caller's UV order (TL `v=0` … BR `v=1`)
-///   pairs with this vertex order.
+/// Orientation: the caller's UV order (TL `v=0` … BR `v=1`) puts the glyph
+/// top row on the `+hh` (screen-top) edge, keeping glyphs upright.
 fn scene_space_quad(ox: f32, oy: f32, sx: f32, sy: f32, scene: (u32, u32)) -> [[f32; 3]; 4] {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
     let (hw, hh) = (sx / 2.0, sy / 2.0);
-    // Mirror of CText.cpp:416-419: `(origin.x - w/2, -(origin.y - h/2))`.
+    // The text origin is the quad CENTER in the same Y-up scene space as
+    // image layers (`renderer.rs::scene_space_quad`: `cy = oy - sh/2`).
+    // Windows-truth, measured against editor previews (Komi 3587565260:
+    // origin (3215, 1870) in a 3413x1919 scene lands the clock 49 units from
+    // the TOP, i.e. Y-up) — the old `sh/2 - oy` "CText vflip" convention came
+    // from the incomplete Linux C++ port (its CText is a phase-1
+    // reimplementation, not reversed behavior) and mirrored every text
+    // object about the horizontal center.
     let cx = ox - sw / 2.0;
-    let cy = sh / 2.0 - oy;
+    let cy = oy - sh / 2.0;
     [
         [cx - hw, cy + hh, 0.0],
         [cx - hw, cy - hh, 0.0],
@@ -623,43 +646,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn text_quad_matches_ctext_vflip_convention() {
-        // CText.cpp:407-419: text center is `origin - scene/2` in reference GL
-        // space; kirie's Y-mirror makes that `(ox - sw/2, sh/2 - oy)`. A text
-        // at JSON origin (100, 100) in a 1920x1080 scene sits 100 rows from
-        // the scene TOP (Y-down text origin), i.e. kirie center-y = +440.
+    fn text_quad_uses_the_image_y_up_convention() {
+        // Windows-truth (editor previews, e.g. 3587565260's clock): the text
+        // origin is the block center in the SAME Y-up space as image layers.
+        // JSON origin (100, 100) in a 1920x1080 scene sits 100 rows from the
+        // scene BOTTOM, i.e. kirie center-y = 100 - 540 = -440.
         let q = scene_space_quad(100.0, 100.0, 200.0, 50.0, (1920, 1080));
         let cx = (q[0][0] + q[3][0]) / 2.0;
         let cy = (q[0][1] + q[3][1]) / 2.0;
-        assert_eq!([cx, cy], [100.0 - 960.0, 540.0 - 100.0]);
+        assert_eq!([cx, cy], [100.0 - 960.0, 100.0 - 540.0]);
         // Corner layout TL, BL, TR, BR at the scaled half-extents.
-        assert_eq!(q[0], [-960.0, 465.0, 0.0]);
-        assert_eq!(q[1], [-960.0, 415.0, 0.0]);
-        assert_eq!(q[2], [-760.0, 465.0, 0.0]);
-        assert_eq!(q[3], [-760.0, 415.0, 0.0]);
+        assert_eq!(q[0], [-960.0, -415.0, 0.0]);
+        assert_eq!(q[1], [-960.0, -465.0, 0.0]);
+        assert_eq!(q[2], [-760.0, -415.0, 0.0]);
+        assert_eq!(q[3], [-760.0, -465.0, 0.0]);
     }
 
     #[test]
-    fn text_and_image_conventions_are_deliberate_mirrors() {
-        // The reference places text at `origin.y - h/2` but images at
-        // `h/2 - origin.y` (CText.cpp:414-415 "not the CImage-style") — text
-        // origins are Y-down, image origins Y-up. Guard the asymmetry: for the
-        // same off-center origin the text center-y must be the NEGATED image
-        // center-y (`renderer.rs::scene_space_quad`: `cy = oy - sh/2`).
+    fn text_and_image_conventions_agree() {
+        // Text and image layers share one Y-up placement (the old Linux-port
+        // "deliberate mirror" was a bug in that port's unfinished CText — see
+        // scene_space_quad docs). For the same origin the text center-y must
+        // EQUAL the image center-y (`renderer.rs::scene_space_quad`:
+        // `cy = oy - sh/2`).
         let oy = 470.0;
         let q = scene_space_quad(0.0, oy, 10.0, 10.0, (1920, 1080));
         let text_cy = (q[0][1] + q[1][1]) / 2.0;
         let image_cy = oy - 540.0;
-        assert_eq!(text_cy, -image_cy);
+        assert_eq!(text_cy, image_cy);
     }
 
     #[test]
     fn glyph_top_lands_on_the_up_edge() {
-        // CText.cpp:345-351: uv.v = 0 (FreeType's top glyph row) lives on the
-        // reference quad's -hy edge; mirrored into kirie's Y-up scene space
-        // that is the +hh (screen-top) edge. The build_text UV order pairs
-        // v=0 with vertices 0 and 2 — they must be the higher-Y pair, or the
-        // glyphs render upside down.
+        // The build_text UV order pairs v=0 (the bitmap's top glyph row) with
+        // vertices 0 and 2 — they must be the higher-Y pair in kirie's Y-up
+        // scene space, or the glyphs render upside down.
         let q = scene_space_quad(0.0, 0.0, 100.0, 40.0, (1920, 1080));
         assert!(q[0][1] > q[1][1], "TL (v=0) above BL (v=1)");
         assert!(q[2][1] > q[3][1], "TR (v=0) above BR (v=1)");

@@ -395,6 +395,12 @@ pub struct TextObject {
     pub verticalalign: String,
     /// `padding`, default 0.
     pub padding: i64,
+    /// `limitwidth`, default false — when true the text word-wraps at
+    /// [`Self::maxwidth`]; when false it never wraps (the editor's `size`
+    /// box is a gizmo, not a layout constraint).
+    pub limitwidth: bool,
+    /// `maxwidth` in scene units, default 500.
+    pub maxwidth: f32,
 }
 
 /// A sound object (docs/format-scene-json.md §12).
@@ -594,6 +600,11 @@ fn parse_text(obj: &Map<String, Value>) -> TextObject {
             .unwrap_or("center")
             .to_owned(),
         padding: obj.get("padding").and_then(coerce_i64).unwrap_or(0),
+        limitwidth: obj.get("limitwidth").and_then(Value::as_bool).unwrap_or(false),
+        maxwidth: obj
+            .get("maxwidth")
+            .and_then(Value::as_f64)
+            .map_or(500.0, |v| v as f32),
     }
 }
 
