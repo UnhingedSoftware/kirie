@@ -41,19 +41,24 @@ pub mod hosted;
 
 /// The wry + system-`webkit2gtk` native-surface backend (feature `webview`).
 ///
-/// **Status: permanent fallback, not a [`WebBackend`] — won't-fix upstream.**
-/// Unlike [`cef`], this backend renders straight into a host-provided
-/// background window instead of an off-screen buffer, so it cannot implement
-/// the [`WebBackend`] trait: wry's webkit2gtk backend exposes no off-screen /
-/// pixel-readback path at all, and a `wry::WebView` is `!Send` (GTK
-/// main-thread-bound). Both are upstream library facts, not missing kirie
-/// work — see [`webview`] for the evidence (wry 0.55.1 API survey) and the
-/// native-surface model, plus its `webkit2gtk-4.1` build requirement. Prefer
-/// the `cef` feature for composited web wallpapers. The `unsafe` this backend
-/// needs (borrowing raw window handles) is why the crate-level
-/// `forbid(unsafe_code)` is relaxed for this feature too.
+/// webkit2gtk has no off-screen/pixel-readback path (upstream won't-fix) and
+/// a `wry::WebView` is `!Send` (GTK main-thread-bound), so this backend can
+/// never be the composited, frame-publishing [`WebBackend`] — see [`webview`]
+/// for the evidence (wry 0.55.1 API survey). Instead it renders **natively**:
+/// the out-of-process `kirie-webviewhost` binary owns a gtk-layer-shell
+/// window on the compositor's background layer and webkit paints straight
+/// into it. The engine talks to that process through [`viewhost`]. The
+/// `unsafe` this backend needs (borrowing raw window handles) is why the
+/// crate-level `forbid(unsafe_code)` is relaxed for this feature too.
 #[cfg(feature = "webview")]
 pub mod webview;
+
+/// Out-of-process webview host client (feature `webview-client`): spawns
+/// `kirie-webviewhost` (which owns webkit + a background-layer window) and
+/// drives it over stdin. No browser or gtk linkage in this crate feature —
+/// the engine stays webkit-free.
+#[cfg(feature = "webview-client")]
+pub mod viewhost;
 
 pub use backend::{FrameBuffer, PixelFormat, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
 pub use renderer::WebRenderer;

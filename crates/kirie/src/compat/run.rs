@@ -22,12 +22,14 @@
 //!   a [`kirie_platform::Renderer`] (it uploads CEF's BGRA frames to a texture
 //!   and blits), so it slots straight into the wgpu presentation layer here and
 //!   into `--screenshot`.
-//! * **`web-webview`** — the wry/webkit2gtk backend renders into its *own* GTK
-//!   window, not a wgpu surface: webkit2gtk has no off-screen/pixel-readback
-//!   path, so it can never composite through this presentation layer (upstream
-//!   wry/webkit2gtk limitation — won't-fix; see `kirie-web/src/webview/mod.rs`
-//!   for the API-level evidence). A `web-webview`-only binary therefore reports
-//!   web wallpapers as unrunnable at dispatch time and points at `web-cef`.
+//! * **`web-webview`** — webkit2gtk has no off-screen/pixel-readback path
+//!   (upstream won't-fix; see `kirie-web/src/webview/mod.rs` for the
+//!   API-level evidence), so this variant presents web wallpapers NATIVELY:
+//!   the engine spawns the out-of-process `kirie-webviewhost`, which owns a
+//!   gtk-layer-shell window on the compositor's background layer and lets
+//!   webkit render straight into it. The engine's own surface stays black
+//!   beneath it ([`WebRenderer`] over a backend whose `latest_frame()` is
+//!   always `None`). `--screenshot` of web items stays CEF-only.
 //! * **Both enabled** — the CEF backend is preferred (it is the one that
 //!   composites through this layer).
 //! * **Neither** — the default build: web wallpapers report a clean message
@@ -50,8 +52,16 @@ use crate::compat::playlist::{ActivePlaylist, PlaylistDefinition, Rng};
 use crate::compat::resolve::{self, ClassifyError, Wallpaper};
 use crate::compat::{list_props, screenshot, signals};
 
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
+use kirie_web::{WebBackend, WebRenderer, WebSize};
+
+/// The live web backend for this build. CEF (off-screen, composited) wins
+/// when both features are on; the webview build uses the out-of-process
+/// `kirie-webviewhost` (native background-layer presentation, no frames).
 #[cfg(feature = "web-cef")]
-use kirie_web::{WebBackend, WebRenderer, WebSize, hosted::HostedBackend};
+type LiveWebBackend = kirie_web::hosted::HostedBackend;
+#[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
+type LiveWebBackend = kirie_web::viewhost::ViewHostBackend;
 
 /// `--render-scale`, stored once at launch for every scene build (including
 /// live swaps/preloads, which share the same engine invocation). f32 bits in an
@@ -222,11 +232,11 @@ enum RunSpec {
         /// UV clamp mode for this screen.
         clamp: ClampMode,
     },
-    /// Web wallpaper (kirie-web CEF off-screen backend). Only constructed in a
-    /// `web-cef` build — the backend is a [`kirie_platform::Renderer`] that
-    /// blits CEF's frames, so no scaling/clamp is needed (the page fills the
-    /// surface).
-    #[cfg(feature = "web-cef")]
+    /// Web wallpaper (kirie-web). Only constructed in a build with a web
+    /// backend: `web-cef` (off-screen frames composited by the engine) or
+    /// `web-webview` (out-of-process webkit presenting natively on the
+    /// background layer). No scaling/clamp — the page fills the surface.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     Web {
         /// `file://` (or `http(s)://`) URL of the wallpaper's entry page.
         url: String,
@@ -608,7 +618,7 @@ fn playlist_preflight(
     {
         return true;
     }
-    #[cfg(feature = "web-cef")]
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     if build
         .build_local_fn(screen.to_owned(), path, properties.to_vec())
         .is_some()
@@ -646,7 +656,7 @@ fn playlist_show(
         }
         return sent;
     }
-    #[cfg(feature = "web-cef")]
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     if let Some(build_local) = build.build_local_fn(screen.to_owned(), path, properties.to_vec()) {
         let sent = cmd_tx
             .send(RenderCommand::SwapLocal {
@@ -805,14 +815,18 @@ fn make_target(screen: String, bg: String, scaling: ScalingMode, clamp: ClampMod
     }
 }
 
-/// Build a target for a web wallpaper (feature-gated on the CEF backend).
+/// Build a target for a web wallpaper (feature-gated on a web backend).
 ///
-/// With `web-cef` the entry page becomes a runnable [`RunSpec::Web`]; without
-/// it the screen is not runnable (see [`web_unrunnable_note`] for why).
-#[cfg(feature = "web-cef")]
+/// With `web-cef` or `web-webview` the entry page becomes a runnable
+/// [`RunSpec::Web`]; without either the screen is not runnable (see
+/// [`web_unrunnable_note`] for why).
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn make_web_target(screen: String, bg: PathBuf, dir: &Path, file: &str) -> Target {
     let url = resolve::web_entry_url(dir, file);
+    #[cfg(feature = "web-cef")]
     tracing::info!(%screen, url, "web wallpaper (CEF off-screen backend)");
+    #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
+    tracing::info!(%screen, url, "web wallpaper (webview native-layer backend)");
     Target {
         screen,
         bg,
@@ -825,9 +839,9 @@ fn make_web_target(screen: String, bg: PathBuf, dir: &Path, file: &str) -> Targe
     }
 }
 
-/// Build a target for a web wallpaper on a build without the CEF backend: not
+/// Build a target for a web wallpaper on a build without any web backend: not
 /// runnable (this output stays black; a per-screen note is emitted).
-#[cfg(not(feature = "web-cef"))]
+#[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
 fn make_web_target(screen: String, bg: PathBuf, _dir: &Path, _file: &str) -> Target {
     tracing::warn!(%screen, "web wallpaper not runnable in this build");
     Target {
@@ -845,30 +859,18 @@ fn classify_reason(err: &ClassifyError) -> String {
 }
 
 /// The per-screen note for a web wallpaper that cannot run on this build,
-/// naming the feature to rebuild with. Feature-aware:
-///
-/// * no web feature → name both `web-cef` and `web-webview`;
-/// * `web-webview` only → explain the CEF backend is the one that composites
-///   through this presentation layer and point at `web-cef`.
-///
-/// (A `web-cef` build never reaches here — web items are runnable there.)
+/// naming the features to rebuild with. Only reachable in a build with no web
+/// backend at all — both `web-cef` (composited off-screen) and `web-webview`
+/// (out-of-process native-layer webkit) run web items.
 fn web_unrunnable_note() -> String {
-    #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
-    {
-        "web wallpapers cannot run on the webview backend: wry/webkit2gtk renders into \
-         its own native window and has no off-screen path (upstream limitation, won't-fix); \
-         rebuild with --features web-cef for the composited off-screen web backend"
-            .to_owned()
-    }
     #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
     {
         "web wallpapers are not supported by this build; rebuild with --features web-cef \
-         (recommended) or --features web-webview"
+         (composited) or --features web-webview (system webkit)"
             .to_owned()
     }
-    // A `web-cef` build (with or without `web-webview`) runs web items, so this
-    // function is never called there; give it a body so it still compiles.
-    #[cfg(feature = "web-cef")]
+    // A web-capable build never calls this; give it a body so it compiles.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     {
         "web wallpapers are supported on this build".to_owned()
     }
@@ -919,10 +921,11 @@ fn build_renderer(
         }
     };
 
-    // Web (CEF) is render-thread-bound (its backend is `!Send`), so it's built
-    // here. Everything else is `Send` and goes through `build_for_spec`, which
-    // the preload / async-swap paths also call from a worker thread.
-    #[cfg(feature = "web-cef")]
+    // Web is built here on the render thread (the CEF client is `!Send`; the
+    // webview client shares the same path for simplicity). Everything else is
+    // `Send` and goes through `build_for_spec`, which the preload /
+    // async-swap paths also call from a worker thread.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     if let RunSpec::Web { url, dir } = spec {
         return build_web(target, url, dir, silent, properties);
     }
@@ -939,12 +942,12 @@ fn build_renderer(
     )
 }
 
-/// Build the CEF web renderer for `url` on the render thread (the backend is
-/// `!Send`, so it must be created and live there). Degrades to `black` on a
-/// backend-start failure rather than crashing the output. Shared by the
+/// Build the web renderer for `url` on the render thread. Degrades to `black`
+/// on a backend-start failure rather than crashing the output. Shared by the
 /// initial-launch path ([`build_renderer`]) and the live-swap path
-/// ([`BuildContext::build_local_fn`]) so both build web identically.
-#[cfg(feature = "web-cef")]
+/// ([`BuildContext::build_local_fn`]) so both build web identically. The
+/// backend is [`LiveWebBackend`] — CEF when available, else the webview host.
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn build_web(
     target: &RenderTarget<'_>,
     url: &str,
@@ -952,14 +955,14 @@ fn build_web(
     silent: bool,
     properties: &[(String, String)],
 ) -> Box<dyn Renderer> {
-    // Initial off-screen size is arbitrary: `WebRenderer` resizes the CEF surface
+    // Initial size is arbitrary: `WebRenderer` resizes the browser surface
     // to the real output on its first frame. `--silent` mutes the page's audio
     // (docs/subsystems-misc.md §3: host mute).
     let size = WebSize {
         width: 1920,
         height: 1080,
     };
-    match <HostedBackend as WebBackend>::new(url, size) {
+    match <LiveWebBackend as WebBackend>::new(url, size) {
         Ok(mut backend) => {
             if silent {
                 backend.set_muted(true);
@@ -973,7 +976,7 @@ fn build_web(
             if props != "{}" {
                 backend.apply_properties(&props);
             }
-            tracing::info!(output = %target.output_name, url, "web (CEF) wallpaper ready");
+            tracing::info!(output = %target.output_name, url, "web wallpaper ready");
             Box::new(WebRenderer::new(target, Box::new(backend)))
         }
         Err(err) => {
@@ -988,7 +991,7 @@ fn build_web(
 /// bare number, color an `"r g b"` float string, `text` UI labels skipped,
 /// everything else a JSON string. `--set-property` overrides replace the
 /// project defaults by declared type.
-#[cfg(feature = "web-cef")]
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> String {
     use kirie_formats::project::{Project, PropertyEntry, PropertyKind};
     let Ok(project) = Project::from_path(dir.join("project.json")) else {
@@ -1158,7 +1161,7 @@ fn build_for_spec(
         }
         // Web is routed to the render thread by `build_renderer` and never
         // reaches here; keep the arm total + defensive.
-        #[cfg(feature = "web-cef")]
+        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
         RunSpec::Web { .. } => black(target),
         RunSpec::Skip => black(target),
     }
@@ -1280,8 +1283,9 @@ impl BuildContext {
     /// can't use the off-thread [`build_fn`]). `None` for non-web / unsupported
     /// items (use `build_fn`). This is what lets the daemon's live `bg` swap
     /// bring in a web wallpaper without relaunching the engine — a brief hitch
-    /// while CEF builds, then it swaps in. Only compiled with the CEF backend.
-    #[cfg(feature = "web-cef")]
+    /// while the browser builds, then it swaps in. Only compiled with a web
+    /// backend (`web-cef` or `web-webview`).
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     pub(crate) fn build_local_fn(
         self: &Arc<Self>,
         screen: String,

@@ -331,7 +331,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            #[cfg(feature = "web-cef")]
+            #[cfg(any(feature = "web-cef", feature = "web-webview"))]
             let props_web = props.clone();
             // Non-web (video/image/scene): build off the render thread and swap
             // (instant if it was preloaded).
@@ -351,12 +351,12 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     .bg = Some(path);
                 return CommandOutcome::Ok;
             }
-            // Web (CEF): the backend is `!Send`, so it can't build off-thread.
-            // Build it on the render thread and swap in place — a brief hitch
-            // while CEF initializes, then the web wallpaper appears, no relaunch.
-            // Only reachable in a `web-cef` build; otherwise falls through to
-            // error (the daemon then shows a static preview).
-            #[cfg(feature = "web-cef")]
+            // Web: built on the render thread and swapped in place — a brief
+            // hitch while the browser initializes, then the web wallpaper
+            // appears, no relaunch. Only reachable in a web-capable build;
+            // otherwise falls through to error (the daemon then shows a
+            // static preview).
+            #[cfg(any(feature = "web-cef", feature = "web-webview"))]
             if let Some(build_local) = build_ctx.build_local_fn(screen.clone(), &path, props_web) {
                 let _ = cmd_tx.send(RenderCommand::SwapLocal {
                     screen: screen.clone(),
@@ -516,6 +516,24 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
         // for the file and ignores this reply, so acking before the write lands
         // is fine; only a missing command channel (X11 / platform not up) errors.
         Command::Screenshot { path } => {
+            // Webview-only build: a web wallpaper renders in the out-of-process
+            // host's own background-layer window, so the engine's frame is
+            // black. Refuse the capture — the daemon's theming then falls back
+            // to the workshop preview instead of a black palette.
+            #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
+            {
+                let web_active = state.screens.values().any(|e| {
+                    e.bg.as_deref().is_some_and(|b| {
+                        matches!(
+                            super::resolve::classify(&b.to_string_lossy()),
+                            Ok(super::resolve::Wallpaper::Web { .. })
+                        )
+                    })
+                });
+                if web_active {
+                    return CommandOutcome::Error;
+                }
+            }
             let cmd_tx = state
                 .swap
                 .lock()
@@ -576,7 +594,7 @@ fn rebuild_current(state: &mut AppState) {
         .filter_map(|(s, e)| e.bg.clone().map(|b| (s.clone(), b)))
         .collect();
     for (screen, path) in screens {
-        #[cfg(feature = "web-cef")]
+        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
         let props_web = props.clone();
         if let Some(build) = build_ctx.build_fn(screen.clone(), &path, props.clone()) {
             let _ = cmd_tx.send(RenderCommand::Build {
@@ -586,7 +604,7 @@ fn rebuild_current(state: &mut AppState) {
             });
             continue;
         }
-        #[cfg(feature = "web-cef")]
+        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
         if let Some(build_local) = build_ctx.build_local_fn(screen.clone(), &path, props_web) {
             let _ = cmd_tx.send(RenderCommand::SwapLocal { screen, build_local });
         }

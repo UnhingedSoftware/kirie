@@ -20,14 +20,20 @@ cef = ["dep:cef", "dep:cef-dll-sys", "dep:memmap2", "dep:tracing-subscriber", "d
 # Out-of-process web host CLIENT: no browser deps at all — spawns the
 # `kirie-webhost` binary and reads its shared-memory frames.
 host = []
-# wry + system webkit2gtk-4.1 native-surface backend. NOTE: this is a
-# native-surface fallback only — wry/webkit2gtk has no off-screen rendering
-# path (upstream limitation, won't-fix; see src/webview/mod.rs), so it can
-# never implement the composited `WebBackend` trait; prefer `cef`. `wry` links
+# wry + system webkit2gtk-4.1 native-surface backend, presented by the
+# out-of-process `kirie-webviewhost` binary: webkit has no off-screen path
+# (upstream won't-fix, see src/webview/mod.rs), so instead of compositing
+# frames the host puts a gtk-layer-shell window straight on the compositor's
+# background layer and lets webkit render into it natively. `wry` links
 # `webkit2gtk-4.1`/`libsoup-3.0` via pkg-config at COMPILE time, so this
 # feature only builds on a box with those -dev packages; gated so the default
 # build never needs them.
-webview = ["dep:wry", "dep:raw-window-handle"]
+webview = ["dep:wry", "dep:raw-window-handle", "dep:gtk", "dep:gtk-layer-shell", "dep:tracing-subscriber"]
+# Out-of-process webview host CLIENT: no browser/gtk deps at all — spawns the
+# `kirie-webviewhost` binary (which owns webkit + the layer surface) and
+# drives it over stdin. The engine layer stays black behind the host's own
+# background-layer window; `latest_frame()` is always `None`.
+webview-client = []
 
 [dependencies]
 memmap2 = { workspace = true, optional = true }
@@ -51,9 +57,12 @@ cef = { version = "149", default-features = false, optional = true }
 cef-dll-sys = { workspace = true, optional = true }
 
 # Heavy, optional, feature-gated (webview backend). `wry` pulls webkit2gtk-sys,
-# which needs the system webkit2gtk-4.1 dev package at build time.
+# which needs the system webkit2gtk-4.1 dev package at build time. `gtk` +
+# `gtk-layer-shell` are the kirie-webviewhost window stack (background layer).
 wry = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
+gtk = { workspace = true, optional = true }
+gtk-layer-shell = { workspace = true, optional = true }
 
 [[bin]]
 name = "kirie-cef-helper"
@@ -69,3 +78,9 @@ image = { workspace = true }
 name = "kirie-webhost"
 path = "src/bin/kirie-webhost.rs"
 required-features = ["cef"]
+
+[[bin]]
+name = "kirie-webviewhost"
+path = "src/bin/kirie-webviewhost.rs"
+# Links gtk + webkit2gtk (via wry); only exists in the `webview` build.
+required-features = ["webview"]

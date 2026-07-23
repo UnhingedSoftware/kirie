@@ -198,6 +198,37 @@ impl WebviewBackend {
         self.last_pointer = pointer;
     }
 
+    /// Launch a web wallpaper on `url`, rendering into a live GTK container
+    /// (the `kirie-webviewhost` path: the container sits in a gtk-layer-shell
+    /// window on the compositor's background layer, so webkit presents the
+    /// wallpaper natively — no off-screen buffer involved).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WebError::BrowserCreation`] if wry fails to construct the
+    /// web view.
+    pub fn with_gtk_container(
+        url: &str,
+        size: WebSize,
+        container: &impl gtk::prelude::IsA<gtk::Container>,
+        muted: bool,
+    ) -> Result<Self, WebError> {
+        use wry::WebViewBuilderExtUnix;
+        let size = size.clamped();
+        let webview = builder_for(url, muted).build_gtk(container).map_err(|e| {
+            tracing::error!(error = %e, url, "wry WebView build_gtk failed");
+            WebError::BrowserCreation
+        })?;
+        let backend = Self {
+            webview: Some(webview),
+            size,
+            muted,
+            last_pointer: PointerState::default(),
+        };
+        backend.apply_bounds();
+        Ok(backend)
+    }
+
     /// Tear the web view down. Idempotent.
     pub fn shutdown(&mut self) {
         // Dropping the `WebView` destroys the native webkit view.
@@ -228,9 +259,9 @@ impl Drop for WebviewBackend {
     }
 }
 
-/// Construct the wry web view attached to `surface`.
-fn build_webview(url: &str, surface: &SurfaceTarget, muted: bool) -> Result<WebView, WebError> {
-    let builder = WebViewBuilder::new()
+/// The shared wry builder for both attachment paths.
+fn builder_for(url: &str, muted: bool) -> WebViewBuilder<'static> {
+    WebViewBuilder::new()
         .with_url(url)
         .with_initialization_script(init_script(muted))
         // WE pages start audio/video with no user gesture
@@ -239,12 +270,15 @@ fn build_webview(url: &str, surface: &SurfaceTarget, muted: bool) -> Result<WebV
         // A wallpaper is opaque; an opaque black background avoids the
         // compositor showing through before first paint.
         .with_transparent(false)
-        .with_background_color((0, 0, 0, 255));
+        .with_background_color((0, 0, 0, 255))
+}
 
+/// Construct the wry web view attached to `surface`.
+fn build_webview(url: &str, surface: &SurfaceTarget, muted: bool) -> Result<WebView, WebError> {
     // `SurfaceTarget` supplies the window (and display) handle `build` needs.
     // The shared `WebError::BrowserCreation` carries no context, so log the
     // wry detail before mapping to it.
-    builder.build(surface).map_err(|e| {
+    builder_for(url, muted).build(surface).map_err(|e| {
         tracing::error!(error = %e, url, "wry WebView build failed");
         WebError::BrowserCreation
     })

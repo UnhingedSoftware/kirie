@@ -57,6 +57,8 @@ image-compare = "0.5"
 cef = "149"
 cef-dll-sys = "149"
 wry = "0.55"
+gtk = "0.18"
+gtk-layer-shell = "0.8"
 libpulse-binding = "2"
 rquickjs = "0.12"
 # Minimal ffmpeg surface: kirie-video only uses format + software (scaling/

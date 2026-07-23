@@ -23,10 +23,13 @@ portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
 # wgpu presentation layer (a `kirie_platform::Renderer` blitting CEF's OSR
 # frames), so it also powers `--screenshot`.
 web-cef = ["dep:kirie-web", "kirie-web/host"]
-# wry + system webkit2gtk-4.1 native-surface backend. `kirie-web/webview` links
-# `webkit2gtk-4.1`/`libsoup-3.0` via pkg-config at COMPILE time, so this variant
-# only builds on a box with those -dev packages installed.
-web-webview = ["dep:kirie-web", "kirie-web/webview"]
+# Webview (system webkit) web wallpapers via the out-of-process
+# `kirie-webviewhost` binary, which owns webkit + a gtk-layer-shell window on
+# the compositor's background layer. The ENGINE side is only the process
+# client (`kirie-web/webview-client`) — no gtk/webkit linkage here; the host
+# binary (built from kirie-web with `--features webview`) carries those and
+# must ship beside the engine executable.
+web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
 # VAAPI hardware video decode in kirie-video. Runtime-safe to enable: when no
 # VAAPI device/driver exists, playback degrades to the usual CPU decode path.
 vaapi = ["kirie-video/vaapi"]
