@@ -1144,7 +1144,7 @@ fn build_for_spec(
             match kirie_render::load_workshop_scene(
                 target,
                 dir,
-                resolve::we_assets_dir().as_deref(),
+                resolve::we_assets_dir_or_warn().as_deref(),
                 options,
                 audio,
                 properties,

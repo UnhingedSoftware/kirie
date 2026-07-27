@@ -167,6 +167,37 @@ pub fn we_assets_dir() -> Option<PathBuf> {
         .find(|candidate| candidate.is_dir())
 }
 
+/// The absolute paths [`we_assets_dir`] probes (for a diagnostic listing when
+/// none exist). Empty if `$HOME` is unset.
+#[must_use]
+pub fn steam_assets_candidates() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    STEAM_COMMON_ROOTS.iter().map(|root| home.join(root)).collect()
+}
+
+/// Like [`we_assets_dir`], but emits a single loud `WARN` the first time the
+/// assets are absent — so a scene that would otherwise degrade to a silent
+/// blank clear-color frame instead tells the user why and how to fix it. Call
+/// this at scene-build sites.
+#[must_use]
+pub fn we_assets_dir_or_warn() -> Option<PathBuf> {
+    let dir = we_assets_dir();
+    if dir.is_none() {
+        static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                "Wallpaper Engine base assets not found — scenes that use builtin shaders \
+                 (genericimage2/4, effects) will render BLANK. Install Wallpaper Engine via \
+                 Steam, or set KIRIE_WE_ASSETS=/path/to/wallpaper_engine/assets. \
+                 Run `kirie check <wallpaper>` for a full diagnosis."
+            );
+        }
+    }
+    dir
+}
+
 /// Media/image extensions recognized on a direct-file background (no
 /// `project.json`). Video first so `.mp4`/etc. route to kirie-video.
 const VIDEO_EXTS: [&str; 6] = ["mp4", "webm", "mkv", "avi", "mov", "m4v"];

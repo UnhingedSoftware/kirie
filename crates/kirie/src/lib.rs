@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod check;
 pub mod compat;
 pub mod detect;
 pub mod extract;
@@ -48,6 +49,12 @@ enum Command {
     Info {
         /// Workshop item directory, project.json, scene.pkg, or .tex file
         path: PathBuf,
+    },
+    /// Check that everything needed to build and run a wallpaper is present
+    Check {
+        /// Optional wallpaper to validate (workshop item dir, or a media file).
+        /// Omit to check only the environment (GPU, WE base assets, web backend).
+        path: Option<PathBuf>,
     },
     /// Extract a scene.pkg's entries, or decode a .tex to PNG(s)
     Extract {
@@ -83,7 +90,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             println!(concat!("kirie ", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
-        Some(sub) if sub == "info" || sub == "extract" => run_subcommand(args),
+        Some(sub) if sub == "info" || sub == "extract" || sub == "check" => run_subcommand(args),
         _ => compat::run(&args),
     }
 }
@@ -91,6 +98,18 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
 /// Run the clap-driven `info` / `extract` subcommands.
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
     let cli = Cli::parse_from(args);
+    // `check` owns its exit code: it reports prerequisites as a checklist and
+    // exits nonzero when a required check failed (not via an error).
+    if let Command::Check { path } = &cli.command {
+        return match check::run(path.as_deref()) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(err) => {
+                eprintln!("error: {}", render_chain(&err));
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = match cli.command {
         Command::Info { path } => info::run(&path),
         Command::Extract {
@@ -98,6 +117,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             output,
             tex_to_png,
         } => extract::run(&path, &output, tex_to_png),
+        Command::Check { .. } => unreachable!("handled above"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

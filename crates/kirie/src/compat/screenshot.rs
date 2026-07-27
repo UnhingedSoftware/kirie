@@ -241,16 +241,16 @@ impl SceneSettle {
 }
 
 /// A headless wgpu context (no surface).
-struct Headless {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    adapter: wgpu::Adapter,
+pub(crate) struct Headless {
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+    pub(crate) adapter: wgpu::Adapter,
 }
 
 impl Headless {
     /// Bring up a headless device: Vulkan preferred, then any backend (SPEC
     /// §G wgpu/Vulkan), mirroring kirie-platform's adapter policy.
-    fn new() -> Result<Self> {
+    pub(crate) fn new() -> Result<Self> {
         let mut last: Option<anyhow::Error> = None;
         for backends in [wgpu::Backends::VULKAN, wgpu::Backends::all()] {
             let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -381,7 +381,7 @@ pub fn capture(
             kirie_render::load_workshop_scene(
                 &render_target,
                 dir,
-                super::resolve::we_assets_dir().as_deref(),
+                super::resolve::we_assets_dir_or_warn().as_deref(),
                 options,
                 audio,
                 properties,
