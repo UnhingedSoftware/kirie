@@ -264,7 +264,7 @@ impl Headless {
                     let (device, queue) =
                         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                             label: Some("kirie-screenshot"),
-                            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
+                            required_features: kirie_platform::pipeline_cache_feature(&adapter),
                             ..wgpu::DeviceDescriptor::default()
                         }))
                         .context("request headless wgpu device")?;

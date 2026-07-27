@@ -48,7 +48,7 @@ mod x11;
 
 pub use backend::{Backend, Platform, PresentOptions};
 pub use error::PlatformError;
-pub use gpu::{attach_pipeline_cache, persist_pipeline_cache, pipeline_cache};
+pub use gpu::{attach_pipeline_cache, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature};
 pub use renderer::{
     BuildFn, BuildLocalFn, CaptureFn, CommandSender, PropertyImpact, RenderCommand, RenderTarget, Renderer,
     RendererFactory, SurfaceSize,

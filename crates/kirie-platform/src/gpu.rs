@@ -52,6 +52,26 @@ fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
     Some(base.join("kirie").join("pipelines").join(format!("{key}.bin")))
 }
 
+/// The `PIPELINE_CACHE` feature to request for `adapter`, honoring the
+/// software-adapter and env opt-outs.
+///
+/// The wgpu/Vulkan driver pipeline cache is **skipped on CPU (software)
+/// adapters**: `lavapipe` (llvmpipe's Vulkan driver, the fallback with no GPU —
+/// e.g. inside a KVM guest) advertises `PIPELINE_CACHE` but its implementation
+/// yields broken pipelines that render a uniform constant instead of the scene
+/// (software OpenGL/llvmpipe and every real GPU are unaffected). `KIRIE_NO_-
+/// PIPELINE_CACHE=1` forces it off everywhere for debugging.
+#[must_use]
+pub fn pipeline_cache_feature(adapter: &wgpu::Adapter) -> wgpu::Features {
+    let opt_out = std::env::var_os("KIRIE_NO_PIPELINE_CACHE").is_some()
+        || adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+    if opt_out {
+        wgpu::Features::empty()
+    } else {
+        adapter.features() & wgpu::Features::PIPELINE_CACHE
+    }
+}
+
 /// Create the driver pipeline cache for `device` (loading last session's blob)
 /// and publish it as the process-wide cache. Idempotent; no-op when the
 /// adapter lacks `PIPELINE_CACHE`.
@@ -139,8 +159,10 @@ impl Gpu {
                         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                             label: Some("kirie-platform"),
                             // Driver pipeline cache (Vulkan): reuse compiled
-                            // pipeline binaries across launches when supported.
-                            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
+                            // pipeline binaries across launches when supported;
+                            // skipped on software adapters (see
+                            // `pipeline_cache_feature`).
+                            required_features: pipeline_cache_feature(&adapter),
                             ..wgpu::DeviceDescriptor::default()
                         }))?;
                     attach_pipeline_cache(&device, &adapter);
