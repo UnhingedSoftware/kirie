@@ -83,13 +83,22 @@ fn fail(argv0: &str, err: &ParseError) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// Print the `Running with: <argv...> ` banner to stdout (doc §1.2): every
-/// argv element space-separated with a trailing space, then a newline.
+/// Print the `Running with: <argv...> ` banner (doc §1.2): every argv element
+/// space-separated with a trailing space, then a newline.
+///
+/// Goes to **stdout** normally (reference parity), but to **stderr** for
+/// `--list-properties-json`: that mode's stdout is machine-readable JSON a tool
+/// parses (e.g. the ArchEclipse properties UI), and a banner line prefixed to
+/// it breaks the parse.
 fn print_banner(args: &args::CompatArgs) {
     let mut line = String::from("Running with: ");
     for a in &args.argv {
         line.push_str(a);
         line.push(' ');
+    }
+    if args.list_properties_json {
+        eprintln!("{line}");
+        return;
     }
     println!("{line}");
 }
