@@ -52,6 +52,109 @@ pub struct SoakReport {
     pub fd_peak: usize,
 }
 
+/// Entry point for `KIRIE_BENCH=<wallpaper dir> kirie …`: build one wallpaper
+/// and time steady-state frames offscreen, reporting ms/frame and the fps that
+/// implies. Answers "what does ONE frame of this wallpaper actually cost on
+/// this GPU", which utilization% cannot (a downclocked GPU inflates it).
+///
+/// - `KIRIE_BENCH_FRAMES` timed frames (default 120)
+/// - `KIRIE_BENCH_SIZE`   `WxH` render size (default 1920x1080)
+pub fn bench_from_env() -> ExitCode {
+    match bench() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("bench: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn bench() -> Result<()> {
+    let dir = PathBuf::from(std::env::var_os("KIRIE_BENCH").unwrap_or_default());
+    let frames = env_usize("KIRIE_BENCH_FRAMES", 120);
+    let (w, h) = std::env::var("KIRIE_BENCH_SIZE")
+        .ok()
+        .and_then(|s| {
+            let (a, b) = s.split_once(['x', 'X'])?;
+            Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
+        })
+        .unwrap_or((1920u32, 1080u32));
+
+    let wp = classify(&dir.to_string_lossy()).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let gpu = Headless::new()?;
+    let info = gpu.adapter.get_info();
+    let size = SurfaceSize {
+        width: w.max(1),
+        height: h.max(1),
+    };
+    let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+    let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("kirie-bench-target"),
+        size: wgpu::Extent3d {
+            width: size.width,
+            height: size.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+    let rt = RenderTarget {
+        device: &gpu.device,
+        queue: &gpu.queue,
+        format,
+        output_name: "bench",
+        size: (size.width, size.height),
+    };
+
+    let build_start = Instant::now();
+    let mut renderer = build_offscreen_renderer(
+        &rt,
+        &wp,
+        ScalingMode::Default,
+        ClampMode::Clamp,
+        size,
+        None,
+        &[],
+    )?;
+    let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
+
+    // Warm up: first frames compile/upload lazily and would skew the mean.
+    for _ in 0..15 {
+        renderer.render(&view, size, 1.0 / 60.0);
+    }
+    let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+
+    // Time each frame to completion so the number is GPU cost, not queue depth.
+    let mut times = Vec::with_capacity(frames);
+    for _ in 0..frames {
+        let t = Instant::now();
+        renderer.render(&view, size, 1.0 / 60.0);
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        times.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mean = times.iter().sum::<f64>() / times.len() as f64;
+    let p50 = times[times.len() / 2];
+    let p99 = times[times.len() * 99 / 100];
+
+    eprintln!(
+        "bench: adapter={} ({:?}) {}x{} | build={build_ms:.0}ms | frame mean={mean:.2}ms \
+         p50={p50:.2}ms p99={p99:.2}ms | sustainable={:.0} fps | budget@30fps={:.0}%",
+        info.name,
+        info.device_type,
+        size.width,
+        size.height,
+        1e3 / mean.max(1e-6),
+        mean / (1e3 / 30.0) * 100.0,
+    );
+    Ok(())
+}
+
 /// Entry point for `KIRIE_SOAK=1 kirie …` (wired in [`crate::run`]).
 pub fn run_from_env() -> ExitCode {
     match soak_from_env() {

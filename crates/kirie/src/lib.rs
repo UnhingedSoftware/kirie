@@ -88,6 +88,10 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
     if std::env::var_os("KIRIE_SOAK").is_some() {
         return soak::run_from_env();
     }
+    // Frame-time benchmark for one wallpaper (see `soak::bench_from_env`).
+    if std::env::var_os("KIRIE_BENCH").is_some() {
+        return soak::bench_from_env();
+    }
     match args.get(1).map(|s| s.to_string_lossy()) {
         None => {
             // Bare `kirie`: keep the version probe (a real engine would error
