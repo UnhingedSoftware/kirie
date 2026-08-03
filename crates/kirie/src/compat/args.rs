@@ -494,6 +494,7 @@ fn flag_takes_value(canonical: &str) -> bool {
             | "--assets-dir"
             | "--set-property"
             | "--render-debug"
+            | "--gpu"
     )
 }
 
@@ -738,6 +739,10 @@ fn parse_with(
                 out.screenshot_delay = n.clamp(0, u32::MAX as i64) as u32;
             }
             "--assets-dir" => out.assets_dir = Some(PathBuf::from(value()?)),
+            // Consumed before parsing (compat::run pins the Vulkan driver
+            // before any instance exists); accepted here so its value is never
+            // taken for a background path.
+            "--gpu" => drop(value()?),
             "--disable-particles" => out.disable_particles = true,
             "--disable-mouse" => out.disable_mouse = true,
             "--disable-parallax" => out.disable_parallax = true,
@@ -893,6 +898,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "--set-property" | "--property" => "--set-property",
         "-z" | "--dump-structure" => "--dump-structure",
         "--render-debug" => "--render-debug",
+        "--gpu" => "--gpu",
         _ => return None,
     })
 }

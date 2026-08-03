@@ -53,6 +53,63 @@ pub fn limit_malloc_arenas(n: i32) {
     }
 }
 
+/// Restrict the Vulkan loader to one vendor's driver (`VK_DRIVER_FILES`).
+///
+/// The loader opens **every** installed ICD when an instance is created, so a
+/// machine with two GPUs pays for both userspace stacks even though kirie
+/// renders on one: measured on a Ryzen iGPU + RTX 4080 box, a scene wallpaper
+/// is ~240MB RSS with both loaded and ~70-98MB pinned to one — the single
+/// biggest memory item, dwarfing anything inside kirie (~31MB of binary +
+/// heap). Pinning also makes adapter choice deterministic instead of relying
+/// on wgpu's preference order.
+///
+/// `selector` is a vendor token (`nvidia`, `amd`/`radeon`, `intel`, `nouveau`,
+/// `lvp`/`software`) matched against the ICD manifest file names, or an
+/// explicit path to a manifest. `auto`/empty is a no-op (loader default).
+/// Returns the manifest that was pinned, or `None` when nothing matched — a
+/// miss is never fatal, it just leaves the loader's default behavior.
+///
+/// Setting the variables in-process is NOT enough — measured: the loader still
+/// opened both stacks (~142MB of driver pages) and picked the same adapter,
+/// while the identical variables set by the *parent* gave ~29MB. So the caller
+/// applies this by re-executing itself with the returned manifest in the
+/// environment (`kirie::compat::run`), which is the only form the loader
+/// honors.
+pub fn resolve_vulkan_icd(selector: &str) -> Option<std::path::PathBuf> {
+    let sel = selector.trim().to_ascii_lowercase();
+    if sel.is_empty() || sel == "auto" {
+        return None;
+    }
+
+    // An explicit manifest path wins — lets a user point at any driver.
+    let explicit = std::path::Path::new(selector);
+    let manifest = if explicit.is_file() {
+        explicit.to_path_buf()
+    } else {
+        // ICD manifests are named after their driver: nvidia_icd.json,
+        // radeon_icd.x86_64.json, intel_icd.x86_64.json, lvp_icd.*.json.
+        let tokens: &[&str] = match sel.as_str() {
+            "amd" | "radeon" | "radv" => &["radeon", "amd"],
+            "intel" | "anv" => &["intel"],
+            "nvidia" => &["nvidia"],
+            "nouveau" | "nvk" => &["nouveau", "nvk"],
+            "software" | "lavapipe" | "llvmpipe" | "lvp" => &["lvp"],
+            other => std::slice::from_ref(&other).to_owned().leak(),
+        };
+        let dirs = ["/usr/share/vulkan/icd.d", "/usr/local/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+        dirs.iter()
+            .filter_map(|d| std::fs::read_dir(d).ok())
+            .flatten()
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .find(|p| {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                tokens.iter().any(|t| name.contains(t))
+            })?
+    };
+    Some(manifest)
+}
+
 /// Return freed heap pages to the kernel (`malloc_trim(0)`).
 ///
 /// Wallpaper builds allocate large transient buffers (texture decode, shader

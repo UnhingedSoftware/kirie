@@ -16,6 +16,7 @@ pub mod screenshot;
 pub mod signals;
 
 use std::ffi::OsString;
+use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 use std::sync::Once;
 
@@ -31,6 +32,11 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     // this, every fresh worker thread can land in a new arena the trims never
     // reach and RSS ratchets across wallpaper switches.
     kirie_bake::limit_malloc_arenas(2);
+    // Pin the Vulkan loader to one vendor's driver (re-execs; see `pin_gpu`).
+    // On a multi-GPU box this is the single biggest memory saving available —
+    // the loader otherwise keeps BOTH vendors' userspace stacks resident.
+    // `--gpu` wins over `KIRIE_GPU`.
+    pin_gpu(argv);
     init_tracing();
     let argv0 = argv
         .first()
@@ -70,6 +76,74 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     }
 
     run::dispatch(validated)
+}
+
+/// Honor `--gpu`/`KIRIE_GPU` by **re-executing** with the chosen Vulkan ICD in
+/// the environment, then never returning (the new image takes over).
+///
+/// The Vulkan loader opens every installed ICD, so a two-GPU machine keeps both
+/// vendors' userspace resident: measured, one scene wallpaper is ~233MB RSS
+/// (~142MB of driver pages) unpinned versus ~93MB (~29MB driver pages) with
+/// `VK_DRIVER_FILES` pinned — the largest single memory item there is, and it
+/// also makes adapter choice deterministic.
+///
+/// Setting the variables in-process does not work (measured: no change at all);
+/// the loader only honors what it inherited. Re-exec is therefore the
+/// mechanism, guarded by a sentinel so it happens at most once, and it uses
+/// `Command::exec` so this crate keeps `forbid(unsafe_code)`.
+///
+/// Every failure path is non-fatal: kirie continues on the loader default.
+fn pin_gpu(argv: &[OsString]) {
+    const SENTINEL: &str = "KIRIE_GPU_PINNED";
+    if std::env::var_os(SENTINEL).is_some() {
+        return; // already re-executed
+    }
+    let Some(sel) = gpu_selector(argv).or_else(|| std::env::var("KIRIE_GPU").ok()) else {
+        return;
+    };
+    if sel.trim().is_empty() || sel.eq_ignore_ascii_case("auto") {
+        return;
+    }
+    let Some(manifest) = kirie_bake::resolve_vulkan_icd(&sel) else {
+        eprintln!("kirie: no Vulkan ICD matched --gpu {sel}; using the loader default");
+        return;
+    };
+    // Already pointed at exactly this driver (e.g. the daemon set it) — the
+    // loader has what it needs, so skip the re-exec.
+    if std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| v == manifest) {
+        return;
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return;
+    };
+    let err = std::process::Command::new(exe)
+        .args(argv.iter().skip(1))
+        .env("VK_DRIVER_FILES", &manifest)
+        .env("VK_ICD_FILENAMES", &manifest) // older loaders read this spelling
+        .env(SENTINEL, "1")
+        .exec();
+    // `exec` only returns on failure; carry on with the loader default.
+    eprintln!("kirie: could not re-exec to pin {}: {err}", manifest.display());
+}
+
+/// The `--gpu <vendor>` / `--gpu=<vendor>` value, scanned straight off argv.
+///
+/// Read before the real parser runs because the driver pin has to be in place
+/// before any Vulkan instance exists (see [`pin_gpu`]).
+/// The parser knows the flag too, so its value is never mistaken for a
+/// background path.
+fn gpu_selector(argv: &[OsString]) -> Option<String> {
+    let mut it = argv.iter().skip(1);
+    while let Some(a) = it.next() {
+        let s = a.to_string_lossy();
+        if let Some(v) = s.strip_prefix("--gpu=") {
+            return Some(v.to_owned());
+        }
+        if s == "--gpu" {
+            return it.next().map(|v| v.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// Print a fatal parse error with the doc §4.7 doubling: the bare message,
