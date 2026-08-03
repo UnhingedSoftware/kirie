@@ -102,6 +102,9 @@ struct PlatformState {
     preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
     /// Global cursor poller (T26; Hyprland IPC — inert elsewhere).
     pointer: crate::pointer::PointerPoll,
+    /// Supplies the off-thread launch-time build for an output (P1.6); `None`
+    /// (or a `None` result) keeps that output on the synchronous factory.
+    initial_build: Option<crate::renderer::InitialBuildFn>,
     /// Event-loop handle used to arm the `--fps` pacing timer. Sub-refresh
     /// pacing MUST be timer-driven, not a re-commit on every early frame
     /// callback: a bufferless commit forces the compositor to repaint the
@@ -193,9 +196,16 @@ impl WaylandPlatform {
                 cmd_tx,
                 preloaded: HashMap::new(),
                 pointer: crate::pointer::PointerPoll::start(),
+                initial_build: None,
                 loop_handle,
             },
         })
+    }
+
+    /// Install the launch-time off-thread build supplier (P1.6). Call before
+    /// [`Self::run`]; outputs it declines fall back to the sync factory.
+    pub fn set_initial_build(&mut self, f: crate::renderer::InitialBuildFn) {
+        self.state.initial_build = Some(f);
     }
 
     /// A clone-able sender for [`RenderCommand`]s. Hand this to the IPC applier so
@@ -413,15 +423,12 @@ impl PlatformState {
     /// build (whose output is `Send`, coerced here) and the render-thread
     /// [`RenderCommand::SwapLocal`] build (whose output may be `!Send`, e.g. CEF).
     fn install_renderer(&mut self, idx: usize, renderer: Box<dyn crate::renderer::Renderer>) {
-        let qh = self.qh.clone();
         let ctx = &mut self.outputs[idx];
         ctx.renderer = Some(renderer); // previous renderer drops here
+        let was_initial = std::mem::take(&mut ctx.initial_build_pending); // launch build (P1.6) landed
         ctx.last_frame = None; // reset per-output dt for the fresh renderer
-        if ctx.configured && !ctx.frame_pending {
-            ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
-            ctx.frame_pending = true;
-            ctx.wl_surface().commit();
-        }
+        let configured = ctx.configured;
+        let surface = ctx.wl_surface().clone();
         // The old renderer just freed its CPU-side state (decoded assets,
         // script heaps, staging buffers) — return those pages to the kernel
         // now rather than letting glibc hoard them until the next build. GPU
@@ -433,7 +440,24 @@ impl PlatformState {
         if let Some(gpu) = &self.gpu {
             crate::gpu::persist_pipeline_cache(&gpu.adapter);
         }
-        tracing::info!(output = %ctx.name, "wallpaper swapped in");
+        tracing::info!(output = %self.outputs[idx].name, "wallpaper swapped in");
+
+        // Paint the new wallpaper now rather than waiting for a frame callback.
+        // Requesting a callback and committing without a buffer is not enough
+        // for the FIRST frame: a compositor only repaints — and so only
+        // dispatches the callback for — a surface that has a buffer, so an
+        // output whose launch build ran off-thread (P1.6) would never present
+        // and would stay black forever. Drawing here attaches that first
+        // buffer; `draw` then re-arms the callback (or the `--fps` timer)
+        // itself, so the chain is self-sustaining from this point. For a live
+        // swap the output was already presenting, and drawing immediately just
+        // makes the switch land a frame sooner.
+        if configured {
+            self.draw(&surface);
+        } else if was_initial {
+            // Not configured yet: the configure that follows kick-starts `draw`.
+            tracing::debug!("launch build landed before configure; deferring first paint");
+        }
     }
 
     /// The output matching `screen` (`"*"` = the first output, for window mode).
@@ -533,6 +557,7 @@ impl PlatformState {
             configured: false,
             frame_pending: false,
             timer_armed: false,
+            initial_build_pending: false,
             first_frame_presented: false,
             renderer: None,
             last_frame: None,
@@ -563,6 +588,13 @@ impl PlatformState {
         // Fifo is universally supported and compositor-paced, matching the
         // frame-callback driven model (docs/render-architecture.md §2.3).
         config.present_mode = wgpu::PresentMode::Fifo;
+        // Record the surface format now, not on the first drawn frame: the
+        // off-thread build path (`RenderCommand::Build`, and the P1.6 launch
+        // build) needs it to compile pipelines, so learning it only after a
+        // frame had been drawn meant a `bg`/`preload` arriving before the
+        // first frame was silently dropped — and the launch build could not
+        // start off-thread at all.
+        ctx.format = Some(config.format);
         surface.configure(&gpu.device, &config);
 
         if let Ok(region) = Region::new(&self.compositor_state) {
@@ -637,6 +669,39 @@ impl PlatformState {
             }
         }
 
+        // P1.6: build this output's launch-time wallpaper on a worker instead
+        // of inside `draw`. Must happen BEFORE the swapchain acquire — an
+        // early return after acquiring drops the `SurfaceTexture` without
+        // presenting it, and Vulkan has no un-acquire (see the pacing note
+        // above). Nothing is presented until the `Install` lands, which is
+        // what the synchronous path did too: it simply blocked here instead,
+        // freezing the event loop (no IPC, no configure) and serializing the
+        // builds of every other output.
+        if self.outputs[index].renderer.is_none() {
+            if self.outputs[index].initial_build_pending {
+                return; // worker in flight; `install_renderer` re-arms the callback
+            }
+            let name = self.outputs[index].name.clone();
+            // Only dispatch when the format is known (set at configure time) —
+            // `RenderCommand::Build` drops the request otherwise, which would
+            // strand this output with `initial_build_pending` set forever.
+            if self.outputs[index].format.is_some()
+                && let Some(build) = self.initial_build.as_mut().and_then(|f| f(&name))
+            {
+                self.outputs[index].initial_build_pending = true;
+                tracing::debug!(output = %name, "building launch wallpaper off-thread");
+                self.handle_command(RenderCommand::Build {
+                    screen: name,
+                    stash: None,
+                    build,
+                });
+                return;
+            }
+            // Declined (e.g. a `!Send` web backend) → fall through to the
+            // synchronous factory below.
+        }
+
+        let ctx = &mut self.outputs[index];
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
             return;
         };

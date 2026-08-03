@@ -206,6 +206,7 @@ fn run_screenshot(args: &CompatArgs, path: &Path) -> ExitCode {
 }
 
 /// What to build for one screen once its background is classified.
+#[derive(Clone)]
 enum RunSpec {
     /// Video wallpaper (kirie-video).
     Video {
@@ -427,6 +428,59 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         automute_controls: video_controls.clone(),
     });
 
+    // P1.6: build each output's launch wallpaper on a worker rather than
+    // inside the render thread's first `draw`. The event loop then stays live
+    // during a cold start (IPC answers, configure/resize are handled) and
+    // multi-monitor setups build concurrently instead of one output blocking
+    // the next. Owns its own copy of the specs — the factory keeps its own for
+    // the synchronous fallback (web, `Skip`, and a later output hotplug).
+    let mut initial_specs: std::collections::HashMap<String, RunSpec> =
+        specs.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
+    let window_spec: Option<RunSpec> = specs.first().map(|(_, s)| s.clone());
+    let ib_registrar = registrar.clone();
+    let ib_audio = audio.clone();
+    let ib_properties = properties.clone();
+    let ib_controls = video_controls.clone();
+    let initial_build: kirie_platform::InitialBuildFn = Box::new(move |output: &str| {
+        // Same screen→spec resolution as `build_renderer`.
+        let (screen_key, spec) = if window_mode {
+            ("default".to_owned(), window_spec.clone()?)
+        } else {
+            (output.to_owned(), initial_specs.remove(output)?)
+        };
+        match spec {
+            RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
+            // Web is `!Send` (render-thread only) and `Skip` renders black —
+            // both stay on the synchronous factory.
+            _ => return None,
+        }
+        let registrar = ib_registrar.clone();
+        let audio = ib_audio.clone();
+        let properties = ib_properties.clone();
+        let controls = ib_controls.clone();
+        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size| {
+            let rt = RenderTarget {
+                device,
+                queue,
+                format,
+                output_name: name,
+                size,
+            };
+            build_for_spec(
+                &rt,
+                screen_key,
+                &spec,
+                volume,
+                silent,
+                registrar.as_ref(),
+                audio,
+                &properties,
+                &controls,
+            )
+        });
+        Some(build)
+    });
+
     let factory_controls = video_controls.clone();
     let factory: kirie_platform::RendererFactory = Box::new(move |target: &RenderTarget<'_>| {
         build_renderer(
@@ -464,6 +518,9 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
 
     let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {
         Ok(mut platform) => {
+            // Launch builds go to a worker (P1.6); outputs it declines fall
+            // back to the synchronous factory.
+            platform.set_initial_build(initial_build);
             // Enable live `bg`/`preload` swaps: hand the applier the render
             // thread's command channel + the build params (Wayland only; X11
             // has no channel yet and falls back to relaunch).

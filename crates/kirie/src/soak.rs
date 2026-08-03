@@ -31,17 +31,24 @@ use crate::compat::screenshot::{Headless, build_offscreen_renderer};
 /// Outcome of a soak run — enough for the release gate to assert leak-freedom.
 #[derive(Debug, Clone, Copy)]
 pub struct SoakReport {
+    /// Build→render→drop cycles executed.
     pub iters: usize,
     /// Builds that failed (a renderable item that errored); expected 0.
     pub fails: usize,
+    /// RSS before the first build.
     pub rss_start_kb: u64,
     /// RSS right after the first full corpus cycle — the warm baseline every
     /// later iteration should return to. Leak ⇒ `rss_end_kb` ≫ this.
     pub rss_warm_kb: u64,
+    /// RSS after the final iteration.
     pub rss_end_kb: u64,
+    /// Highest sampled RSS (transient build peaks included).
     pub rss_peak_kb: u64,
+    /// Open fds before the first build.
     pub fd_start: usize,
+    /// Open fds after the final iteration; must not grow with `iters`.
     pub fd_end: usize,
+    /// Highest sampled open-fd count.
     pub fd_peak: usize,
 }
 

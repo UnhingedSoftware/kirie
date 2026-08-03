@@ -172,6 +172,16 @@ impl Platform {
         }
     }
 
+    /// Move each output's launch-time build off the render thread (P1.6).
+    /// Wayland only — X11 has no off-thread build/install path and keeps the
+    /// synchronous factory.
+    pub fn set_initial_build(&mut self, f: crate::renderer::InitialBuildFn) {
+        match self {
+            Self::Wayland(p) => p.set_initial_build(f),
+            Self::X11(_) => {}
+        }
+    }
+
     /// Drive the backend's render loop until `duration` elapses (`None` = run
     /// forever). Wayland blocks in the compositor event loop between frame
     /// callbacks; X11 runs the vsync-paced present loop

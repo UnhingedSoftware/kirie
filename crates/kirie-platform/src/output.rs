@@ -51,6 +51,10 @@ pub(crate) struct OutputContext {
     /// cap. Guards against stacking timers when several early frame callbacks
     /// arrive before the timer fires. Cleared when the timer fires.
     pub timer_armed: bool,
+    /// This output's launch-time renderer is being built on a worker thread
+    /// (P1.6). `draw` renders nothing until the `Install` lands, so it must
+    /// never fall through to the synchronous factory in the meantime.
+    pub initial_build_pending: bool,
     /// Whether the first frame for this output has been presented (logged
     /// once).
     pub first_frame_presented: bool,

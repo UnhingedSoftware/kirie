@@ -106,6 +106,17 @@ pub type BuildFn = Box<
         + Send,
 >;
 
+/// Supplies the **initial** (launch-time) [`BuildFn`] for an output, by name.
+///
+/// Returning `Some` moves that output's first wallpaper build off the render
+/// thread, exactly like a live `bg` swap: the event loop keeps dispatching
+/// (IPC stays responsive, configure/resize are handled) and multiple outputs
+/// build concurrently instead of serially blocking each other inside `draw`.
+/// Return `None` for anything that must be built on the render thread — a
+/// `!Send` backend such as the CEF web renderer — and the platform falls back
+/// to the synchronous [`RendererFactory`] path for that output.
+pub type InitialBuildFn = Box<dyn FnMut(&str) -> Option<BuildFn>>;
+
 /// Builds a renderer **on the render thread**, given a cloned GPU device+queue
 /// and the target output's surface format + name. The closure is `Send` (so it
 /// can ride the command channel) but its output need not be — this is for
