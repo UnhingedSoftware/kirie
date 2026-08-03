@@ -75,7 +75,12 @@ pub fn trim_heap() {
 /// only needed in bursts: `libnvidia-gpucomp` (shader compiler — used only
 /// while building a wallpaper's pipelines), `libnvidia-rtcore` (raytracing —
 /// never used), the SPIR-V compiler, and `libcef` (idle unless a web
-/// wallpaper is showing). After a build settles, page them out: the kernel
+/// wallpaper is showing). Mesa is the same shape on the AMD/Intel side:
+/// `libLLVM` is RADV's shader compiler (~24MB resident, measured) and, like
+/// `libnvidia-gpucomp`, is touched only while compiling pipelines — the
+/// dominant non-NVIDIA entry, since a machine with both GPUs loads BOTH
+/// vendors' stacks (the Vulkan loader enumerates every installed ICD unless
+/// `VK_DRIVER_FILES`/`VK_ICD_FILENAMES` pins one). After a build settles, page them out: the kernel
 /// reclaims the clean file-backed pages immediately instead of "eventually",
 /// and they refault transparently from the page cache/disk on next use (the
 /// next wallpaper build — already a >100ms operation). Dirty pages are left
@@ -87,6 +92,9 @@ pub fn pageout_cold_libs() {
         "libnvidia-rtcore",
         "libnvidia-glvkspirv",
         "libcef.so",
+        // Mesa (RADV/ANV) shader compilation: cold once pipelines are built.
+        "libLLVM",
+        "libclang-cpp",
     ];
     let Ok(maps) = std::fs::read_to_string("/proc/self/maps") else {
         return;
