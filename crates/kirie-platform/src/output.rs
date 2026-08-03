@@ -47,6 +47,10 @@ pub(crate) struct OutputContext {
     /// until it fires (one render per callback,
     /// docs/render-architecture.md §2.3).
     pub frame_pending: bool,
+    /// A `--fps` pacing timer is scheduled to re-drive `draw` at the frame
+    /// cap. Guards against stacking timers when several early frame callbacks
+    /// arrive before the timer fires. Cleared when the timer fires.
+    pub timer_armed: bool,
     /// Whether the first frame for this output has been presented (logged
     /// once).
     pub first_frame_presented: bool,

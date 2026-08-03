@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::reexports::calloop::EventLoop;
+use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop::channel::{
     Event as CalloopEvent, Sender as CmdSender, channel,
 };
@@ -101,6 +102,13 @@ struct PlatformState {
     preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
     /// Global cursor poller (T26; Hyprland IPC — inert elsewhere).
     pointer: crate::pointer::PointerPoll,
+    /// Event-loop handle used to arm the `--fps` pacing timer. Sub-refresh
+    /// pacing MUST be timer-driven, not a re-commit on every early frame
+    /// callback: a bufferless commit forces the compositor to repaint the
+    /// full screen, and re-committing per callback forms a feedback loop
+    /// (commit → composite → callback → commit) that pins the GPU at the
+    /// compositor's max composite rate regardless of `--fps`.
+    loop_handle: LoopHandle<'static, PlatformState>,
 }
 
 impl WaylandPlatform {
@@ -154,6 +162,8 @@ impl WaylandPlatform {
             })
             .map_err(|err| PlatformError::EventLoopRegister(err.to_string()))?;
 
+        let loop_handle = event_loop.handle();
+
         Ok(Self {
             event_loop,
             cmd_tx: cmd_tx.clone(),
@@ -183,6 +193,7 @@ impl WaylandPlatform {
                 cmd_tx,
                 preloaded: HashMap::new(),
                 pointer: crate::pointer::PointerPoll::start(),
+                loop_handle,
             },
         })
     }
@@ -521,6 +532,7 @@ impl PlatformState {
             physical_size: SurfaceSize { width: 1, height: 1 },
             configured: false,
             frame_pending: false,
+            timer_armed: false,
             first_frame_presented: false,
             renderer: None,
             last_frame: None,
@@ -588,24 +600,41 @@ impl PlatformState {
             return;
         }
 
-        // `--fps` pacing MUST run before the swapchain acquire: an early frame
-        // callback re-requests the next callback and commits WITHOUT rendering.
-        // Acquiring first and early-returning drops the SurfaceTexture without
+        // `--fps` pacing MUST run before the swapchain acquire: acquiring
+        // first and early-returning drops the SurfaceTexture without
         // presenting it — Vulkan has no un-acquire, so a monitor whose frame
         // callbacks arrive faster than the cap (144Hz vs --fps 123) exhausts
         // the swapchain within ~3 frames; every later acquire times out and
-        // the output freezes while the callback/commit cycle spins at 100%
-        // CPU (the live-desktop freeze this fixes).
-        if let (Some(min), Some(prev)) = (self.min_frame, ctx.last_frame)
-            && prev.elapsed() < min
-        {
-            if !ctx.frame_pending {
-                let qh = self.qh.clone();
-                ctx.wl_surface().frame(&qh, ctx.wl_surface().clone());
-                ctx.frame_pending = true;
-                ctx.wl_surface().commit();
+        // the output freezes (the live-desktop freeze this guards).
+        //
+        // When too early, pace with a one-shot calloop timer — do NOT
+        // re-request the frame callback and commit here. A bufferless commit
+        // makes the compositor repaint the whole screen, and re-committing on
+        // every early callback forms a feedback loop (commit → composite →
+        // callback → commit) that runs at the compositor's max composite rate
+        // (e.g. ~90 fps on a weak iGPU) no matter how low `--fps` is set,
+        // pinning the GPU. The timer wakes `draw` at the target time with no
+        // intervening commits, so the compositor only repaints when we
+        // actually present a new frame — GPU cost then scales with `--fps`.
+        if let (Some(min), Some(prev)) = (self.min_frame, ctx.last_frame) {
+            let elapsed = prev.elapsed();
+            if elapsed < min {
+                if !ctx.timer_armed {
+                    ctx.timer_armed = true;
+                    let surface = ctx.wl_surface().clone();
+                    let timer = Timer::from_duration(min - elapsed);
+                    let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                        if let Some(ctx) =
+                            state.outputs.iter_mut().find(|c| c.wl_surface() == &surface)
+                        {
+                            ctx.timer_armed = false;
+                        }
+                        state.draw(&surface);
+                        TimeoutAction::Drop
+                    });
+                }
+                return;
             }
-            return;
         }
 
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
@@ -698,12 +727,19 @@ impl PlatformState {
 
         renderer.render(&view, ctx.physical_size, dt);
 
-        // Request the next frame callback *before* presenting so it rides
-        // the same commit — the C++ driver's swapOutput does the same
-        // (request frame callback, then swap/commit,
-        // WaylandOutputViewport.cpp:263-273;
-        // docs/render-architecture.md §2.3).
-        if !ctx.frame_pending {
+        // Uncapped: request the next frame callback *before* presenting so it
+        // rides the same commit and vsync-paces the loop (the C++ driver's
+        // swapOutput does the same, WaylandOutputViewport.cpp:263-273).
+        //
+        // Capped (`--fps`): do NOT request a frame callback — drive the next
+        // frame from a timer (armed at the end of this fn). An outstanding
+        // wallpaper frame callback makes the compositor schedule a repaint on
+        // every monitor refresh to dispatch it, so it recomposites the whole
+        // screen at the full refresh rate (e.g. 360Hz) and pins the GPU even
+        // when we only present a few frames a second. A static wallpaper —
+        // which never requests a callback — leaves the compositor idle; the
+        // timer path makes a capped live wallpaper behave the same way.
+        if self.min_frame.is_none() && !ctx.frame_pending {
             ctx.wl_surface().frame(&self.qh, ctx.wl_surface().clone());
             ctx.frame_pending = true;
         }
@@ -725,6 +761,27 @@ impl PlatformState {
             kirie_bake::pageout_cold_libs();
             if let Some(gpu) = &self.gpu {
                 crate::gpu::persist_pipeline_cache(&gpu.adapter);
+            }
+        }
+
+        // Capped: schedule the next render off a one-shot timer instead of a
+        // frame callback (see the present block above). One timer in flight at
+        // a time — `timer_armed` also covers a timer armed by the early-callback
+        // skip path, so the two never stack.
+        if let Some(min) = self.min_frame {
+            let ctx = &mut self.outputs[index];
+            if !ctx.timer_armed {
+                ctx.timer_armed = true;
+                let surface = ctx.wl_surface().clone();
+                let timer = Timer::from_duration(min);
+                let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
+                    if let Some(ctx) = state.outputs.iter_mut().find(|c| c.wl_surface() == &surface)
+                    {
+                        ctx.timer_armed = false;
+                    }
+                    state.draw(&surface);
+                    TimeoutAction::Drop
+                });
             }
         }
     }
