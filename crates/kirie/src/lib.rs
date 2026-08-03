@@ -21,6 +21,7 @@ pub mod compat;
 pub mod detect;
 pub mod extract;
 pub mod info;
+pub mod soak;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -82,6 +83,11 @@ enum Command {
 ///   ([`compat::run`]), which owns its own exit code.
 #[must_use]
 pub fn run(args: Vec<OsString>) -> ExitCode {
+    // Out-of-band leak/stability soak (release hardening) — never part of the
+    // compat CLI surface, so it can only be reached deliberately via the env.
+    if std::env::var_os("KIRIE_SOAK").is_some() {
+        return soak::run_from_env();
+    }
     match args.get(1).map(|s| s.to_string_lossy()) {
         None => {
             // Bare `kirie`: keep the version probe (a real engine would error

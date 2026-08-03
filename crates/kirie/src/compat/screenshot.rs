@@ -347,75 +347,15 @@ pub fn capture(
         size: (capture_size.width, capture_size.height),
     };
 
-    let mut renderer: Box<dyn Renderer> = match wallpaper {
-        Wallpaper::Video { media } => {
-            let options = VideoOptions {
-                scaling: super::run::to_video_scaling(scaling),
-                // Headless: skip the audio pipeline so the wall clock paces
-                // frame selection and no device is opened.
-                enable_audio: false,
-                ..VideoOptions::default()
-            };
-            let (player, _control) = VideoPlayer::open(media, options)
-                .with_context(|| format!("opening video {}", media.display()))?;
-            Box::new(kirie_video::VideoRenderer::new(&render_target, player))
-        }
-        Wallpaper::Image { file } => {
-            let content =
-                ImageContent::from_path(file).with_context(|| format!("loading image {}", file.display()))?;
-            let options = ImageOptions {
-                scaling: super::run::to_render_scaling(scaling),
-                clamp: super::run::to_render_clamp(clamp),
-            };
-            Box::new(
-                ImageRenderer::new(&render_target, &content, options).context("building image renderer")?,
-            )
-        }
-        Wallpaper::Scene { dir } => {
-            let options = kirie_render::SceneOptions {
-                render_scale: 1.0,
-                scaling: super::run::to_render_scaling(scaling),
-                clamp: super::run::to_render_clamp(clamp),
-                disable_parallax: false,
-            };
-            kirie_render::load_workshop_scene(
-                &render_target,
-                dir,
-                super::resolve::we_assets_dir_or_warn().as_deref(),
-                options,
-                audio,
-                properties,
-            )
-            .with_context(|| format!("building scene renderer for {}", dir.display()))?
-        }
-        #[cfg(feature = "web-cef")]
-        Wallpaper::Web { dir, file } => {
-            use kirie_web::{WebBackend, WebRenderer, WebSize, hosted::HostedBackend};
-            let url = super::resolve::web_entry_url(dir, file);
-            let size = WebSize {
-                width: capture_size.width,
-                height: capture_size.height,
-            };
-            let backend = <HostedBackend as WebBackend>::new(&url, size)
-                .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
-            Box::new(WebRenderer::new(&render_target, Box::new(backend)))
-        }
-        #[cfg(not(feature = "web-cef"))]
-        Wallpaper::Web { .. } => {
-            bail!(
-                "cannot screenshot a web wallpaper: this build has no off-screen web backend \
-                 (rebuild with --features web-cef)"
-            );
-        }
-        Wallpaper::Unsupported { kind } => {
-            bail!("cannot screenshot a {kind} wallpaper: not yet supported by kirie");
-        }
-        Wallpaper::Asset => {
-            bail!(
-                "cannot screenshot this item: it is a Wallpaper Engine asset (effect preset), not a renderable wallpaper"
-            );
-        }
-    };
+    let mut renderer = build_offscreen_renderer(
+        &render_target,
+        wallpaper,
+        scaling,
+        clamp,
+        capture_size,
+        audio,
+        properties,
+    )?;
 
     let deadline = Instant::now() + capture_budget(wallpaper);
     let dt = 1.0 / 60.0;
@@ -475,6 +415,92 @@ pub fn capture(
         );
     }
     Ok(())
+}
+
+/// Build the offscreen [`Renderer`] for `wallpaper` on `render_target` (SPEC
+/// T16). Factored out of [`capture`] so the leak/stability soak
+/// ([`crate::soak`]) drives the identical per-wallpaper build→drop path on a
+/// shared device.
+#[cfg_attr(not(feature = "web-cef"), allow(unused_variables))]
+pub(crate) fn build_offscreen_renderer(
+    render_target: &RenderTarget,
+    wallpaper: &Wallpaper,
+    scaling: ScalingMode,
+    clamp: ClampMode,
+    capture_size: SurfaceSize,
+    audio: Option<Arc<AudioCapture>>,
+    properties: &[(String, String)],
+) -> Result<Box<dyn Renderer>> {
+    let renderer: Box<dyn Renderer> = match wallpaper {
+        Wallpaper::Video { media } => {
+            let options = VideoOptions {
+                scaling: super::run::to_video_scaling(scaling),
+                // Headless: skip the audio pipeline so the wall clock paces
+                // frame selection and no device is opened.
+                enable_audio: false,
+                ..VideoOptions::default()
+            };
+            let (player, _control) = VideoPlayer::open(media, options)
+                .with_context(|| format!("opening video {}", media.display()))?;
+            Box::new(kirie_video::VideoRenderer::new(render_target, player))
+        }
+        Wallpaper::Image { file } => {
+            let content =
+                ImageContent::from_path(file).with_context(|| format!("loading image {}", file.display()))?;
+            let options = ImageOptions {
+                scaling: super::run::to_render_scaling(scaling),
+                clamp: super::run::to_render_clamp(clamp),
+            };
+            Box::new(
+                ImageRenderer::new(render_target, &content, options).context("building image renderer")?,
+            )
+        }
+        Wallpaper::Scene { dir } => {
+            let options = kirie_render::SceneOptions {
+                render_scale: 1.0,
+                scaling: super::run::to_render_scaling(scaling),
+                clamp: super::run::to_render_clamp(clamp),
+                disable_parallax: false,
+            };
+            kirie_render::load_workshop_scene(
+                render_target,
+                dir,
+                super::resolve::we_assets_dir_or_warn().as_deref(),
+                options,
+                audio,
+                properties,
+            )
+            .with_context(|| format!("building scene renderer for {}", dir.display()))?
+        }
+        #[cfg(feature = "web-cef")]
+        Wallpaper::Web { dir, file } => {
+            use kirie_web::{WebBackend, WebRenderer, WebSize, hosted::HostedBackend};
+            let url = super::resolve::web_entry_url(dir, file);
+            let size = WebSize {
+                width: capture_size.width,
+                height: capture_size.height,
+            };
+            let backend = <HostedBackend as WebBackend>::new(&url, size)
+                .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
+            Box::new(WebRenderer::new(render_target, Box::new(backend)))
+        }
+        #[cfg(not(feature = "web-cef"))]
+        Wallpaper::Web { .. } => {
+            bail!(
+                "cannot screenshot a web wallpaper: this build has no off-screen web backend \
+                 (rebuild with --features web-cef)"
+            );
+        }
+        Wallpaper::Unsupported { kind } => {
+            bail!("cannot screenshot a {kind} wallpaper: not yet supported by kirie");
+        }
+        Wallpaper::Asset => {
+            bail!(
+                "cannot screenshot this item: it is a Wallpaper Engine asset (effect preset), not a renderable wallpaper"
+            );
+        }
+    };
+    Ok(renderer)
 }
 
 /// Capture the current frame of an already-built, warm `renderer` to `path`,
