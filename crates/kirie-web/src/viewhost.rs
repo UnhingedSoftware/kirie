@@ -13,10 +13,36 @@
 //!
 //! `props <single-line-json>`, `mute <0|1>`, `pointer <x> <y> <l> <r>`,
 //! `resize <w> <h>` (informational — the layer window is anchored to the
-//! output), `snap <path>`, `quit`. Child stdout: `ready` once the page is up,
+//! output), `audio <f> <f> …`, `media <channel> <single-line-json>`,
+//! `snap <path>`, `quit`. Child stdout: `ready` once the page is up,
 //! `snap ok <w> <h>` / `snap fail` in reply to a `snap`; anything else is
 //! ignored (forward-compatible). Killing the child tears down webkit and its
 //! layer window deterministically.
+//!
+//! ### Why the cover image rides the same line protocol
+//!
+//! `media thumb …` carries a base64 PNG and is by far the largest command —
+//! hundreds of KB against a few dozen bytes for everything else. It is still
+//! sent inline, un-chunked, because the two things that could go wrong do not:
+//!
+//! * **Truncation** — `BufRead::lines` grows its `String` to whatever arrives,
+//!   so there is no line-length ceiling to exceed. The engine side guarantees
+//!   the payload is single-line ([`crate::feed::media_line`] refuses anything
+//!   else), which is the only property the framing actually depends on.
+//! * **Blocking the render thread** — the pipe buffer is 64 KB, so a large
+//!   write does wait for the child to drain. The child's stdin reader is a
+//!   dedicated thread whose only job is to push lines into an unbounded
+//!   channel, so it drains at memcpy speed and never stalls on the GTK loop;
+//!   and a *dead* child fails the write with `EPIPE` rather than blocking
+//!   (Rust ignores `SIGPIPE`). The engine side additionally bounds the cover to
+//!   `kirie_render::media::MAX_THUMBNAIL_EDGE` and only re-sends it when the
+//!   art genuinely changes, so this is a per-track-change event, not traffic.
+//!
+//! The alternative — the temp-file handoff [`ViewHostBackend::snapshot`] uses —
+//! was rejected here for the opposite reason it was chosen there: a still is
+//! ~14 MB and single-shot, while a cover is ~0.3 MB and arrives whenever a
+//! track changes, so a file per track would trade a bounded pipe write for
+//! filesystem litter that leaks whenever the host dies mid-read.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -24,6 +50,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use crate::backend::{FrameBuffer, PixelFormat, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+use crate::feed::{MediaChannel, audio_line, media_line};
 
 /// How long to wait for the host's `snap` reply before giving up on the still.
 ///
@@ -262,6 +289,19 @@ impl WebBackend for ViewHostBackend {
         // The batch is single-line JSON by construction (serde output).
         if !json.contains('\n') {
             self.send_line(&format!("props {json}"));
+        }
+    }
+
+    fn push_audio(&mut self, bands: &[f32]) {
+        self.send_line(&audio_line(bands));
+    }
+
+    fn push_media(&mut self, channel: MediaChannel, json: &str) {
+        // `None` only for a payload that would break the framing; the builder
+        // never produces one, so dropping it is strictly better than corrupting
+        // the command stream.
+        if let Some(line) = media_line(channel, json) {
+            self.send_line(&line);
         }
     }
 

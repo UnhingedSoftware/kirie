@@ -135,8 +135,30 @@ impl WebviewBackend {
     }
 
     /// Push one audio frame to the page's registered audio listeners.
+    ///
+    /// Transient: a spectrum frame that arrives before the page exists is
+    /// dropped rather than queued. It has to be — audio arrives ~30 times a
+    /// second and would otherwise fill [`MAX_PENDING`] within two seconds of a
+    /// slow first load, evicting the `props`/media batches that genuinely
+    /// cannot be re-derived. A dropped spectrum frame costs nothing: the next
+    /// one is 33 ms away.
     pub fn push_audio(&mut self, bands: &[f32]) {
-        self.evaluate(&shim::audio_call(bands));
+        self.evaluate_transient(&shim::audio_call(bands));
+    }
+
+    /// Push one now-playing update to the page's registered media listeners.
+    ///
+    /// Queued, never transient — **including** the timeline, which looks like a
+    /// continuously moving value but is not delivered like one. The engine
+    /// sends every media channel on *change* only, so a paused player (or one
+    /// that simply reports the same position twice) produces exactly one
+    /// timeline event and then silence; dropping it because the page had not
+    /// committed yet would leave a permanently blank progress bar. That is not
+    /// hypothetical — it is what the probe page caught. Audio is the only
+    /// stream where "the next one is 33 ms away" holds, and it is the only one
+    /// allowed to be dropped.
+    pub fn push_media(&mut self, channel: crate::feed::MediaChannel, json: &str) {
+        self.evaluate(&channel.call(json));
     }
 
     /// Apply user properties (`{name: {value: ...}}` JSON) to the page.
@@ -361,6 +383,29 @@ impl WebviewBackend {
             return;
         }
         drop(pending);
+        self.webkit.eval(view, js);
+    }
+
+    /// Evaluate `js` only if the page already exists; drop it otherwise.
+    ///
+    /// The counterpart to [`Self::evaluate`]'s buffering, and used by exactly
+    /// one caller: the audio spectrum. The rule for qualifying is strict — the
+    /// value must be re-sent unconditionally on a short fixed period, so that
+    /// dropping one costs a single frame and nothing else. Audio is the only
+    /// such stream ([`Self::push_audio`], every 33 ms); everything else the
+    /// engine pushes is change-driven and must be buffered instead, or a value
+    /// that never changes again would be lost for the wallpaper's lifetime.
+    ///
+    /// Without this exemption a slow first load would fill the [`MAX_PENDING`]
+    /// queue with spectrum frames that are stale by the time it drains, and
+    /// evict the one-shot batches that cannot be reproduced.
+    fn evaluate_transient(&self, js: &str) {
+        let Some(view) = self.view.as_ref() else {
+            return;
+        };
+        if self.pending.borrow().is_some() {
+            return; // no document yet — this frame is simply skipped
+        }
         self.webkit.eval(view, js);
     }
 }

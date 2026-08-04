@@ -67,6 +67,12 @@ enum Command {
     /// its registry entry until that browser's first published paint, then
     /// executed in order).
     ApplyProps(BrowserId, String),
+    /// Newest audio spectrum for one browser; stored in its entry and replayed
+    /// to the page every pumped frame.
+    Audio(BrowserId, Vec<f32>),
+    /// Deliver one `__wpMedia*` update to a browser's page (paint-gated in its
+    /// registry entry, like [`Command::ApplyProps`]).
+    Media(BrowserId, crate::feed::MediaChannel, String),
     /// Close one browser (the context stays up); ack when done.
     Close(BrowserId, Sender<()>),
     /// Tear the whole context down (sent when the last backend drops).
@@ -282,6 +288,14 @@ impl WebBackend for CefBackend {
         self.send(Command::ApplyProps(self.id, json.to_owned()));
     }
 
+    fn push_audio(&mut self, bands: &[f32]) {
+        self.send(Command::Audio(self.id, bands.to_vec()));
+    }
+
+    fn push_media(&mut self, channel: crate::feed::MediaChannel, json: &str) {
+        self.send(Command::Media(self.id, channel, json.to_owned()));
+    }
+
     fn shutdown(&mut self) {
         if self.closed {
             return;
@@ -432,6 +446,16 @@ fn cef_thread_main(config: ThreadConfig) {
                         entry.push_props(json);
                     }
                 }
+                Ok(Command::Audio(id, bands)) => {
+                    if let Some(entry) = registry.get_mut(id) {
+                        entry.set_audio(bands);
+                    }
+                }
+                Ok(Command::Media(id, channel, json)) => {
+                    if let Some(entry) = registry.get_mut(id) {
+                        entry.push_media(channel, json);
+                    }
+                }
                 Ok(Command::Close(id, done)) => {
                     if let Some(entry) = registry.remove(id) {
                         close_browser(entry.browser);
@@ -533,8 +557,12 @@ fn close_browser(browser: Browser) {
 }
 
 /// Per-frame per-browser bridge data: pointer move, click edges, the audio
-/// spectrum call (silent for now), and any deliverable property batches,
-/// mirroring CWeb::pushBridgeData (§3.5).
+/// spectrum call, and any deliverable property / media batches, mirroring
+/// CWeb::pushBridgeData (§3.5).
+///
+/// `audio_zero` is the stand-in used until the engine has sent a real
+/// spectrum — the reference pushes the (zeroed) bands from the first frame, and
+/// a page that reads `audioArray[i]` unconditionally must never see `undefined`.
 fn drive_browser(entry: &mut BrowserEntry<Browser>, audio_zero: &[f32]) {
     let pointer = entry.pointer();
     let left_edge = entry.left_edge();
@@ -554,7 +582,12 @@ fn drive_browser(entry: &mut BrowserEntry<Browser>, audio_zero: &[f32]) {
         }
     }
     if let Some(frame) = entry.browser.main_frame() {
-        let js = CefString::from(crate::shim::audio_call(audio_zero).as_str());
+        let bands = if entry.audio().is_empty() {
+            audio_zero
+        } else {
+            entry.audio()
+        };
+        let js = CefString::from(crate::shim::audio_call(bands).as_str());
         frame.execute_java_script(Some(&js), None, 0);
         // Queued property batches are released only after *this* browser's
         // first published paint (its own frame slot is non-empty; see
@@ -563,6 +596,11 @@ fn drive_browser(entry: &mut BrowserEntry<Browser>, audio_zero: &[f32]) {
         // queued when the frame does not exist yet.
         for json in entry.drain_props_if_painted() {
             let call = CefString::from(crate::shim::apply_user_properties_call(&json).as_str());
+            frame.execute_java_script(Some(&call), None, 0);
+        }
+        // Same gate, same ordering guarantee, for the now-playing channels.
+        for (channel, json) in entry.drain_media_if_painted() {
+            let call = CefString::from(channel.call(&json).as_str());
             frame.execute_java_script(Some(&call), None, 0);
         }
     }

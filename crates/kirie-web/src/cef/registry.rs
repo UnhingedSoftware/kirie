@@ -45,6 +45,16 @@ pub struct BrowserEntry<B> {
     /// full set on the first rendered frame — the page may block its init on
     /// `applyUserProperties`; later singles are live property changes).
     pending_props: Vec<String>,
+    /// Latest audio spectrum for this browser, replayed to the page every
+    /// pumped frame (the reference pushes the bands per frame, §3.5). A single
+    /// slot rather than a queue: only the newest frame is meaningful, and the
+    /// engine already rate-limits how often it is refreshed.
+    audio: Vec<f32>,
+    /// Media updates waiting for the page, under the same paint gate as
+    /// `pending_props` and for the same reason: the engine sends them only when
+    /// the value *changes*, so one dropped before the page's listeners exist
+    /// would never be re-sent.
+    pending_media: Vec<(crate::feed::MediaChannel, String)>,
 }
 
 impl<B> BrowserEntry<B> {
@@ -57,6 +67,8 @@ impl<B> BrowserEntry<B> {
             last_left: false,
             last_right: false,
             pending_props: Vec::new(),
+            audio: Vec::new(),
+            pending_media: Vec::new(),
         }
     }
 
@@ -108,6 +120,35 @@ impl<B> BrowserEntry<B> {
             return Vec::new();
         }
         std::mem::take(&mut self.pending_props)
+    }
+
+    /// Replace this browser's audio spectrum with the newest frame.
+    pub fn set_audio(&mut self, bands: Vec<f32>) {
+        self.audio = bands;
+    }
+
+    /// The spectrum to push this frame; empty until the engine has sent one
+    /// (the caller then falls back to silence, as before).
+    #[must_use]
+    pub fn audio(&self) -> &[f32] {
+        &self.audio
+    }
+
+    /// Queue one now-playing update for this browser's page.
+    pub fn push_media(&mut self, channel: crate::feed::MediaChannel, json: String) {
+        self.pending_media.push((channel, json));
+    }
+
+    /// The queued media updates, released only once this browser has published
+    /// its first paint — same paint gate, and same rationale, as
+    /// [`Self::drain_props_if_painted`]: firing before the page's own scripts
+    /// have run means the bridge finds no registered listeners and the event is
+    /// silently lost.
+    pub fn drain_media_if_painted(&mut self) -> Vec<(crate::feed::MediaChannel, String)> {
+        if self.pending_media.is_empty() || self.slot.load_full().is_none() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.pending_media)
     }
 }
 

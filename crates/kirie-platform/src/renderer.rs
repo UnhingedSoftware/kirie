@@ -78,6 +78,34 @@ pub trait Renderer {
         false
     }
 
+    /// Low-rate wake-up for a **passive** renderer, so it can do the work that
+    /// is not tied to painting.
+    ///
+    /// [`Self::render`] is the natural home for per-frame upkeep, but a passive
+    /// renderer stops being called at all once its first frame is out — see
+    /// [`Self::is_passive`] for why the platform must stop acquiring for it.
+    /// The webview web backend still has to feed its page live data (the audio
+    /// spectrum a visualiser reacts to, the MPRIS now-playing state a media
+    /// wallpaper displays), and "there is nothing to composite" says nothing
+    /// about whether the page needs feeding. So the platform drives this hook
+    /// from one shared timer instead, at a rate chosen for that data rather
+    /// than for the display.
+    ///
+    /// Guarantees the implementation may rely on:
+    ///
+    /// * only ever called for a **visible** output — an output that is paused
+    ///   (a fullscreen app covers it) or released (its renderer was dropped to
+    ///   reclaim memory) is never polled, so the hidden-wallpaper reclaim stays
+    ///   as free as it was;
+    /// * only ever called for a renderer that answered `true` to
+    ///   [`Self::is_passive`] — an active renderer gets `render` every frame
+    ///   and needs no second channel;
+    /// * called on the render thread, from the same event loop that serves IPC
+    ///   and playlists, so an implementation MUST be cheap and non-blocking.
+    ///
+    /// Default: no-op.
+    fn poll(&mut self) {}
+
     /// Apply a live property override (socket `property <key> <value>`, doc
     /// §4.9): update the running wallpaper in place so the change shows on the
     /// next frame — no reload. `value` is the raw string; the renderer parses it

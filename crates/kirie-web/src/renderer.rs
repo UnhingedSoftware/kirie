@@ -11,6 +11,7 @@
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 
 use crate::backend::{PixelFormat, WebBackend, WebFrameRef};
+use crate::feed::{FeedPump, WebFeed};
 
 /// A [`kirie_platform::Renderer`] that presents a web wallpaper.
 ///
@@ -26,6 +27,14 @@ pub struct WebRenderer {
     /// Lazily (re)built when the browser paint size or format changes.
     uploaded: Option<Uploaded>,
     surface_size: SurfaceSize,
+    /// Engine-supplied source of live audio + now-playing data
+    /// ([`Self::set_feed`]); `None` leaves the page unfed, which is what a
+    /// build with neither audio capture nor MPRIS wants.
+    feed: Option<Box<dyn WebFeed>>,
+    /// Rate limiting + change detection for that feed. Held here (not in the
+    /// backend) so both drive paths — `render` for a composited backend,
+    /// `poll` for a passive one — share one cadence and one diff.
+    pump: FeedPump,
 }
 
 struct Uploaded {
@@ -122,12 +131,41 @@ impl WebRenderer {
             bind_layout,
             uploaded: None,
             surface_size: SurfaceSize { width: 1, height: 1 },
+            feed: None,
+            pump: FeedPump::new(),
         }
     }
 
     /// Access the underlying backend (e.g. to forward pointer input).
     pub fn backend_mut(&mut self) -> &mut dyn WebBackend {
         self.backend.as_mut()
+    }
+
+    /// Attach the engine's live audio + now-playing source.
+    ///
+    /// Without this a web wallpaper renders, takes pointer input and receives
+    /// its user properties, but its `wallpaperRegisterAudioListener` /
+    /// `wallpaperRegisterMedia*Listener` callbacks never fire — an
+    /// audio-reactive page stays still and a media page never leaves its
+    /// loading state. The engine owns the sources (system-audio capture, the
+    /// MPRIS D-Bus client), so it supplies them here rather than this crate
+    /// growing a dependency on either.
+    ///
+    /// Delivery starts on the next [`Renderer::render`] / [`Renderer::poll`],
+    /// with the first tick sending every media channel so the page is brought
+    /// up to date even when nothing is playing.
+    pub fn set_feed(&mut self, feed: Box<dyn WebFeed>) {
+        self.feed = Some(feed);
+    }
+
+    /// Deliver whatever the feed has that the page has not been told yet.
+    ///
+    /// Called from both drive paths; the pump itself decides what is due, so
+    /// calling it more often than necessary costs two `Instant` comparisons.
+    fn pump_feed(&mut self) {
+        if let Some(feed) = &self.feed {
+            self.pump.pump(feed.as_ref(), self.backend.as_mut());
+        }
     }
 
     fn ensure_texture(&mut self, frame: WebFrameRef<'_>) {
@@ -223,6 +261,11 @@ impl Renderer for WebRenderer {
         }
 
         self.backend.tick(dt);
+        // Composited backends (CEF) keep getting frames, so this is their feed
+        // path; the pump's own intervals keep a 144 Hz output from pushing 144
+        // audio frames a second. A passive backend never reaches here at all
+        // and is fed from `poll` instead.
+        self.pump_feed();
 
         // Copy the frame's bytes out from behind the backend's borrow before
         // touching `self` mutably (upload needs `&mut self`).
@@ -265,6 +308,17 @@ impl Renderer for WebRenderer {
             }
         }
         self.queue.submit([encoder.finish()]);
+    }
+
+    /// Platform-driven low-rate tick for the passive (webview) backend, whose
+    /// [`Self::render`] is never called again after the first frame.
+    ///
+    /// Same work as the `render` path does inline: hand the page whatever the
+    /// feed has that it has not been told yet. The platform only calls this for
+    /// visible outputs, so a paused or released wallpaper is never fed — the
+    /// host process it would push into is, in the released case, already gone.
+    fn poll(&mut self) {
+        self.pump_feed();
     }
 
     /// Platform-fed pointer (T26): forward to the page in browser pixels (the

@@ -10,6 +10,9 @@
 //!
 //! * [`backend`] — the engine-neutral [`WebBackend`] trait plus its frame /
 //!   pointer / error types. Shared by every browser backend.
+//! * [`feed`] — the live audio-spectrum + MPRIS now-playing data a page's
+//!   `wallpaperRegister*Listener` callbacks expect, plus the rate-limiting,
+//!   diffing pump that delivers it and the host wire format it travels on.
 //! * [`renderer`] — [`WebRenderer`], a [`kirie_platform::Renderer`] that
 //!   presents whatever a [`WebBackend`] paints.
 //! * `cef` (feature `cef`) — the Chromium Embedded Framework OSR backend
@@ -28,6 +31,7 @@
 #![cfg_attr(not(any(feature = "cef", feature = "webview")), forbid(unsafe_code))]
 
 pub mod backend;
+pub mod feed;
 pub mod renderer;
 pub mod shim;
 
@@ -62,4 +66,5 @@ pub mod webview;
 pub mod viewhost;
 
 pub use backend::{FrameBuffer, PixelFormat, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+pub use feed::{FeedPump, MediaChannel, MediaPalette, MediaSnapshot, WebFeed};
 pub use renderer::WebRenderer;

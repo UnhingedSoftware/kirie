@@ -30,15 +30,41 @@ use std::fmt::Write as _;
 /// (docs/subsystems-misc.md §3.5): audio + the four MPRIS media listeners, and
 /// `__wpApplyProps` / `__wpApplyGeneral` which forward to the page's
 /// `wallpaperPropertyListener`.
+///
+/// # Late registration replays the last event
+///
+/// The shim exists before page scripts run, but a page registers its listeners
+/// whenever it likes — real workshop wallpapers do it from a jQuery
+/// `$(document).ready` handler, after loading jQuery, lodash, fonts and a few
+/// hundred KB of CSS. Media events are sent on **change**, so anything pushed
+/// into a registration list that is still empty is not merely late, it is gone
+/// for good: the next push only comes when the track does. That is precisely
+/// the failure this bridge was built to end — a media wallpaper stuck on
+/// "Loading…" while the engine dutifully sends data nobody is listening for.
+///
+/// So each channel remembers its most recent payload and hands it straight to
+/// any listener that registers afterwards. Registration order and page load
+/// time stop mattering, and a page that registers early is unaffected (it just
+/// gets the event twice: once on registration if something already arrived,
+/// then normally). Only the *latest* value per channel is kept, so this is a
+/// handful of references, not a log.
 pub const BRIDGE_INIT: &str = r#"(function(){
   if (window.__wpBridge) { return; }
   window.__wpBridge = true;
   var lists = {};
+  var latest = {};
   function register(name, key) {
     lists[key] = [];
-    window[name] = function (cb) { if (typeof cb === 'function') { lists[key].push(cb); } };
+    window[name] = function (cb) {
+      if (typeof cb !== 'function') { return; }
+      lists[key].push(cb);
+      if (Object.prototype.hasOwnProperty.call(latest, key)) {
+        try { cb(latest[key]); } catch (e) { /* see fire() */ }
+      }
+    };
   }
   function fire(key, data) {
+    latest[key] = data;
     var cbs = lists[key] || [];
     for (var i = 0; i < cbs.length; i++) {
       try { cbs[i](data); } catch (e) { /* a broken page listener must not break the bridge */ }
@@ -135,6 +161,17 @@ pub fn media_timeline_call(json: &str) -> String {
 #[must_use]
 pub fn media_thumbnail_call(json: &str) -> String {
     format!("window.__wpMediaThumb({json});")
+}
+
+/// Build the `__wpMediaStatus({enabled})` call from serialized JSON.
+///
+/// The status listener is the one the page uses to decide whether to show its
+/// media UI at all: [`BRIDGE_INIT`] has always registered it, but nothing built
+/// its call until the media feed landed, so a page that gates on it stayed
+/// blank even with everything else wired.
+#[must_use]
+pub fn media_status_call(json: &str) -> String {
+    format!("window.__wpMediaStatus({json});")
 }
 
 #[cfg(test)]

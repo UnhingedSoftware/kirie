@@ -6,11 +6,11 @@ use std::time::{Duration, Instant};
 
 use smithay_client_toolkit::compositor::{CompositorHandler, CompositorState, Region};
 use smithay_client_toolkit::output::{OutputHandler, OutputState};
-use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
-use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop::channel::{
     Event as CalloopEvent, Sender as CmdSender, channel,
 };
+use smithay_client_toolkit::reexports::calloop::timer::{TimeoutAction, Timer};
+use smithay_client_toolkit::reexports::calloop::{EventLoop, LoopHandle};
 use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use std::collections::HashMap;
 
@@ -52,6 +52,30 @@ use crate::toplevel::{PauseConfig, ToplevelTracker};
 /// the timer is only armed then, and drops itself as soon as the last output
 /// resumes.
 const PAUSE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
+
+/// How often [`Renderer::poll`] is driven for outputs whose renderer is passive.
+///
+/// A passive renderer (the webview web backend: webkit paints its own
+/// layer-shell window over ours) gets exactly one `draw` after its first frame
+/// and then nothing, ever — that early return is what keeps the event loop
+/// alive (see the comment at the acquire in [`PlatformState::draw`]). It is
+/// also, unavoidably, the end of every wake-up that renderer had. Web
+/// wallpapers still need live data pushed into their page: the audio spectrum
+/// an audio-reactive wallpaper animates from, and the MPRIS now-playing state a
+/// media wallpaper displays. This timer is the replacement channel.
+///
+/// 30 Hz because that is the *audio* requirement — one 128-float JavaScript
+/// call, ~1 KB, and the bands are already smoothed so half the reference's
+/// per-frame cadence is visually identical. Media is far slower-moving and is
+/// throttled again inside the renderer (`kirie_web::feed::MEDIA_INTERVAL`), so
+/// nothing here is paced for it.
+///
+/// The cost when it does not apply is exactly zero: the timer is armed only
+/// once a live, visible passive renderer exists
+/// ([`PlatformState::ensure_passive_poll`]) and drops itself the moment none
+/// does — including while an output is paused, so a fullscreen game does not
+/// pay for a wallpaper it has covered.
+const PASSIVE_POLL_INTERVAL: Duration = Duration::from_millis(33);
 
 /// The wayland presentation layer: owns the compositor connection, all
 /// per-output surfaces, and the shared GPU context (SPEC V1: everything
@@ -145,6 +169,10 @@ struct PlatformState {
     /// stacking one watchdog per pause transition; cleared by the watchdog
     /// itself when it finds nothing paused and drops.
     pause_watchdog_armed: bool,
+    /// A [`PASSIVE_POLL_INTERVAL`] timer is scheduled. Same guard shape as
+    /// `pause_watchdog_armed`: one timer at a time, cleared by the timer itself
+    /// when no visible passive renderer is left.
+    passive_poll_armed: bool,
     /// The bound manager global, kept for the process lifetime so the
     /// compositor keeps streaming toplevel events at us. `None` when the
     /// compositor does not implement the protocol (GNOME) or when the pause was
@@ -272,6 +300,7 @@ impl WaylandPlatform {
                 loop_handle,
                 toplevels,
                 pause_watchdog_armed: false,
+                passive_poll_armed: false,
                 _toplevel_manager: toplevel_manager,
             },
         })
@@ -826,6 +855,74 @@ impl PlatformState {
         }
     }
 
+    /// Whether any output currently needs the passive poll: a live passive
+    /// renderer on a **visible** output.
+    ///
+    /// The visibility half is not an optimisation. A paused output has had
+    /// every one of its wake-up sources torn down on purpose, and a released
+    /// one has no renderer at all; keeping a 30 Hz timer turning for either
+    /// would hand back part of exactly what those features reclaim.
+    fn needs_passive_poll(&self) -> bool {
+        self.outputs
+            .iter()
+            .any(|ctx| !ctx.paused && !ctx.released && ctx.renderer.as_ref().is_some_and(|r| r.is_passive()))
+    }
+
+    /// Drive [`Renderer::poll`] on every visible output with a passive
+    /// renderer.
+    ///
+    /// The same visibility filter as [`Self::needs_passive_poll`], applied
+    /// again per tick rather than trusted from arming time: an output can pause
+    /// between two ticks, and the whole point of the pause is that nothing
+    /// touches it afterwards.
+    fn poll_passive(&mut self) {
+        for ctx in &mut self.outputs {
+            if ctx.paused || ctx.released {
+                continue;
+            }
+            if let Some(renderer) = ctx.renderer.as_mut()
+                && renderer.is_passive()
+            {
+                renderer.poll();
+            }
+        }
+    }
+
+    /// Arm the passive-renderer poll if one is needed and no timer is running
+    /// (see [`PASSIVE_POLL_INTERVAL`] for why it exists).
+    ///
+    /// Called from the one place `draw` can identify a passive renderer, which
+    /// is also the place it stops rendering it — so the timer takes over
+    /// exactly where the frame callbacks stop, and re-arms on resume because
+    /// `apply_pause` redraws every output it clears.
+    fn ensure_passive_poll(&mut self) {
+        if self.passive_poll_armed || !self.needs_passive_poll() {
+            return;
+        }
+        self.passive_poll_armed = true;
+        let timer = Timer::from_duration(PASSIVE_POLL_INTERVAL);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, state: &mut PlatformState| {
+                state.poll_passive();
+                if state.needs_passive_poll() {
+                    TimeoutAction::ToDuration(PASSIVE_POLL_INTERVAL)
+                } else {
+                    // Nothing passive and visible any more (paused, released,
+                    // or swapped for a scene): stop turning entirely. `draw`
+                    // arms a fresh timer if one is ever needed again.
+                    state.passive_poll_armed = false;
+                    TimeoutAction::Drop
+                }
+            });
+        if let Err(err) = armed {
+            // Same discipline as the pause watchdog: never leave the flag set
+            // on a failed arm, or nothing could ever arm one again.
+            self.passive_poll_armed = false;
+            tracing::warn!(%err, "could not arm the passive-renderer poll; web pages get no live data");
+        }
+    }
+
     /// (Re)configure the swapchain of `outputs[index]` for its current
     /// physical size and mark the full surface opaque, as the C++ driver
     /// does (docs/render-architecture.md §2.3: opaque region
@@ -933,9 +1030,7 @@ impl PlatformState {
                     let surface = ctx.wl_surface().clone();
                     let timer = Timer::from_duration(min - elapsed);
                     let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-                        if let Some(ctx) =
-                            state.outputs.iter_mut().find(|c| c.wl_surface() == &surface)
-                        {
+                        if let Some(ctx) = state.outputs.iter_mut().find(|c| c.wl_surface() == &surface) {
                             ctx.timer_armed = false;
                         }
                         state.draw(&surface);
@@ -978,17 +1073,27 @@ impl PlatformState {
             // synchronous factory below.
         }
 
-        let ctx = &mut self.outputs[index];
-
         // A passive renderer (webview: webkit paints its own window over ours)
         // has nothing left to present once its first buffer is attached, and
         // acquiring again would block forever because the compositor never
         // composites a fully covered surface. Bow out BEFORE the acquire and
         // request no callback: the output is done, and the event loop stays
         // free to serve IPC, playlists, hotplug and fullscreen-pause.
-        if ctx.first_frame_presented && ctx.renderer.as_ref().is_some_and(|r| r.is_passive()) {
-            return;
+        //
+        // This is also the last moment this renderer is reachable from the
+        // frame path, so it is where the substitute wake-up is armed: the
+        // passive poll takes over feeding the page (audio + MPRIS) from here.
+        // Arming on resume is covered too — `apply_pause` redraws every output
+        // it un-pauses, which lands right back on this branch.
+        {
+            let ctx = &self.outputs[index];
+            if ctx.first_frame_presented && ctx.renderer.as_ref().is_some_and(|r| r.is_passive()) {
+                self.ensure_passive_poll();
+                return;
+            }
         }
+
+        let ctx = &mut self.outputs[index];
 
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
             return;
@@ -1128,8 +1233,7 @@ impl PlatformState {
                 let surface = ctx.wl_surface().clone();
                 let timer = Timer::from_duration(min);
                 let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
-                    if let Some(ctx) = state.outputs.iter_mut().find(|c| c.wl_surface() == &surface)
-                    {
+                    if let Some(ctx) = state.outputs.iter_mut().find(|c| c.wl_surface() == &surface) {
                         ctx.timer_armed = false;
                     }
                     state.draw(&surface);

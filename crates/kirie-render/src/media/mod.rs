@@ -51,7 +51,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 
-pub use art::{AlbumArt, MediaPlaybackEvent, load_art};
+pub use art::{AlbumArt, MAX_THUMBNAIL_EDGE, MediaPlaybackEvent, load_art};
 pub use metadata::parse_metadata;
 pub use state::{MediaState, PlaybackState, TrackMetadata};
 

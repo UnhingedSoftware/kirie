@@ -190,6 +190,29 @@ pub trait WebBackend: Send {
     /// object literal. Default: ignored (backends without script injection).
     fn apply_properties(&mut self, _json: &str) {}
 
+    /// Push one audio-spectrum frame to the page's registered audio listeners
+    /// (`shim::audio_call` → `window.__wpAudio`).
+    ///
+    /// `bands` is the mono FFT band array; a 64-entry slice is mirrored into
+    /// the 128 floats (identical left+right channels) the reference delivers
+    /// (docs/subsystems-misc.md §1.3, §3.5). Called from the render thread at
+    /// [`crate::feed::AUDIO_INTERVAL`], so an implementation must not block.
+    ///
+    /// Default: ignored — correct for a backend with no script injection.
+    fn push_audio(&mut self, _bands: &[f32]) {}
+
+    /// Push one now-playing update to the page's registered media listeners.
+    ///
+    /// `json` is a single-line JSON object literal built by
+    /// [`crate::feed`], spliced verbatim into the `window.__wpMedia*` call
+    /// `channel` selects. Split by channel (rather than one fat event) because
+    /// that is what lets the thumbnail — a base64 cover image, orders of
+    /// magnitude larger than everything else — be sent only when the cover
+    /// actually changes.
+    ///
+    /// Default: ignored.
+    fn push_media(&mut self, _channel: crate::feed::MediaChannel, _json: &str) {}
+
     /// Draw a one-off still of the live page, for the engine to leave on the
     /// output when this wallpaper is released (`--release-hidden-after`).
     ///

@@ -14,6 +14,13 @@ pub mod resolve;
 pub mod run;
 pub mod screenshot;
 pub mod signals;
+/// The engine's [`kirie_web::WebFeed`]: system audio + MPRIS now-playing,
+/// adapted to the shapes a web page's `wallpaperRegister*Listener` callbacks
+/// expect. Only exists in a build with a web backend — nothing else consumes
+/// it, and it is the only place the browser layer and the media/audio
+/// pipelines meet.
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
+pub mod webfeed;
 
 use std::ffi::OsString;
 use std::os::unix::process::CommandExt;

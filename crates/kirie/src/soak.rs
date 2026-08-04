@@ -82,7 +82,10 @@ fn bench() -> Result<()> {
 
     // `KIRIE_BENCH_SCALE` drives the scene's render-target size (fill cost);
     // the scene FBO is projection x scale, independent of KIRIE_BENCH_SIZE.
-    if let Some(s) = std::env::var("KIRIE_BENCH_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+    if let Some(s) = std::env::var("KIRIE_BENCH_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+    {
         crate::compat::run::set_render_scale(s);
     }
 
@@ -124,15 +127,8 @@ fn bench() -> Result<()> {
     };
 
     let build_start = Instant::now();
-    let mut renderer = build_offscreen_renderer(
-        &rt,
-        &wp,
-        ScalingMode::Default,
-        ClampMode::Clamp,
-        size,
-        None,
-        &[],
-    )?;
+    let mut renderer =
+        build_offscreen_renderer(&rt, &wp, ScalingMode::Default, ClampMode::Clamp, size, None, &[])?;
     let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
 
     // Warm up: first frames compile/upload lazily and would skew the mean.

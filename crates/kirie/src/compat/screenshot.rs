@@ -451,9 +451,7 @@ pub(crate) fn build_offscreen_renderer(
                 scaling: super::run::to_render_scaling(scaling),
                 clamp: super::run::to_render_clamp(clamp),
             };
-            Box::new(
-                ImageRenderer::new(render_target, &content, options).context("building image renderer")?,
-            )
+            Box::new(ImageRenderer::new(render_target, &content, options).context("building image renderer")?)
         }
         Wallpaper::Scene { dir } => {
             let options = kirie_render::SceneOptions {

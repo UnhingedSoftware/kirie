@@ -16,9 +16,11 @@
 //!
 //! Protocol: stdin lines `props <json>` / `mute <0|1>` /
 //! `pointer <x> <y> <l> <r>` / `resize <w> <h>` (informational; the layer
-//! window is output-anchored) / `quit`; stdout `ready` once the page is up.
-//! Engine death = stdin EOF = quit. See `kirie_web::viewhost` (the engine
-//! side) for the pairing client.
+//! window is output-anchored) / `audio <f> <f> …` (the FFT spectrum) /
+//! `media <channel> <json>` (the now-playing event, split per
+//! `wallpaperRegisterMedia*Listener`) / `snap <path>` / `quit`; stdout `ready`
+//! once the page is up. Engine death = stdin EOF = quit. See
+//! `kirie_web::viewhost` (the engine side) for the pairing client.
 
 use gtk::prelude::*;
 use gtk_layer_shell::LayerShell;
@@ -183,6 +185,28 @@ fn main() {
                         let h = p.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                         if w > 0 && h > 0 {
                             backend.borrow_mut().resize(WebSize { width: w, height: h });
+                        }
+                    }
+                    Some("audio") => {
+                        if let Some(rest) = line.strip_prefix("audio ") {
+                            let bands = kirie_web::feed::parse_audio_bands(rest);
+                            // An empty/garbled frame is skipped rather than
+                            // pushed as a zero spectrum, which would visibly
+                            // reset a visualiser mid-beat.
+                            if !bands.is_empty() {
+                                backend.borrow_mut().push_audio(&bands);
+                            }
+                        }
+                    }
+                    Some("media") => {
+                        // Split off the JSON with `strip_prefix` + one
+                        // `split_once`, never `split_whitespace`: the payload
+                        // contains spaces (track titles) and, for a cover, a
+                        // few hundred KB of base64 that must arrive whole.
+                        if let Some(rest) = line.strip_prefix("media ")
+                            && let Some((channel, json)) = kirie_web::feed::parse_media_payload(rest)
+                        {
+                            backend.borrow_mut().push_media(channel, json);
                         }
                     }
                     Some("snap") => {

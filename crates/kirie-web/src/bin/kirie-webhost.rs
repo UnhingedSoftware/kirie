@@ -3,7 +3,7 @@
 //! Owns the CEF context and one windowless browser, publishes frames into a
 //! `memfd` seqlock buffer the engine maps read-only (announced as
 //! `shm /proc/<pid>/fd/<fd> <bytes>` on stdout), and takes line commands on
-//! stdin (`resize`/`pointer`/`mute`/`props`/`quit`). The engine kills this
+//! stdin (`resize`/`pointer`/`mute`/`props`/`audio`/`media`/`quit`). The engine kills this
 //! process to tear the browser down — the kernel then reclaims every thread,
 //! zygote and heap deterministically, which in-process `cef_shutdown` never
 //! guaranteed. See `kirie_web::hosted` for the protocol/layout.
@@ -122,6 +122,25 @@ fn main() {
                         Some("props") => {
                             if let Some(rest) = line.strip_prefix("props ") {
                                 backend.apply_properties(rest);
+                            }
+                        }
+                        Some("audio") => {
+                            if let Some(rest) = line.strip_prefix("audio ") {
+                                let bands = kirie_web::feed::parse_audio_bands(rest);
+                                if !bands.is_empty() {
+                                    backend.push_audio(&bands);
+                                }
+                            }
+                        }
+                        Some("media") => {
+                            // `strip_prefix` + one split, never
+                            // `split_whitespace`: the JSON payload contains
+                            // spaces and, for a cover, a few hundred KB of
+                            // base64 that must survive whole.
+                            if let Some(rest) = line.strip_prefix("media ")
+                                && let Some((channel, json)) = kirie_web::feed::parse_media_payload(rest)
+                            {
+                                backend.push_media(channel, json);
                             }
                         }
                         Some("quit") => break 'run,

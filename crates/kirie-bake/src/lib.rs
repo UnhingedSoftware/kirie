@@ -96,14 +96,22 @@ pub fn resolve_vulkan_icd(selector: &str) -> Option<std::path::PathBuf> {
             "software" | "lavapipe" | "llvmpipe" | "lvp" => &["lvp"],
             other => std::slice::from_ref(&other).to_owned().leak(),
         };
-        let dirs = ["/usr/share/vulkan/icd.d", "/usr/local/share/vulkan/icd.d", "/etc/vulkan/icd.d"];
+        let dirs = [
+            "/usr/share/vulkan/icd.d",
+            "/usr/local/share/vulkan/icd.d",
+            "/etc/vulkan/icd.d",
+        ];
         dirs.iter()
             .filter_map(|d| std::fs::read_dir(d).ok())
             .flatten()
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
             .find(|p| {
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_ascii_lowercase();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase();
                 tokens.iter().any(|t| name.contains(t))
             })?
     };

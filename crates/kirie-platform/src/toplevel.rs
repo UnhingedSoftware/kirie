@@ -228,9 +228,7 @@ impl ToplevelTracker {
         }
         self.toplevels
             .values()
-            .find(|toplevel| {
-                toplevel.blocks(&self.config, toplevel.outputs.iter().any(|o| o == output))
-            })
+            .find(|toplevel| toplevel.blocks(&self.config, toplevel.outputs.iter().any(|o| o == output)))
             .map(|toplevel| toplevel.app_id.as_str())
     }
 }
@@ -249,10 +247,7 @@ mod tests {
 
     /// Packed `state` array as the compositor sends it (host-endian `u32`s).
     fn state_array(values: &[ToplevelState]) -> Vec<u8> {
-        values
-            .iter()
-            .flat_map(|v| (*v as u32).to_ne_bytes())
-            .collect()
+        values.iter().flat_map(|v| (*v as u32).to_ne_bytes()).collect()
     }
 
     #[test]

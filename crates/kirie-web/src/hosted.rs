@@ -14,7 +14,11 @@
 //!   via `/proc/<pid>/fd/<fd>`, same-uid open); `ready` after the browser is
 //!   up. Anything else is ignored (forward-compatible).
 //! * Child stdin, line-based commands: `resize <w> <h>`, `pointer <x> <y>
-//!   <down>`, `mute <0|1>`, `props <single-line-json>`, `quit`.
+//!   <down>`, `mute <0|1>`, `props <single-line-json>`, `audio <f> <f> …`,
+//!   `media <channel> <single-line-json>`, `quit`. The `media thumb` line
+//!   carries a base64 cover image and is the one large command; it is sent
+//!   inline for the reasons spelled out in [`crate::viewhost`], which shares
+//!   this framing.
 //! * Frame buffer, seqlock layout: `[seq u64][w u32][h u32][fmt u32][pad u32]`
 //!   then pixels. The writer increments `seq` to odd before writing and to
 //!   even after; a reader retries until it sees a stable even value.
@@ -25,6 +29,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use crate::backend::{FrameBuffer, PixelFormat, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+use crate::feed::{MediaChannel, audio_line, media_line};
 
 /// Seqlock header size (see module docs).
 pub const SHM_HEADER: usize = 24;
@@ -288,6 +293,16 @@ impl WebBackend for HostedBackend {
         // The batch is single-line JSON by construction (serde output).
         if !json.contains('\n') {
             self.send_line(&format!("props {json}"));
+        }
+    }
+
+    fn push_audio(&mut self, bands: &[f32]) {
+        self.send_line(&audio_line(bands));
+    }
+
+    fn push_media(&mut self, channel: MediaChannel, json: &str) {
+        if let Some(line) = media_line(channel, json) {
+            self.send_line(&line);
         }
     }
 
