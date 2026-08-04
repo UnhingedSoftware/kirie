@@ -209,6 +209,10 @@ impl WebRenderer {
 }
 
 impl Renderer for WebRenderer {
+    fn is_passive(&self) -> bool {
+        !self.backend.produces_frames()
+    }
+
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32) {
         if size != self.surface_size {
             self.surface_size = size;

@@ -434,7 +434,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // multi-monitor setups build concurrently instead of one output blocking
     // the next. Owns its own copy of the specs — the factory keeps its own for
     // the synchronous fallback (web, `Skip`, and a later output hotplug).
-    let mut initial_specs: std::collections::HashMap<String, RunSpec> =
+    let initial_specs: std::collections::HashMap<String, RunSpec> =
         specs.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
     let window_spec: Option<RunSpec> = specs.first().map(|(_, s)| s.clone());
     let ib_registrar = registrar.clone();
@@ -446,7 +446,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         let (screen_key, spec) = if window_mode {
             ("default".to_owned(), window_spec.clone()?)
         } else {
-            (output.to_owned(), initial_specs.remove(output)?)
+            (output.to_owned(), initial_specs.get(output).cloned()?)
         };
         match spec {
             RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
@@ -505,6 +505,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         fullscreen_pause: !args.no_fullscreen_pause,
         fullscreen_pause_only_active: args.fullscreen_pause_only_active,
         fullscreen_pause_ignore_appids: args.fullscreen_pause_ignore_appid.clone(),
+        release_hidden_after: args.release_hidden_after.map(Duration::from_secs),
         ..Default::default()
     };
 

@@ -79,6 +79,20 @@ pub struct PresentOptions {
     /// case-insensitively. The usual case is a fullscreen media player or
     /// browser the user wants the wallpaper to keep running behind.
     pub fullscreen_pause_ignore_appids: Vec<String>,
+    /// Drop a paused output's renderer once it has been hidden this long,
+    /// giving its memory back to the system until it is visible again
+    /// (`--release-hidden-after`, seconds; `None` keeps it resident forever).
+    ///
+    /// A hidden wallpaper is pure cost: measured, a scene holds ~90-240MB of
+    /// RSS plus its GPU textures, and a web wallpaper's out-of-process webkit
+    /// host holds ~240MB more and frees NOTHING on its own when covered. The
+    /// rebuild on resume is cheap because the bake + shader caches survive
+    /// (~50-120ms warm), and it runs off the render thread like any other
+    /// build, so nothing blocks.
+    ///
+    /// The delay exists so alt-tabbing in and out of a game does not thrash
+    /// teardown/rebuild: only a wallpaper that stays hidden pays it back.
+    pub release_hidden_after: Option<Duration>,
 }
 
 impl Default for PresentOptions {
@@ -93,6 +107,10 @@ impl Default for PresentOptions {
             fullscreen_pause: true,
             fullscreen_pause_only_active: false,
             fullscreen_pause_ignore_appids: Vec::new(),
+            // Off unless asked for: releasing changes visible behavior (a
+            // rebuild on resume), so it should be the user's choice, not a
+            // surprise.
+            release_hidden_after: None,
         }
     }
 }

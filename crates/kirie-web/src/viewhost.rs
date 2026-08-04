@@ -156,6 +156,12 @@ impl WebBackend for ViewHostBackend {
     }
 
     /// Always `None`: the child presents natively on its own layer surface.
+    /// Never: webkit paints its own layer-shell window, so the engine has no
+    /// frame to composite and must not keep presenting (`Renderer::is_passive`).
+    fn produces_frames(&self) -> bool {
+        false
+    }
+
     fn latest_frame(&self) -> Option<WebFrameRef<'_>> {
         None
     }

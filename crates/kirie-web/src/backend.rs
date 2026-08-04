@@ -144,6 +144,16 @@ pub type FrameSlot = Arc<ArcSwapOption<FrameBuffer>>;
 /// sole non-object-safe method and is therefore a free associated function
 /// with a `Self: Sized` bound.
 pub trait WebBackend: Send {
+    /// Whether this backend hands the engine frames to composite.
+    ///
+    /// `true` for CEF (off-screen BGRA buffers). `false` for the webview host,
+    /// where webkit paints its own layer-shell window and `latest_frame` is
+    /// always `None` — the engine's surface has nothing to show, so it must
+    /// stop presenting entirely (see `Renderer::is_passive`).
+    fn produces_frames(&self) -> bool {
+        true
+    }
+
     /// Launch a browser on `url` rendering off-screen at `size`.
     ///
     /// `url` should be a `file://` URL to the wallpaper's entry page so the

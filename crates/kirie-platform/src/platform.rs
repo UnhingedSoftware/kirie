@@ -137,6 +137,10 @@ struct PlatformState {
     /// (src/toplevel.rs). Fed by the two `Dispatch` impls at the bottom of this
     /// file; read by [`PlatformState::apply_pause`].
     toplevels: ToplevelTracker,
+    /// How long an output must stay hidden before its renderer is dropped to
+    /// reclaim the memory (`PresentOptions::release_hidden_after`). `None`
+    /// keeps hidden wallpapers resident.
+    release_hidden_after: Option<Duration>,
     /// A [`PAUSE_WATCHDOG_INTERVAL`] timer is scheduled. Guards against
     /// stacking one watchdog per pause transition; cleared by the watchdog
     /// itself when it finds nothing paused and drops.
@@ -250,6 +254,7 @@ impl WaylandPlatform {
                 layer: Layer::Background,
                 namespace: options.layer_namespace,
                 screen_roots: options.screen_roots,
+                release_hidden_after: options.release_hidden_after,
                 min_frame: options
                     .fps
                     .filter(|f| *f > 0)
@@ -628,6 +633,8 @@ impl PlatformState {
             frame_pending: false,
             timer_armed: false,
             paused: false,
+            paused_at: None,
+            released: false,
             initial_build_pending: false,
             first_frame_presented: false,
             renderer: None,
@@ -668,10 +675,16 @@ impl PlatformState {
             match (ctx.paused, blocking) {
                 (false, Some(appid)) => {
                     ctx.paused = true;
+                    ctx.paused_at = Some(Instant::now());
                     tracing::info!(output = %ctx.name, %appid, "wallpaper paused");
                 }
                 (true, None) => {
                     ctx.paused = false;
+                    ctx.paused_at = None;
+                    // `draw` below sees `renderer == None` and takes the same
+                    // rebuild path as a cold start (off-thread when the app
+                    // supplies an `InitialBuildFn`, else the sync factory).
+                    ctx.released = false;
                     // Forget any frame callback that was still outstanding when
                     // this output paused. It was requested before we stopped
                     // committing, and whether the compositor still delivers it
@@ -704,6 +717,43 @@ impl PlatformState {
 
     /// Arm the pause watchdog if something is paused and it is not already
     /// running (see [`PAUSE_WATCHDOG_INTERVAL`] for why it exists).
+    /// Drop the renderer of every output that has now been hidden longer than
+    /// [`PresentOptions::release_hidden_after`](crate::PresentOptions).
+    ///
+    /// This is the whole point of having an explicit hidden signal. A covered
+    /// wallpaper keeps its full footprint otherwise — scene textures and script
+    /// heaps, and for a web wallpaper the out-of-process webkit host, which
+    /// measurably frees nothing by itself while occluded. Dropping the renderer
+    /// releases all of it (the web host dies with its backend), and the resume
+    /// path rebuilds from the bake + shader caches.
+    ///
+    /// Called only from the pause watchdog, so it costs nothing while
+    /// everything is visible.
+    fn release_hidden_outputs(&mut self) {
+        let Some(after) = self.release_hidden_after else {
+            return;
+        };
+        for index in 0..self.outputs.len() {
+            let ctx = &mut self.outputs[index];
+            if !ctx.paused || ctx.released || ctx.renderer.is_none() {
+                continue;
+            }
+            if !ctx.paused_at.is_some_and(|at| at.elapsed() >= after) {
+                continue;
+            }
+            let name = ctx.name.clone();
+            // The renderer drops here: GPU resources unmap through wgpu's drop
+            // chain, and a web backend kills its host process from `Drop`.
+            ctx.renderer = None;
+            ctx.released = true;
+            // Same reclaim the swap path does — without the trim the freed
+            // pages sit in glibc's arenas and the RSS never actually falls.
+            kirie_bake::trim_heap();
+            kirie_bake::pageout_cold_libs();
+            tracing::info!(output = %name, "released hidden wallpaper; will rebuild when visible");
+        }
+    }
+
     fn ensure_pause_watchdog(&mut self) {
         if self.pause_watchdog_armed || !self.outputs.iter().any(|ctx| ctx.paused) {
             return;
@@ -718,6 +768,9 @@ impl PlatformState {
                 // back into `ensure_pause_watchdog`, which is a no-op while
                 // `pause_watchdog_armed` is still set — so no second timer.
                 state.apply_pause();
+                // After `apply_pause`, so an output that just resumed is never
+                // released on the same tick.
+                state.release_hidden_outputs();
                 if state.outputs.iter().any(|ctx| ctx.paused) {
                     TimeoutAction::ToDuration(PAUSE_WATCHDOG_INTERVAL)
                 } else {
@@ -887,6 +940,17 @@ impl PlatformState {
         }
 
         let ctx = &mut self.outputs[index];
+
+        // A passive renderer (webview: webkit paints its own window over ours)
+        // has nothing left to present once its first buffer is attached, and
+        // acquiring again would block forever because the compositor never
+        // composites a fully covered surface. Bow out BEFORE the acquire and
+        // request no callback: the output is done, and the event loop stays
+        // free to serve IPC, playlists, hotplug and fullscreen-pause.
+        if ctx.first_frame_presented && ctx.renderer.as_ref().is_some_and(|r| r.is_passive()) {
+            return;
+        }
+
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
             return;
         };

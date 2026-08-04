@@ -213,6 +213,10 @@ pub struct CompatArgs {
     /// `--fullscreen-pause-ignore-appid` values (doc §2, repeatable; empty
     /// values discarded, doc §2 note).
     pub fullscreen_pause_ignore_appid: Vec<String>,
+    /// `--release-hidden-after <secs>`: drop a wallpaper's renderer once it has
+    /// been hidden behind a fullscreen app this long, rebuilding it when it
+    /// becomes visible again. `None` (the default) keeps it resident.
+    pub release_hidden_after: Option<u64>,
     /// `-v`/`--volume` (doc §2, default 15; clamped [0,128] at validation).
     pub volume: i64,
     /// `-s`/`--silent` (doc §2).
@@ -267,6 +271,7 @@ impl Default for CompatArgs {
             no_fullscreen_pause: false,
             fullscreen_pause_only_active: false,
             fullscreen_pause_ignore_appid: Vec::new(),
+            release_hidden_after: None,
             volume: 15,
             silent: false,
             noautomute: false,
@@ -495,6 +500,7 @@ fn flag_takes_value(canonical: &str) -> bool {
             | "--set-property"
             | "--render-debug"
             | "--gpu"
+            | "--release-hidden-after"
     )
 }
 
@@ -743,6 +749,10 @@ fn parse_with(
             // before any instance exists); accepted here so its value is never
             // taken for a background path.
             "--gpu" => drop(value()?),
+            "--release-hidden-after" => {
+                let n = scan_int("--release-hidden-after", &value()?)?;
+                out.release_hidden_after = (n > 0).then_some(n as u64);
+            }
             "--disable-particles" => out.disable_particles = true,
             "--disable-mouse" => out.disable_mouse = true,
             "--disable-parallax" => out.disable_parallax = true,
@@ -899,6 +909,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "-z" | "--dump-structure" => "--dump-structure",
         "--render-debug" => "--render-debug",
         "--gpu" => "--gpu",
+        "--release-hidden-after" => "--release-hidden-after",
         _ => return None,
     })
 }

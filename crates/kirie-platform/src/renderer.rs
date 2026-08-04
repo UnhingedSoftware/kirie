@@ -61,6 +61,23 @@ pub trait Renderer {
     /// (docs/render-architecture.md §2.3).
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32);
 
+    /// This renderer paints nothing of its own after the first frame, so the
+    /// platform must stop acquiring swapchain images for it.
+    ///
+    /// The webview web backend is the case: webkit renders NATIVELY into its
+    /// own gtk-layer-shell window on top of our surface, and this renderer's
+    /// `latest_frame()` is always `None`. Continuing to acquire is not merely
+    /// wasteful, it deadlocks the engine: an opaque window covering our layer
+    /// surface means the compositor never composites it, never releases its
+    /// buffers, and `get_current_texture` blocks the render thread
+    /// indefinitely (observed: the thread parks in `ppoll` inside the WSI
+    /// acquire). The whole calloop loop stops turning with it, taking IPC
+    /// (`bg`/`preload`/`property`), playlist rotation, output hotplug and
+    /// fullscreen-pause down. Passive renderers keep the loop alive instead.
+    fn is_passive(&self) -> bool {
+        false
+    }
+
     /// Apply a live property override (socket `property <key> <value>`, doc
     /// §4.9): update the running wallpaper in place so the change shows on the
     /// next frame — no reload. `value` is the raw string; the renderer parses it

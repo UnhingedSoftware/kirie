@@ -58,6 +58,13 @@ pub(crate) struct OutputContext {
     /// wakes the output back up; resuming is driven entirely from
     /// `PlatformState::apply_pause`, which redraws every output it clears.
     pub paused: bool,
+    /// When this output entered the current pause, for the release timer.
+    /// `None` whenever it is running.
+    pub paused_at: Option<std::time::Instant>,
+    /// The renderer was dropped while paused to give its memory back, so the
+    /// resume has to rebuild rather than just repaint. Distinguishes "hidden,
+    /// still resident" from "hidden, released".
+    pub released: bool,
     /// This output's launch-time renderer is being built on a worker thread
     /// (P1.6). `draw` renders nothing until the `Install` lands, so it must
     /// never fall through to the synchronous factory in the meantime.
