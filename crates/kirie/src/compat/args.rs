@@ -217,6 +217,11 @@ pub struct CompatArgs {
     /// been hidden behind a fullscreen app this long, rebuilding it when it
     /// becomes visible again. `None` (the default) keeps it resident.
     pub release_hidden_after: Option<u64>,
+    /// `--fit-render-to-output`: cap scene render targets at the output size
+    /// instead of the scene's authored projection (trades the reference's
+    /// implicit supersampling AA for ~20% fewer fragments when the projection
+    /// is larger than the display).
+    pub fit_render_to_output: bool,
     /// `-v`/`--volume` (doc §2, default 15; clamped [0,128] at validation).
     pub volume: i64,
     /// `-s`/`--silent` (doc §2).
@@ -272,6 +277,7 @@ impl Default for CompatArgs {
             fullscreen_pause_only_active: false,
             fullscreen_pause_ignore_appid: Vec::new(),
             release_hidden_after: None,
+            fit_render_to_output: false,
             volume: 15,
             silent: false,
             noautomute: false,
@@ -468,6 +474,7 @@ fn is_non_repeatable(canonical: &str) -> bool {
             | "--disable-particles"
             | "--disable-mouse"
             | "--disable-parallax"
+            | "--fit-render-to-output"
             | "--list-properties"
             | "--list-properties-json"
             | "--dump-structure"
@@ -756,6 +763,7 @@ fn parse_with(
             "--disable-particles" => out.disable_particles = true,
             "--disable-mouse" => out.disable_mouse = true,
             "--disable-parallax" => out.disable_parallax = true,
+            "--fit-render-to-output" => out.fit_render_to_output = true,
             "--list-properties" => out.list_properties = true,
             "--list-properties-json" => out.list_properties_json = true,
             "--set-property" => {
@@ -910,6 +918,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "--render-debug" => "--render-debug",
         "--gpu" => "--gpu",
         "--release-hidden-after" => "--release-hidden-after",
+        "--fit-render-to-output" => "--fit-render-to-output",
         _ => return None,
     })
 }

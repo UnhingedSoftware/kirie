@@ -314,6 +314,7 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
                 scaling: ScalingMode::Fill,
                 clamp: ClampMode::Clamp,
                 disable_parallax: false,
+                fit_render_to_output: false,
             },
             None,
             &[],

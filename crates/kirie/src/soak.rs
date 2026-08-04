@@ -80,6 +80,18 @@ fn bench() -> Result<()> {
         })
         .unwrap_or((1920u32, 1080u32));
 
+    // `KIRIE_BENCH_SCALE` drives the scene's render-target size (fill cost);
+    // the scene FBO is projection x scale, independent of KIRIE_BENCH_SIZE.
+    if let Some(s) = std::env::var("KIRIE_BENCH_SCALE").ok().and_then(|v| v.parse::<f32>().ok()) {
+        crate::compat::run::set_render_scale(s);
+    }
+
+    // `KIRIE_BENCH_FIT=1` exercises `--fit-render-to-output` (cap the scene's
+    // render targets at the bench canvas rather than its authored projection).
+    if std::env::var_os("KIRIE_BENCH_FIT").is_some() {
+        crate::compat::run::set_fit_render_to_output(true);
+    }
+
     let wp = classify(&dir.to_string_lossy()).map_err(|e| anyhow::anyhow!("{e}"))?;
     let gpu = Headless::new()?;
     let info = gpu.adapter.get_info();

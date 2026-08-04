@@ -94,6 +94,18 @@ pub(crate) fn disable_parallax() -> bool {
     DISABLE_PARALLAX.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+/// `--fit-render-to-output`, stored once at launch like [`RENDER_SCALE_BITS`]
+/// so live swaps and preloads inherit it.
+static FIT_RENDER_TO_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn set_fit_render_to_output(on: bool) {
+    FIT_RENDER_TO_OUTPUT.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn fit_render_to_output() -> bool {
+    FIT_RENDER_TO_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Map the compat scaling enum to kirie-video's (doc §3.1 value table).
 #[must_use]
 pub fn to_video_scaling(mode: ScalingMode) -> kirie_video::ScalingMode {
@@ -144,6 +156,14 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
 
 /// Dispatch the validated args to the right run mode (doc §3.3, §3.6, §3.8).
 pub fn dispatch(args: CompatArgs) -> ExitCode {
+    // Launch-wide render settings, applied before ANY mode runs. These used to
+    // be set inside `run_wallpapers`, which `--screenshot` returns before ever
+    // reaching — so a screenshot silently ignored `--render-scale` and rendered
+    // the scene at a different size than the live wallpaper it was meant to
+    // reproduce.
+    set_render_scale(args.render_scale as f32);
+    set_fit_render_to_output(args.fit_render_to_output);
+
     // `-l`/`--list-properties-json` load, print, and exit (doc §3.8).
     if args.list_properties || args.list_properties_json {
         return match list_props::run(&args) {
@@ -266,7 +286,6 @@ struct Target {
 /// Run the per-screen wallpapers on the wayland presentation layer, with the
 /// control socket (if any) wired to a dedicated applier thread.
 fn run_wallpapers(args: CompatArgs) -> ExitCode {
-    set_render_scale(args.render_scale as f32);
     set_disable_parallax(args.disable_parallax);
     let window_mode = args.mode != WindowMode::DesktopBackground;
     let targets = build_targets(&args);
@@ -1203,6 +1222,7 @@ fn build_for_spec(
                 scaling: to_render_scaling(*scaling),
                 clamp: to_render_clamp(*clamp),
                 disable_parallax: disable_parallax(),
+                fit_render_to_output: fit_render_to_output(),
             };
             match kirie_render::load_workshop_scene(
                 target,

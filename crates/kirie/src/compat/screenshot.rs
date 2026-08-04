@@ -457,10 +457,13 @@ pub(crate) fn build_offscreen_renderer(
         }
         Wallpaper::Scene { dir } => {
             let options = kirie_render::SceneOptions {
-                render_scale: 1.0,
+                // Honour `--render-scale` here too: an offscreen build is the
+                // same scene, and the bench varies it to measure fill cost.
+                render_scale: super::run::render_scale(),
                 scaling: super::run::to_render_scaling(scaling),
                 clamp: super::run::to_render_clamp(clamp),
                 disable_parallax: false,
+                fit_render_to_output: super::run::fit_render_to_output(),
             };
             kirie_render::load_workshop_scene(
                 render_target,

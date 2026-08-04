@@ -388,6 +388,9 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
         scaling: kirie_render::ScalingMode::Default,
         clamp: kirie_render::ClampMode::Clamp,
         disable_parallax: false,
+        // The doctor builds at a fixed probe size, so fitting to "the output"
+        // would only shrink the check's own canvas — it proves nothing here.
+        fit_render_to_output: false,
     };
 
     // Capture the renderer's debug diagnostics during the build. A build that
