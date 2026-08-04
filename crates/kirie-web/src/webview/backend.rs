@@ -278,6 +278,47 @@ impl WebviewBackend {
     }
 
     /// Tear the web view down. Idempotent.
+    /// Draw the live page into `path` as raw BGRA (premultiplied), returning
+    /// `WxH` on success.
+    ///
+    /// webkit has no off-screen *rendering* path, but the widget still paints
+    /// through GTK, and the host already forces webkit's shared-memory
+    /// renderer (`WEBKIT_DISABLE_DMABUF_RENDERER`, the explicit-sync
+    /// workaround), so `gtk_widget_draw` can pull the composited page out into
+    /// a cairo surface. That gives the engine a still of a web wallpaper it
+    /// otherwise cannot see, to stand in while the wallpaper is released.
+    ///
+    /// Raw rather than PNG: the consumer uploads it straight to a texture, so
+    /// encoding would only cost time and pull in cairo's png feature.
+    pub fn snapshot_raw(&self, path: &str) -> Option<(i32, i32)> {
+        let view = self.view.as_ref()?;
+        let (w, h) = (view.allocated_width(), view.allocated_height());
+        if w <= 0 || h <= 0 {
+            return None;
+        }
+        let surface = gtk::cairo::ImageSurface::create(gtk::cairo::Format::ARgb32, w, h).ok()?;
+        {
+            let cr = gtk::cairo::Context::new(&surface).ok()?;
+            view.draw(&cr);
+        }
+        surface.flush();
+        let stride = surface.stride();
+        let mut surface = surface;
+        let data = surface.data().ok()?;
+        // Drop cairo's row padding so the consumer gets a tight w*h*4 buffer.
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
+        for row in 0..h {
+            let start = (row * stride) as usize;
+            out.extend_from_slice(&data[start..start + (w * 4) as usize]);
+        }
+        std::fs::write(path, &out).ok()?;
+        Some((w, h))
+    }
+
+    /// Destroy the web view and drop this backend's reference to it.
+    ///
+    /// Idempotent: a second call finds no view and returns. Afterwards
+    /// [`Self::latest_frame`] stays `None` and every script call is a no-op.
     pub fn shutdown(&mut self) {
         let Some(view) = self.view.take() else {
             return;

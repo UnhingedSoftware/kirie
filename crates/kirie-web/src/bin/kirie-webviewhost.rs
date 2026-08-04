@@ -185,6 +185,17 @@ fn main() {
                             backend.borrow_mut().resize(WebSize { width: w, height: h });
                         }
                     }
+                    Some("snap") => {
+                        if let Some(path) = line.strip_prefix("snap ") {
+                            let r = backend.borrow().snapshot_raw(path);
+                            match r {
+                                Some((w, h)) => println!("snap ok {w} {h}"),
+                                None => println!("snap fail"),
+                            }
+                            use std::io::Write;
+                            let _ = std::io::stdout().flush();
+                        }
+                    }
                     Some("quit") => {
                         gtk::main_quit();
                         return gtk::glib::ControlFlow::Break;
