@@ -500,6 +500,11 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         screen_roots,
         fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
         playback_speed: args.playback_speed,
+        // Fullscreen pause is on by default in the reference engine, so the
+        // flag is the opt-out and inverts here (docs/compat-cli.md §2).
+        fullscreen_pause: !args.no_fullscreen_pause,
+        fullscreen_pause_only_active: args.fullscreen_pause_only_active,
+        fullscreen_pause_ignore_appids: args.fullscreen_pause_ignore_appid.clone(),
         ..Default::default()
     };
 

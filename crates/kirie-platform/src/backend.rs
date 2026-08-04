@@ -36,6 +36,13 @@ use crate::x11::{X11Mode, X11Platform};
 ///   the user's other monitors are left untouched instead of being blacked out
 ///   by an unconfigured wallpaper surface (Wayland backend; SPEC V6 — a
 ///   skipped output costs zero render work).
+/// - the `fullscreen_pause*` fields stop rendering an output entirely while a
+///   fullscreen app covers it, so a game gets the whole GPU (Wayland backend,
+///   `zwlr_foreign_toplevel_manager_v1`; see `src/toplevel.rs`).
+///
+/// Plain data only — this type is `Clone`/`Debug` and crosses the backend
+/// boundary, so no callbacks live here; the Wayland backend derives its
+/// behavior from these values.
 #[derive(Debug, Clone)]
 pub struct PresentOptions {
     /// wlr-layer-shell surface namespace (Wayland only; ignored by X11).
@@ -52,6 +59,26 @@ pub struct PresentOptions {
     /// (WallpaperApplication.cpp:908), so animations run faster/slower
     /// without changing the render FPS. Videos apply their own rate.
     pub playback_speed: f64,
+    /// Stop rendering an output while a fullscreen application covers it, the
+    /// way the reference engine does — the wallpaper is invisible anyway and a
+    /// heavy scene costs real GPU time the foreground app wants. **Default
+    /// `true`**; `--no-fullscreen-pause` sets it to `false`.
+    ///
+    /// Wayland only, and only where the compositor implements
+    /// `wlr-foreign-toplevel-management-unstable-v1` (wlroots/sway, KWin,
+    /// Hyprland — *not* GNOME). Everywhere else this silently never pauses.
+    /// X11 ignores it (docs/render-architecture.md §2.2 has no equivalent).
+    pub fullscreen_pause: bool,
+    /// Only pause when the fullscreen toplevel is also the focused one
+    /// (`--fullscreen-pause-only-active`). Off by default, matching the
+    /// reference: a game that was alt-tabbed away from still covers the
+    /// wallpaper, so it should still pause it.
+    pub fullscreen_pause_only_active: bool,
+    /// `app_id`s that must never trigger a pause
+    /// (`--fullscreen-pause-ignore-appid`, repeatable), compared
+    /// case-insensitively. The usual case is a fullscreen media player or
+    /// browser the user wants the wallpaper to keep running behind.
+    pub fullscreen_pause_ignore_appids: Vec<String>,
 }
 
 impl Default for PresentOptions {
@@ -61,6 +88,11 @@ impl Default for PresentOptions {
             screen_roots: Vec::new(),
             fps: None,
             playback_speed: 1.0,
+            // Pausing is the reference engine's default behavior; the CLI flag
+            // is the opt-*out* (`--no-fullscreen-pause`).
+            fullscreen_pause: true,
+            fullscreen_pause_only_active: false,
+            fullscreen_pause_ignore_appids: Vec::new(),
         }
     }
 }
@@ -129,9 +161,11 @@ impl Platform {
     /// This is the drop-in entry point the compat CLI uses: it carries the
     /// `--screen-root` selection (so only the requested monitors get a
     /// wallpaper surface) and the layer-shell namespace the daemon watchdog
-    /// greps for. The X11 backend ignores both fields today (its per-CRTC
+    /// greps for. The X11 backend ignores those fields today (its per-CRTC
     /// desktop windows are already scoped to real monitors and have no
-    /// layer-shell namespace); see [`PresentOptions`].
+    /// layer-shell namespace), and it likewise ignores the `fullscreen_pause*`
+    /// fields — foreign-toplevel tracking is a wayland protocol, so an X11
+    /// session never pauses; see [`PresentOptions`].
     pub fn connect_with(
         backend: Backend,
         options: PresentOptions,

@@ -25,12 +25,33 @@ use smithay_client_toolkit::{
 };
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_surface};
-use wayland_client::{Connection, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
+use wayland_protocols_wlr::foreign_toplevel::v1::client::{
+    zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
+    zwlr_foreign_toplevel_manager_v1::{self, ZwlrForeignToplevelManagerV1},
+};
 
 use crate::error::PlatformError;
 use crate::gpu::Gpu;
 use crate::output::OutputContext;
 use crate::renderer::{RenderTarget, RendererFactory, SurfaceSize};
+use crate::toplevel::{PauseConfig, ToplevelTracker};
+
+/// How often the pause watchdog re-derives every output's paused flag from the
+/// tracked toplevel list while at least one output is paused.
+///
+/// Resuming is normally event-driven and immediate (a toplevel `state`/`closed`
+/// event lands and `apply_pause` redraws), so this timer is not the mechanism —
+/// it is the *backstop*. A paused output has deliberately torn down every one
+/// of its own wake-up sources: no frame callback outstanding, no `--fps` timer
+/// armed. That makes "we somehow never re-evaluate" the one failure mode that
+/// would be permanent rather than self-correcting, e.g. a compositor that
+/// updates a toplevel without the trailing `done` we key off. One cheap wakeup
+/// a second while paused (a hash-map scan, no GPU work) bounds any such stall
+/// to a second instead of forever. It costs nothing when nothing is paused —
+/// the timer is only armed then, and drops itself as soon as the last output
+/// resumes.
+const PAUSE_WATCHDOG_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The wayland presentation layer: owns the compositor connection, all
 /// per-output surfaces, and the shared GPU context (SPEC V1: everything
@@ -112,6 +133,19 @@ struct PlatformState {
     /// (commit → composite → callback → commit) that pins the GPU at the
     /// compositor's max composite rate regardless of `--fps`.
     loop_handle: LoopHandle<'static, PlatformState>,
+    /// Mirror of every open toplevel plus the fullscreen-pause rule over it
+    /// (src/toplevel.rs). Fed by the two `Dispatch` impls at the bottom of this
+    /// file; read by [`PlatformState::apply_pause`].
+    toplevels: ToplevelTracker,
+    /// A [`PAUSE_WATCHDOG_INTERVAL`] timer is scheduled. Guards against
+    /// stacking one watchdog per pause transition; cleared by the watchdog
+    /// itself when it finds nothing paused and drops.
+    pause_watchdog_armed: bool,
+    /// The bound manager global, kept for the process lifetime so the
+    /// compositor keeps streaming toplevel events at us. `None` when the
+    /// compositor does not implement the protocol (GNOME) or when the pause was
+    /// switched off with `--no-fullscreen-pause` — either way nothing pauses.
+    _toplevel_manager: Option<ZwlrForeignToplevelManagerV1>,
 }
 
 impl WaylandPlatform {
@@ -167,6 +201,39 @@ impl WaylandPlatform {
 
         let loop_handle = event_loop.handle();
 
+        // Fullscreen pause (docs/compat-cli.md §2 `--no-fullscreen-pause`):
+        // bind the taskbar protocol so we can see when some *other* app goes
+        // fullscreen on one of our outputs. Version 2 is the floor — that is
+        // where `fullscreen` was added to the state enum, and without it the
+        // feature has nothing to detect. Not binding when the pause is switched
+        // off keeps an opted-out run completely off this protocol.
+        let mut toplevels = ToplevelTracker::new(PauseConfig {
+            enabled: options.fullscreen_pause,
+            only_active: options.fullscreen_pause_only_active,
+            ignore_appids: options.fullscreen_pause_ignore_appids,
+        });
+        let toplevel_manager = if toplevels.enabled() {
+            match globals.bind::<ZwlrForeignToplevelManagerV1, PlatformState, _>(&qh, 2..=3, ()) {
+                Ok(manager) => {
+                    toplevels.set_supported();
+                    Some(manager)
+                }
+                // Not an error: GNOME/Mutter ships no foreign-toplevel
+                // interface at all and never will, so this is the documented
+                // "silently keep rendering" path rather than a broken session.
+                Err(err) => {
+                    tracing::debug!(
+                        %err,
+                        "compositor has no zwlr_foreign_toplevel_manager_v1; fullscreen pause disabled"
+                    );
+                    None
+                }
+            }
+        } else {
+            tracing::debug!("--no-fullscreen-pause: not tracking foreign toplevels");
+            None
+        };
+
         Ok(Self {
             event_loop,
             cmd_tx: cmd_tx.clone(),
@@ -198,6 +265,9 @@ impl WaylandPlatform {
                 pointer: crate::pointer::PointerPoll::start(),
                 initial_build: None,
                 loop_handle,
+                toplevels,
+                pause_watchdog_armed: false,
+                _toplevel_manager: toplevel_manager,
             },
         })
     }
@@ -557,6 +627,7 @@ impl PlatformState {
             configured: false,
             frame_pending: false,
             timer_armed: false,
+            paused: false,
             initial_build_pending: false,
             first_frame_presented: false,
             renderer: None,
@@ -564,6 +635,103 @@ impl PlatformState {
             format: None,
             position,
         });
+
+        // A monitor hotplugged (or enumerated at startup) underneath an already
+        // fullscreen app must come up paused, not render one wasted frame and
+        // then wait for the next toplevel event to notice.
+        self.apply_pause();
+    }
+
+    /// Recompute every output's paused flag from the tracked toplevels and act
+    /// on the transitions.
+    ///
+    /// This is the *only* place `OutputContext::paused` changes, and it is
+    /// deliberately a full recomputation rather than a delta: every caller
+    /// (each toplevel event, output hotplug, the watchdog) hands it the same
+    /// authoritative state, so the flag can never drift out of sync with the
+    /// compositor's view no matter which event was missed or duplicated.
+    ///
+    /// Resuming is the half that must not be missed, so it is the half that
+    /// does the work: an output that clears is redrawn *here*, for the same
+    /// reason [`Self::install_renderer`] draws after an off-thread build. A
+    /// paused output has no frame callback outstanding and no `--fps` timer
+    /// armed — nothing else in the process would ever call `draw` for it again,
+    /// and it would stay black under a window that is no longer there.
+    fn apply_pause(&mut self) {
+        let mut resumed = Vec::new();
+        for index in 0..self.outputs.len() {
+            let blocking = self
+                .toplevels
+                .blocking_appid(&self.outputs[index].wl_output)
+                .map(str::to_owned);
+            let ctx = &mut self.outputs[index];
+            match (ctx.paused, blocking) {
+                (false, Some(appid)) => {
+                    ctx.paused = true;
+                    tracing::info!(output = %ctx.name, %appid, "wallpaper paused");
+                }
+                (true, None) => {
+                    ctx.paused = false;
+                    // Forget any frame callback that was still outstanding when
+                    // this output paused. It was requested before we stopped
+                    // committing, and whether the compositor still delivers it
+                    // after a gap with no commits is not something to bet the
+                    // resume on — with the flag clear, the `draw` below
+                    // unconditionally requests a fresh one (uncapped mode; the
+                    // `--fps` path arms its own timer regardless). Should the
+                    // stale callback arrive too, it costs exactly one extra
+                    // frame and then collapses back to one in flight.
+                    ctx.frame_pending = false;
+                    tracing::info!(output = %ctx.name, "wallpaper resumed");
+                    resumed.push(ctx.wl_surface().clone());
+                }
+                // Still paused / still running: nothing to do. In particular do
+                // NOT redraw a still-paused output, or the watchdog would turn
+                // into the render loop it exists to stop.
+                _ => {}
+            }
+        }
+
+        // Restart the render chain for everything that just came back. `draw`
+        // re-arms its own frame callback / `--fps` timer from here on, so one
+        // call per output is enough to make it self-sustaining again.
+        for surface in resumed {
+            self.draw(&surface);
+        }
+
+        self.ensure_pause_watchdog();
+    }
+
+    /// Arm the pause watchdog if something is paused and it is not already
+    /// running (see [`PAUSE_WATCHDOG_INTERVAL`] for why it exists).
+    fn ensure_pause_watchdog(&mut self) {
+        if self.pause_watchdog_armed || !self.outputs.iter().any(|ctx| ctx.paused) {
+            return;
+        }
+        self.pause_watchdog_armed = true;
+        let timer = Timer::from_duration(PAUSE_WATCHDOG_INTERVAL);
+        let armed = self
+            .loop_handle
+            .insert_source(timer, |_, _, state: &mut PlatformState| {
+                // Re-derive from the tracked toplevels; this resumes (and
+                // redraws) anything whose blocker is gone. `apply_pause` calls
+                // back into `ensure_pause_watchdog`, which is a no-op while
+                // `pause_watchdog_armed` is still set — so no second timer.
+                state.apply_pause();
+                if state.outputs.iter().any(|ctx| ctx.paused) {
+                    TimeoutAction::ToDuration(PAUSE_WATCHDOG_INTERVAL)
+                } else {
+                    state.pause_watchdog_armed = false;
+                    TimeoutAction::Drop
+                }
+            });
+        if let Err(err) = armed {
+            // Losing the backstop must not leave the flag lying: without it the
+            // next transition could never arm one either. Event-driven resume
+            // still works; only the safety net is gone.
+            self.pause_watchdog_armed = false;
+            tracing::warn!(%err, "could not arm the fullscreen-pause watchdog");
+        }
     }
 
     /// (Re)configure the swapchain of `outputs[index]` for its current
@@ -629,6 +797,23 @@ impl PlatformState {
             return;
         };
         if !ctx.configured {
+            return;
+        }
+
+        // Fullscreen pause: a game is covering this output, so do nothing —
+        // and, unlike the acquire-failure path further down, do NOT re-arm the
+        // frame callback or the `--fps` timer. That is the whole point: the
+        // reference engine stops rendering under a fullscreen app so the app
+        // gets the GPU, and a "paused" loop that still committed once a frame
+        // would keep the compositor recompositing and give most of it back.
+        // Placed ahead of the launch-build dispatch as well, so an engine
+        // started while a game is already running does not spend a CPU core
+        // building a wallpaper nobody can see; the build runs on resume.
+        //
+        // This return is what makes resuming a correctness requirement rather
+        // than a nicety: every wake-up source for this output is now gone, and
+        // only `apply_pause` can bring it back.
+        if ctx.paused {
             return;
         }
 
@@ -1053,6 +1238,90 @@ impl LayerShellHandler for PlatformState {
         // pick up the new size immediately.
         let surface = layer.wl_surface().clone();
         self.draw(&surface);
+    }
+}
+
+/// Manager side of the fullscreen pause: one `toplevel` event per open window,
+/// then `finished` if the compositor tears the manager down.
+///
+/// Hand-written rather than delegated — smithay-client-toolkit has no
+/// foreign-toplevel module, so this crate owns the (small) protocol mirror in
+/// src/toplevel.rs.
+impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for PlatformState {
+    fn event(
+        state: &mut Self,
+        _manager: &ZwlrForeignToplevelManagerV1,
+        event: zwlr_foreign_toplevel_manager_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwlr_foreign_toplevel_manager_v1::Event::Toplevel { toplevel } => {
+                // Details (app_id, state, outputs) arrive as separate events on
+                // the handle and are terminated by `done`; start with an empty
+                // entry so those setters have somewhere to land.
+                state.toplevels.track(toplevel.id());
+            }
+            zwlr_foreign_toplevel_manager_v1::Event::Finished => {
+                // The manager is dead and no further toplevel event can ever
+                // arrive. Anything paused right now would be paused on frozen
+                // information, so drop the mirror and resume everything.
+                state.toplevels.finished();
+                state.apply_pause();
+            }
+            _ => {}
+        }
+    }
+
+    event_created_child!(PlatformState, ZwlrForeignToplevelManagerV1, [
+        zwlr_foreign_toplevel_manager_v1::EVT_TOPLEVEL_OPCODE => (ZwlrForeignToplevelHandleV1, ()),
+    ]);
+}
+
+/// Per-window side of the fullscreen pause.
+///
+/// The protocol batches property changes and terminates each batch with `done`,
+/// so the pause decision is re-derived there (and on `closed`) rather than on
+/// every individual event — otherwise a freshly mapped fullscreen window would
+/// briefly pause under its empty pre-`app_id` identity before the ignore list
+/// could be consulted.
+impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for PlatformState {
+    fn event(
+        state: &mut Self,
+        handle: &ZwlrForeignToplevelHandleV1,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+    ) {
+        let id = handle.id();
+        match event {
+            zwlr_foreign_toplevel_handle_v1::Event::AppId { app_id } => {
+                state.toplevels.set_app_id(&id, app_id);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::State { state: raw } => {
+                state.toplevels.set_state(&id, &raw);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputEnter { output } => {
+                state.toplevels.enter_output(&id, output);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::OutputLeave { output } => {
+                state.toplevels.leave_output(&id, &output);
+            }
+            zwlr_foreign_toplevel_handle_v1::Event::Done => state.apply_pause(),
+            zwlr_foreign_toplevel_handle_v1::Event::Closed => {
+                // No `done` follows `closed`, and this is the event that ends
+                // the pause in the ordinary case (the game exited), so it
+                // re-derives on its own. `destroy` finalizes the now-inert
+                // object, as the protocol asks.
+                state.toplevels.forget(&id);
+                handle.destroy();
+                state.apply_pause();
+            }
+            // Title / parent changes cannot affect the pause rule.
+            _ => {}
+        }
     }
 }
 

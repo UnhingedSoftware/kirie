@@ -51,6 +51,13 @@ pub(crate) struct OutputContext {
     /// cap. Guards against stacking timers when several early frame callbacks
     /// arrive before the timer fires. Cleared when the timer fires.
     pub timer_armed: bool,
+    /// A fullscreen application currently covers this output, so `draw` must
+    /// do nothing at all — no swapchain acquire, no render, and crucially no
+    /// re-arming of the frame callback or the `--fps` timer (that is what makes
+    /// the pause actually free rather than a busy no-op loop). Nothing here
+    /// wakes the output back up; resuming is driven entirely from
+    /// `PlatformState::apply_pause`, which redraws every output it clears.
+    pub paused: bool,
     /// This output's launch-time renderer is being built on a worker thread
     /// (P1.6). `draw` renders nothing until the `Install` lands, so it must
     /// never fall through to the synchronous factory in the meantime.

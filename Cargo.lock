@@ -2079,6 +2079,7 @@ dependencies = [
  "tracing-subscriber",
  "wayland-backend",
  "wayland-client",
+ "wayland-protocols-wlr",
  "wgpu",
  "x11rb",
 ]

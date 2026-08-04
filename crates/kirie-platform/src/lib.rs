@@ -44,6 +44,7 @@ mod platform;
 mod pointer;
 mod renderer;
 mod test_pattern;
+mod toplevel;
 mod x11;
 
 pub use backend::{Backend, Platform, PresentOptions};

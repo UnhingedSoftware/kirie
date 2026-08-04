@@ -21,6 +21,10 @@ thiserror = { workspace = true }
 # pointers for wgpu's Vulkan VK_KHR_wayland_surface path. Same semver line as
 # the wayland-backend already resolved via wayland-client/sctk.
 wayland-backend = { workspace = true }
+# `zwlr_foreign_toplevel_manager_v1` — the only way a layer-shell client can see
+# that some *other* app went fullscreen on its output, which is what drives the
+# `--no-fullscreen-pause` family of flags (src/toplevel.rs).
+wayland-protocols-wlr = { workspace = true }
 # X11 root-window / desktop backend (docs/render-architecture.md §2.2). The
 # `xcb_ffi` feature backs the connection with libxcb so `get_raw_xcb_connection`
 # hands wgpu a real `xcb_connection_t*` for the Vulkan VK_KHR_xcb_surface path;
