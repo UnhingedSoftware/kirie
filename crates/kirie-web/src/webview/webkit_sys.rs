@@ -101,6 +101,23 @@ type WebViewGetSettings = unsafe extern "C" fn(*mut c_void) -> *mut c_void;
 /// requires_user_gesture` does not exist in any WebKitGTK.
 type SettingsSetMediaPlaybackRequiresUserGesture = unsafe extern "C" fn(*mut c_void, c_int);
 
+/// `WebKitWebContext *webkit_web_context_get_default (void)`
+type WebContextGetDefault = unsafe extern "C" fn() -> *mut c_void;
+
+/// `void webkit_web_context_set_cache_model (WebKitWebContext *,
+/// WebKitCacheModel)`
+type WebContextSetCacheModel = unsafe extern "C" fn(*mut c_void, c_int);
+
+/// `void webkit_settings_set_enable_page_cache (WebKitSettings *, gboolean)`
+type SettingsSetEnablePageCache = unsafe extern "C" fn(*mut c_void, c_int);
+
+/// `WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER` — the smallest of the three cache
+/// models: webkit keeps no back/forward page cache and only a minimal resource
+/// cache. The default is `WEB_BROWSER`, which trades memory for revisit speed —
+/// exactly the wrong trade for a wallpaper, which loads one document once and
+/// never navigates.
+const CACHE_MODEL_DOCUMENT_VIEWER: c_int = 0;
+
 /// `void webkit_web_view_evaluate_javascript (WebKitWebView *, const char
 /// *script, gssize length, const char *world_name, const char *source_uri,
 /// GCancellable *, GAsyncReadyCallback, gpointer user_data)` — WebKitGTK 2.40+.
@@ -168,6 +185,13 @@ pub struct WebKit {
     web_view_get_settings: WebViewGetSettings,
     settings_set_media_gesture: SettingsSetMediaPlaybackRequiresUserGesture,
     eval: EvalFn,
+    /// Memory-trimming entry points, resolved best-effort. Unlike the set
+    /// above, a miss here must NOT reject the library: these only shrink the
+    /// footprint, so an older webkit that lacks one still renders correctly —
+    /// it just keeps its default caches.
+    web_context_get_default: Option<WebContextGetDefault>,
+    web_context_set_cache_model: Option<WebContextSetCacheModel>,
+    settings_set_enable_page_cache: Option<SettingsSetEnablePageCache>,
 }
 
 impl WebKit {
@@ -195,6 +219,33 @@ impl WebKit {
     #[must_use]
     pub fn soname(&self) -> &'static str {
         self.soname
+    }
+
+    /// Put the shared web context into its lowest-memory cache model.
+    ///
+    /// A wallpaper is the degenerate browsing case: one document, loaded once,
+    /// never navigated away from and never revisited. Webkit's default
+    /// `WEB_BROWSER` model sizes its caches for the opposite workload, so the
+    /// `DOCUMENT_VIEWER` model is strictly the right trade here.
+    ///
+    /// Must run before the first web view is created — the model is sampled
+    /// when the web process starts. A no-op on a webkit that does not export
+    /// these symbols.
+    pub fn minimize_caches(&self) {
+        let (Some(get_default), Some(set_model)) =
+            (self.web_context_get_default, self.web_context_set_cache_model)
+        else {
+            return;
+        };
+        // SAFETY: both aliases transcribe the WebKitGTK headers; the default
+        // context is owned by webkit (never unreffed here) and the model is a
+        // plain enum value from the same headers.
+        unsafe {
+            let ctx = get_default();
+            if !ctx.is_null() {
+                set_model(ctx, CACHE_MODEL_DOCUMENT_VIEWER);
+            }
+        }
     }
 
     /// Create a `WebKitWebView` widget, optionally injecting `init_script`.
@@ -297,6 +348,16 @@ impl WebKit {
         // SAFETY: `settings` is a live `WebKitSettings` owned by `view`, which
         // the caller keeps alive across this call.
         unsafe { (self.settings_set_media_gesture)(settings, c_int::from(!allow)) };
+
+        // Same visit while we hold the settings object: the back/forward page
+        // cache retains whole rendered documents so a *back* navigation is
+        // instant. A wallpaper never navigates, so that memory can only ever
+        // be dead weight.
+        if let Some(set_page_cache) = self.settings_set_enable_page_cache {
+            // SAFETY: same live `WebKitSettings` as above; the value is a
+            // plain gboolean.
+            unsafe { set_page_cache(settings, 0) };
+        }
     }
 
     /// Run `js` in `view`'s main frame, discarding the result.
@@ -422,6 +483,10 @@ fn bind(lib: libloading::Library, soname: &'static str) -> Result<WebKit, String
                 Ok(f) => EvalFn::Evaluate(f),
                 Err(_) => EvalFn::Run(symbol(&lib, b"webkit_web_view_run_javascript\0")?),
             },
+            // Best-effort (see the field docs): `.ok()`, never `?`.
+            web_context_get_default: symbol(&lib, b"webkit_web_context_get_default\0").ok(),
+            web_context_set_cache_model: symbol(&lib, b"webkit_web_context_set_cache_model\0").ok(),
+            settings_set_enable_page_cache: symbol(&lib, b"webkit_settings_set_enable_page_cache\0").ok(),
             _lib: lib,
         }
     };

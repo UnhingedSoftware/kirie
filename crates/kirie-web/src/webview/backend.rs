@@ -217,6 +217,10 @@ impl WebviewBackend {
             WebError::BrowserCreation
         })?;
 
+        // Before the first view exists: the cache model is sampled when the
+        // web process starts, so this has to precede `new_web_view`.
+        webkit.minimize_caches();
+
         let raw = webkit.new_web_view(Some(&init_script(muted)));
         if raw.is_null() {
             tracing::error!(url, soname = webkit.soname(), "webkit returned no web view");
