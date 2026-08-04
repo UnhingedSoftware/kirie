@@ -13,15 +13,27 @@
 //!
 //! `props <single-line-json>`, `mute <0|1>`, `pointer <x> <y> <l> <r>`,
 //! `resize <w> <h>` (informational — the layer window is anchored to the
-//! output), `quit`. Child stdout: `ready` once the page is up; anything else
-//! is ignored (forward-compatible). Killing the child tears down webkit and
-//! its layer window deterministically.
+//! output), `snap <path>`, `quit`. Child stdout: `ready` once the page is up,
+//! `snap ok <w> <h>` / `snap fail` in reply to a `snap`; anything else is
+//! ignored (forward-compatible). Killing the child tears down webkit and its
+//! layer window deterministically.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
-use crate::backend::{PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+use crate::backend::{FrameBuffer, PixelFormat, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+
+/// How long to wait for the host's `snap` reply before giving up on the still.
+///
+/// The host services stdin off a 15ms GTK timeout and `gtk_widget_draw` on a
+/// full-screen page is a few tens of milliseconds, so a healthy round trip is
+/// well inside this. The bound exists for the unhealthy case: this runs on the
+/// **render thread**, so a host stuck in a page's JS (or gone but not yet
+/// reaped) must cost a bounded pause and then degrade to "no still", never wedge
+/// the engine. Releasing without a stand-in is exactly today's behaviour.
+const SNAP_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// Locate the `kirie-webviewhost` binary: `KIRIE_WEBVIEWHOST` override, else
 /// beside the current executable.
@@ -41,7 +53,11 @@ fn host_path() -> Result<std::path::PathBuf, WebError> {
 
 /// Spawn the host and wait for its `ready` line (webkit + layer-surface
 /// bring-up dominates; a broken child is detected by pipe EOF/timeout).
-fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin), WebError> {
+///
+/// The stdout receiver is handed back rather than dropped at the end of the
+/// handshake: the reader thread stops the moment nobody is listening, and the
+/// `snap` reply has to arrive through it later.
+fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin, Receiver<String>), WebError> {
     let host = host_path()?;
     let mut child = Command::new(&host)
         .arg("--url")
@@ -100,7 +116,25 @@ fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin), WebError>
     }
 
     tracing::info!(host = %host.display(), pid = child.id(), "webview host process started");
-    Ok((child, stdin))
+    Ok((child, stdin, rx))
+}
+
+/// A private path for the host to drop one raw still into.
+///
+/// `$XDG_RUNTIME_DIR` first: it is a per-user tmpfs (mode 0700), so a
+/// full-screen BGRA buffer never touches disk and no other user can read the
+/// page's contents. `/tmp` is the fallback for the odd session that has no
+/// runtime dir. The pid + counter keep two outputs (or a retried capture) from
+/// racing on the same name; the caller deletes the file as soon as it has read
+/// it.
+fn snap_path() -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    dir.join(format!("kirie-webview-still-{}-{seq}.bgra", std::process::id()))
 }
 
 /// The out-of-process webview backend handle. `Send`: a child process and a
@@ -108,6 +142,10 @@ fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin), WebError>
 pub struct ViewHostBackend {
     child: Child,
     stdin: ChildStdin,
+    /// Lines the host printed, fed by the reader thread `spawn_host` started.
+    /// Only `snap` replies are meaningful after startup; everything else is
+    /// drained and discarded.
+    stdout: Receiver<String>,
     /// Spawn parameters retained for crash auto-restart.
     url: String,
     size: WebSize,
@@ -122,15 +160,45 @@ impl ViewHostBackend {
         let _ = writeln!(self.stdin, "{line}");
         let _ = self.stdin.flush();
     }
+
+    /// Wait up to [`SNAP_TIMEOUT`] for the host's answer to a `snap`, returning
+    /// the reported `(width, height)`.
+    ///
+    /// Anything that is not a `snap` line is skipped rather than treated as the
+    /// answer, so a log line or a future protocol addition slipping onto stdout
+    /// cannot be mistaken for a reply. The deadline is absolute, so a chatty
+    /// host cannot extend the wait one line at a time.
+    fn await_snap_reply(&self) -> Option<(u32, u32)> {
+        let deadline = Instant::now() + SNAP_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                tracing::debug!("webview host did not answer `snap` in time; no still");
+                return None;
+            }
+            let line = self.stdout.recv_timeout(left).ok()?;
+            let mut parts = line.split_whitespace();
+            match (parts.next(), parts.next()) {
+                (Some("snap"), Some("ok")) => {
+                    let w = parts.next()?.parse().ok()?;
+                    let h = parts.next()?.parse().ok()?;
+                    return Some((w, h));
+                }
+                (Some("snap"), _) => return None, // `snap fail`: nothing to draw
+                _ => {}
+            }
+        }
+    }
 }
 
 impl WebBackend for ViewHostBackend {
     fn new(url: &str, size: WebSize) -> Result<Self, WebError> {
         let size = size.clamped();
-        let (child, stdin) = spawn_host(url, size)?;
+        let (child, stdin, stdout) = spawn_host(url, size)?;
         Ok(Self {
             child,
             stdin,
+            stdout,
             url: url.to_owned(),
             size,
             restarts_left: 3,
@@ -148,9 +216,13 @@ impl WebBackend for ViewHostBackend {
             self.restarts_left -= 1;
             self.restart_after = Instant::now() + Duration::from_secs(5);
             tracing::warn!(%status, left = self.restarts_left, "webview host died; restarting");
-            if let Ok((child, stdin)) = spawn_host(&self.url, self.size) {
+            if let Ok((child, stdin, stdout)) = spawn_host(&self.url, self.size) {
                 self.child = child;
                 self.stdin = stdin;
+                // The old reader thread died with its pipe; replies must come
+                // from the new child's channel or `snap` would wait on a
+                // receiver nobody feeds.
+                self.stdout = stdout;
             }
         }
     }
@@ -191,6 +263,63 @@ impl WebBackend for ViewHostBackend {
         if !json.contains('\n') {
             self.send_line(&format!("props {json}"));
         }
+    }
+
+    /// Have the host draw the live page for us, so the engine can leave that
+    /// still on the output when this wallpaper is released.
+    ///
+    /// This backend is the whole reason [`WebBackend::snapshot`] exists: webkit
+    /// paints into the host's own layer-shell window, so the engine's surface
+    /// holds nothing but black and killing the host would uncover it for the
+    /// entire release. The host can still see its own widget, though —
+    /// `gtk_widget_draw` into a cairo surface — which is what `snap` asks for.
+    ///
+    /// The pixels come back through a file rather than the pipe: a 1440p frame
+    /// is ~14MB, and streaming that down a line-based stdin/stdout protocol
+    /// would mean framing binary data through a channel built for commands. The
+    /// file lives in `$XDG_RUNTIME_DIR` (tmpfs, 0700 — the page's contents never
+    /// touch disk) and is deleted here the moment it has been read, on every
+    /// path including the failures.
+    fn snapshot(&mut self) -> Option<FrameBuffer> {
+        // A reply from an earlier round (a timeout that landed late) would
+        // otherwise be read as the answer to this one.
+        while self.stdout.try_recv().is_ok() {}
+
+        let path = snap_path();
+        let Some(arg) = path.to_str() else {
+            return None; // non-UTF-8 runtime dir: not expressible on this line protocol
+        };
+        self.send_line(&format!("snap {arg}"));
+
+        let reply = self.await_snap_reply();
+        let data = reply.and_then(|_| std::fs::read(&path).ok());
+        // Unconditional: the host may have written the file and then failed, or
+        // answered after we stopped waiting. Leaving multi-MB files behind in
+        // the runtime dir on every release is not an option.
+        let _ = std::fs::remove_file(&path);
+
+        let (width, height) = reply?;
+        let data = data?;
+        let frame = FrameBuffer {
+            data,
+            width,
+            height,
+            // The host writes cairo `ARGB32`, which on little-endian is B,G,R,A
+            // in memory — matched by the texture format rather than swizzled on
+            // the CPU (that would be a ~14MB per-pixel pass for nothing).
+            format: PixelFormat::Bgra8,
+        };
+        if !frame.is_consistent() {
+            tracing::debug!(
+                width,
+                height,
+                got = frame.data.len(),
+                "webview still file did not match its reported size; ignoring"
+            );
+            return None;
+        }
+        tracing::debug!(width, height, "captured a webview still for the release");
+        Some(frame)
     }
 
     fn shutdown(&mut self) {

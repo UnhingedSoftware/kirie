@@ -727,12 +727,28 @@ impl PlatformState {
     /// releases all of it (the web host dies with its backend), and the resume
     /// path rebuilds from the bake + shader caches.
     ///
+    /// What the output *shows* afterwards needs no help for anything the engine
+    /// composites itself: a wayland surface keeps its last committed buffer as
+    /// long as the client stays silent (measured — a SIGSTOPped engine, which
+    /// commits nothing whatsoever, still grabs its full frame seconds later), so
+    /// a released scene/video/image goes on showing its final frame. The one
+    /// exception is a **webview** web wallpaper, where webkit paints its own
+    /// layer-shell window over ours and the engine's own last buffer is black:
+    /// killing the host uncovers that black for the entire release. So before
+    /// dropping such a renderer we ask it for a still of the live page and
+    /// present that one frame ([`crate::snapshot::present_still`]) — nothing is
+    /// retained, the compositor just keeps the buffer, and the wallpaper reads
+    /// as frozen instead of gone.
+    ///
     /// Called only from the pause watchdog, so it costs nothing while
     /// everything is visible.
     fn release_hidden_outputs(&mut self) {
         let Some(after) = self.release_hidden_after else {
             return;
         };
+        // Cloned up front: the still needs the device/queue while `ctx` is
+        // mutably borrowed below (cheap — wgpu handles are refcounted).
+        let gpu = self.gpu.as_ref().map(|g| (g.device.clone(), g.queue.clone()));
         for index in 0..self.outputs.len() {
             let ctx = &mut self.outputs[index];
             if !ctx.paused || ctx.released || ctx.renderer.is_none() {
@@ -742,15 +758,38 @@ impl PlatformState {
                 continue;
             }
             let name = ctx.name.clone();
+            // Ask the OUTGOING renderer for a still while it is still alive and
+            // its host process still running. `None` for everything except the
+            // webview backend, and `None` there too if the host is wedged (the
+            // reply wait is bounded) — either way the release proceeds
+            // unchanged. A stand-in is a bonus; it never gates the reclaim.
+            let still = ctx.renderer.as_mut().and_then(|r| r.snapshot());
             // The renderer drops here: GPU resources unmap through wgpu's drop
             // chain, and a web backend kills its host process from `Drop`.
             ctx.renderer = None;
             ctx.released = true;
+            // Present the still only after the reclaim has actually happened,
+            // so a failure anywhere in the blit cannot cost the memory saving
+            // it was only ever decorating. Ordering is otherwise free: the
+            // output is hidden, so nothing is on screen to flicker.
+            let stood_in = match (&still, &gpu, &ctx.wgpu_surface) {
+                (Some(still), Some((device, queue)), Some(surface)) => {
+                    crate::snapshot::present_still(device, queue, surface, still)
+                }
+                _ => false,
+            };
+            // Free the CPU-side copy before trimming, or the trim measures the
+            // very buffer it is meant to reclaim.
+            drop(still);
             // Same reclaim the swap path does — without the trim the freed
             // pages sit in glibc's arenas and the RSS never actually falls.
             kirie_bake::trim_heap();
             kirie_bake::pageout_cold_libs();
-            tracing::info!(output = %name, "released hidden wallpaper; will rebuild when visible");
+            tracing::info!(
+                output = %name,
+                still = stood_in,
+                "released hidden wallpaper; will rebuild when visible"
+            );
         }
     }
 

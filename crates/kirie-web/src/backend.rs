@@ -190,6 +190,24 @@ pub trait WebBackend: Send {
     /// object literal. Default: ignored (backends without script injection).
     fn apply_properties(&mut self, _json: &str) {}
 
+    /// Draw a one-off still of the live page, for the engine to leave on the
+    /// output when this wallpaper is released (`--release-hidden-after`).
+    ///
+    /// Default `None`, which is correct for every *composited* backend: the
+    /// engine already holds their pixels, and the surface keeps its last
+    /// committed buffer once we stop drawing, so there is nothing to stand in
+    /// for. Only the native-surface webview backend needs this — webkit paints
+    /// its own layer-shell window over the engine's (black) surface, so killing
+    /// the host uncovers black for the whole release unless a still was left
+    /// behind first.
+    ///
+    /// Called on the RENDER thread. An implementation that has to ask another
+    /// process must bound its wait and return `None` on timeout; blocking here
+    /// stalls every output, not just this one.
+    fn snapshot(&mut self) -> Option<FrameBuffer> {
+        None
+    }
+
     /// Tear the browser down and stop its thread. Idempotent.
     fn shutdown(&mut self);
 }

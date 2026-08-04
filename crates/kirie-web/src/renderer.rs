@@ -280,6 +280,28 @@ impl Renderer for WebRenderer {
         });
     }
 
+    /// Hand the platform a still of the live page so it can leave it on the
+    /// output when this wallpaper is released (`--release-hidden-after`).
+    ///
+    /// Delegated straight to the backend, because only it knows whether a still
+    /// is obtainable *and* needed. A composited backend (CEF) answers `None`:
+    /// the engine's surface already holds its pixels and keeps showing them
+    /// after we stop drawing. The native-surface webview backend answers with a
+    /// host-drawn frame, because its window disappears with the host and the
+    /// engine's own surface underneath is black.
+    fn snapshot(&mut self) -> Option<kirie_platform::RendererSnapshot> {
+        let frame = self.backend.snapshot()?;
+        Some(kirie_platform::RendererSnapshot {
+            data: frame.data,
+            width: frame.width,
+            height: frame.height,
+            format: match frame.format {
+                PixelFormat::Bgra8 => kirie_platform::SnapshotFormat::Bgra8,
+                PixelFormat::Rgba8 => kirie_platform::SnapshotFormat::Rgba8,
+            },
+        })
+    }
+
     /// Live `setProperty` (doc §4.9): forward to the page as a one-entry
     /// `applyUserProperties` batch. Values are typed like the reference's
     /// encoder (`CWeb.cpp`): bools bare, numbers bare, everything else (colors

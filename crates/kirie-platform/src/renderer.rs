@@ -98,6 +98,82 @@ pub trait Renderer {
     /// keeps its centered default). Drives `g_PointerPosition*`, camera
     /// parallax, SceneScript `pointer_screen` and the web backend's mouse.
     fn set_pointer(&mut self, _x: f32, _y: f32) {}
+
+    /// Hand back a still of what this renderer is *currently showing*, as raw
+    /// 32-bit pixels, so the platform can leave that image on the surface when
+    /// the renderer itself is torn down (`--release-hidden-after`).
+    ///
+    /// Default `None`, and for almost every renderer that is not merely the
+    /// easy answer but the *correct* one: a wayland surface keeps its last
+    /// committed buffer indefinitely (measured — a SIGSTOPped engine that
+    /// commits nothing at all still grabs its full frame seconds later), so a
+    /// released scene/video/image output already shows its final frame. There
+    /// is nothing to stand in for.
+    ///
+    /// The webview backend is the exception, and the only reason this hook
+    /// exists. There, webkit paints its own gtk-layer-shell window *on top* of
+    /// the engine's surface and the engine never composites a single web pixel
+    /// (see [`Self::is_passive`]) — so the last buffer we committed is black.
+    /// Releasing kills that host, its window vanishes, and the black underneath
+    /// is what the user is left looking at for as long as the wallpaper stays
+    /// hidden. Only the renderer itself can fix that, by asking its host to
+    /// draw the live page into a buffer for us.
+    ///
+    /// Called on the render thread, so an implementation that talks to another
+    /// process MUST bound its wait and degrade to `None` rather than block.
+    fn snapshot(&mut self) -> Option<RendererSnapshot> {
+        None
+    }
+}
+
+/// Byte order of a [`RendererSnapshot`]'s pixels.
+///
+/// Both layouts are carried rather than swizzled on the CPU because the GPU
+/// samples either one for free: the two map onto `Bgra8UnormSrgb` /
+/// `Rgba8UnormSrgb`, so a whole-screen byte shuffle (≈15 MB at 1440p) is
+/// avoided. The distinction is not academic — cairo's `ARGB32`, which the
+/// webview host draws into, is B,G,R,A **in memory** on little-endian.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SnapshotFormat {
+    /// Byte order B, G, R, A (cairo `ARGB32` on little-endian, CEF's OSR
+    /// buffers).
+    Bgra8,
+    /// Byte order R, G, B, A.
+    Rgba8,
+}
+
+impl SnapshotFormat {
+    /// The wgpu texture format that samples this layout as linear colour.
+    ///
+    /// Snapshot pixels are sRGB-encoded bytes (they came out of a browser or a
+    /// swapchain), so sampling through the matching `*UnormSrgb` format lets
+    /// the GPU linearise on read and re-encode on write — the same pairing
+    /// `kirie_web::PixelFormat::wgpu_srgb` uses for live browser frames.
+    #[must_use]
+    pub fn wgpu_srgb(self) -> wgpu::TextureFormat {
+        match self {
+            SnapshotFormat::Bgra8 => wgpu::TextureFormat::Bgra8UnormSrgb,
+            SnapshotFormat::Rgba8 => wgpu::TextureFormat::Rgba8UnormSrgb,
+        }
+    }
+}
+
+/// One still frame handed back by [`Renderer::snapshot`].
+///
+/// Owns its pixels: it crosses from whatever produced them (a child process's
+/// file, a readback buffer) to a GPU upload, and the producer's storage is gone
+/// by then.
+#[derive(Debug)]
+pub struct RendererSnapshot {
+    /// Tightly packed pixels, exactly `width * height * 4` bytes, top-left
+    /// origin, **no row padding** (the uploader trusts the stride).
+    pub data: Vec<u8>,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+    /// Byte order of [`RendererSnapshot::data`].
+    pub format: SnapshotFormat,
 }
 
 /// How a live property change landed (see [`Renderer::set_property`]).
