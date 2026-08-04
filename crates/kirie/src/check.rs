@@ -190,7 +190,26 @@ fn check_web_backends(r: &mut Report) {
     #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
     {
         if beside("kirie-webviewhost") {
-            r.line(&Verdict::Ok, "web backend (webview)", "kirie-webviewhost present");
+            // The host binary shipping is only half of it: it renders through
+            // the system's WebKitGTK, which many distros do not install by
+            // default and which ships under several parallel ABIs. Without
+            // this the failure surfaces much later as an opaque "webviewhost
+            // died during startup".
+            match webkit_runtime() {
+                Some(lib) => r.line(
+                    &Verdict::Ok,
+                    "web backend (webview)",
+                    &format!("kirie-webviewhost present, {lib}"),
+                ),
+                None => {
+                    r.line(
+                        &Verdict::Warn,
+                        "web backend (webview)",
+                        "kirie-webviewhost present, but no WebKitGTK runtime found",
+                    );
+                    r.hint(&webkit_install_hint());
+                }
+            }
         } else {
             r.line(
                 &Verdict::Warn,
@@ -207,6 +226,95 @@ fn check_web_backends(r: &mut Report) {
             "web backend",
             "not built in (scenes/video/images only; rebuild with --features web-cef for web)",
         );
+    }
+}
+
+/// The WebKitGTK shared library the webview host can drive, if one is present.
+///
+/// Probes the standard library directories rather than `dlopen`ing (this crate
+/// is `forbid(unsafe_code)`); the host itself loads whichever it finds. The
+/// three ABIs are *parallel-installable different libraries*, not versions:
+/// `4.1` (GTK3 + libsoup3) is today's mainstream, `4.0` (GTK3 + libsoup2)
+/// survives on older LTS distros, and `6.0` is the GTK4 line. Ordered
+/// most-preferred first.
+#[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
+fn webkit_runtime() -> Option<String> {
+    const SONAMES: &[&str] = &[
+        "libwebkit2gtk-4.1.so.0",
+        "libwebkit2gtk-4.0.so.37",
+        "libwebkit2gtk-4.0.so",
+    ];
+    // Covers merged-/usr and Debian/Fedora multiarch layouts.
+    const DIRS: &[&str] = &[
+        "/usr/lib",
+        "/usr/lib64",
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/x86_64-linux-gnu",
+        "/usr/local/lib",
+    ];
+    for so in SONAMES {
+        for dir in DIRS {
+            if std::path::Path::new(dir).join(so).exists() {
+                return Some((*so).to_owned());
+            }
+        }
+    }
+    None
+}
+
+/// A copy-pasteable install command for the running distro.
+///
+/// Keyed off `/etc/os-release` `ID`/`ID_LIKE`. Deliberately a static table
+/// rather than a package-manager query (`dnf provides`, `pacman -F`,
+/// `apt-file`): those need an extra tool or a synced file database and can
+/// touch the network, none of which belongs in a diagnostic. The soname is
+/// always printed so the user can search their own repositories if their
+/// distro isn't listed.
+#[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
+fn webkit_install_hint() -> String {
+    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    format!(
+        "web wallpapers need WebKitGTK (libwebkit2gtk-4.1.so.0, or 4.0 on older distros): {}. \
+         Scenes, videos and images work without it.",
+        webkit_install_cmd(&os_release)
+    )
+}
+
+/// The install command for the distro described by an `/etc/os-release` body.
+///
+/// Split out from [`webkit_install_hint`] so the mapping is testable without
+/// the host's real `/etc/os-release`.
+#[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
+fn webkit_install_cmd(os_release: &str) -> &'static str {
+    let field = |key: &str| -> String {
+        os_release
+            .lines()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap_or("")
+            .trim_matches(['"', '\''].as_ref())
+            .to_ascii_lowercase()
+    };
+    let ids = format!("{} {}", field("ID="), field("ID_LIKE="));
+    let has = |needles: &[&str]| needles.iter().any(|n| ids.contains(n));
+
+    if has(&["arch", "cachyos", "manjaro", "endeavouros"]) {
+        "sudo pacman -S webkit2gtk-4.1"
+    } else if has(&["ubuntu", "debian", "pop", "mint", "raspbian"]) {
+        "sudo apt install libwebkit2gtk-4.1-0   (older releases: libwebkit2gtk-4.0-37)"
+    } else if has(&["fedora", "rhel", "centos", "rocky", "alma"]) {
+        "sudo dnf install webkit2gtk4.1"
+    } else if has(&["opensuse", "suse"]) {
+        "sudo zypper install libwebkit2gtk-4_1-0"
+    } else if has(&["alpine"]) {
+        "sudo apk add webkit2gtk-4.1"
+    } else if has(&["void"]) {
+        "sudo xbps-install -S webkit2gtk"
+    } else if has(&["gentoo"]) {
+        "sudo emerge net-libs/webkit-gtk"
+    } else if has(&["nixos"]) {
+        "add pkgs.webkitgtk_4_1 to your configuration"
+    } else {
+        "install your distro's WebKitGTK runtime package"
     }
 }
 
@@ -439,5 +547,40 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufMakeWriter {
     type Writer = BufMakeWriter;
     fn make_writer(&'a self) -> Self::Writer {
         self.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::webkit_install_cmd;
+
+    /// The distro mapping keys off both `ID` and `ID_LIKE`, so derivatives
+    /// (CachyOS, Pop!_OS, Rocky) resolve to their parent's package manager
+    /// without needing their own entry.
+    #[test]
+    fn webkit_hint_matches_distro_family() {
+        let cases = [
+            ("ID=cachyos\nID_LIKE=arch\n", "pacman"),
+            ("ID=arch\n", "pacman"),
+            ("ID=ubuntu\nID_LIKE=debian\n", "apt"),
+            ("ID=pop\nID_LIKE=\"ubuntu debian\"\n", "apt"),
+            ("ID=fedora\n", "dnf"),
+            ("ID=rocky\nID_LIKE=\"rhel centos fedora\"\n", "dnf"),
+            ("ID=opensuse-tumbleweed\nID_LIKE=\"opensuse suse\"\n", "zypper"),
+            ("ID=alpine\n", "apk"),
+            ("ID=void\n", "xbps"),
+            ("ID=gentoo\n", "emerge"),
+        ];
+        for (os_release, want) in cases {
+            let got = webkit_install_cmd(os_release);
+            assert!(got.contains(want), "{os_release:?} -> {got:?}, expected {want:?}");
+        }
+    }
+
+    /// An unknown distro still gets actionable text rather than an empty hint.
+    #[test]
+    fn webkit_hint_has_a_generic_fallback() {
+        let got = webkit_install_cmd("ID=someobscuredistro\n");
+        assert!(got.to_lowercase().contains("webkitgtk"), "{got:?}");
     }
 }
