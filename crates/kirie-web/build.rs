@@ -17,10 +17,10 @@ fn main() {
     }
     if std::env::var_os("CARGO_FEATURE_WEBVIEW").is_some() {
         // Compile-time-visible notice (src/webview/mod.rs has the evidence):
-        // wry/webkit2gtk has no off-screen rendering path, so this feature can
+        // webkit2gtk has no off-screen rendering path, so this feature can
         // only ever be a native-surface fallback — won't-fix upstream.
         println!(
-            "cargo:warning=kirie-web `webview` feature: wry/webkit2gtk cannot render \
+            "cargo:warning=kirie-web `webview` feature: webkit2gtk cannot render \
              off-screen (upstream limitation, won't-fix); this backend paints a native \
              surface only — use `--features cef` (kirie: `web-cef`) for composited web \
              wallpapers"

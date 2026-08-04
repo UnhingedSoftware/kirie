@@ -1,4 +1,5 @@
-//! The `webview` web-wallpaper backend: wry + the system `webkit2gtk-4.1`.
+//! The `webview` web-wallpaper backend: the system `webkit2gtk`, 4.1 **or**
+//! 4.0, resolved at run time.
 //!
 //! # Status: native-surface fallback only — off-screen is won't-fix (upstream)
 //!
@@ -7,9 +8,9 @@
 //! like any other wallpaper (the [`crate::backend::WebBackend`] trait is shaped
 //! around that — `new(url, size)` + `latest_frame()`).
 //!
-//! wry cannot do that, and this is an upstream limitation of wry/webkit2gtk on
-//! Linux — not pending kirie work. Evidence, from the vendored wry 0.55.1
-//! source (`~/.cargo/registry/src/…/wry-0.55.1/`):
+//! webkit2gtk cannot do that, and this is an upstream limitation on Linux —
+//! not pending kirie work. Evidence, from the wry 0.55.1 source this backend
+//! was originally written against (`~/.cargo/registry/src/…/wry-0.55.1/`):
 //!
 //! * `src/webkitgtk/mod.rs` — the complete Linux `WebView` API surface is
 //!   `eval`, `load_url(_with_headers)`, `load_html`, `reload`, `bounds` /
@@ -25,7 +26,8 @@
 //!   `cairo::Surface` per invocation): unusable as a 60 fps per-frame OSR
 //!   feed, still `!Send`, and still requiring a realized native window.
 //! * True off-screen WebKit on Linux is **WPE WebKit** (`wpewebkit`), a
-//!   different engine build that wry does not wrap.
+//!   different engine build with a different C API — not something the
+//!   webkit2gtk shared object exposes at all.
 //!
 //! Implementing the off-screen, `Send`, frame-publishing `WebBackend` trait on
 //! top of this API is therefore impossible; the aspiration to make the
@@ -36,46 +38,50 @@
 //!
 //! This backend uses the only model webkit2gtk supports for a full-surface
 //! HTML wallpaper: **it fills the background window directly.** The host
-//! (kirie-platform) creates the background surface — on Wayland a layer-shell
-//! surface (a GTK window promoted to the background layer via `gtk-layer-shell`),
-//! on X11 the desktop window — and hands the backend its
-//! [`raw_window_handle`] handles via [`SurfaceTarget`]. webkit renders into it;
-//! there is no wgpu compositing step and no per-frame `latest_frame()` upload
-//! for web wallpapers on this backend. This matches how WE web wallpapers are
-//! authored: standalone full-surface `index.html` documents.
+//! (`kirie-webviewhost`) creates the background surface — a GTK window
+//! promoted to the compositor's background layer via `gtk-layer-shell` — and
+//! hands the backend the `gtk::Container` inside it; the `WebKitWebView`
+//! becomes a child widget and renders into it. There is no wgpu compositing
+//! step and no per-frame `latest_frame()` upload for web wallpapers on this
+//! backend. This matches how WE web wallpapers are authored: standalone
+//! full-surface `index.html` documents.
 //!
 //! Everything else is kept identical to the CEF backend: the same WE JS bridge
 //! shims ([`crate::shim`]) are injected, audio is pushed to
 //! `wallpaperRegisterAudioListener`, properties flow through
 //! `wallpaperPropertyListener`, and audio can be muted (via JavaScript, since
-//! wry exposes no native mute).
+//! webkit2gtk exposes no native mute).
 //!
-//! # Build requirement
+//! # Build requirement — GTK 3 only
 //!
-//! The `webview` feature pulls `wry`, whose Linux backend links
-//! `webkit2gtk-4.1` **and** `libsoup-3.0` (+ GTK 3) via `pkg-config` at
-//! **compile** time. On a box without `webkit2gtk-4.1` installed this crate
-//! cannot be compiled with `--features webview` — that is expected; CI installs
-//! the package. The default build enables no web feature and never references
-//! wry, so it stays green on such machines (SPEC invariant).
+//! The `webview` feature links GTK 3 and `gtk-layer-shell` at compile time
+//! (both are present on every target distro) and **`dlopen`s webkit at run
+//! time** (see `webkit_sys`). That is a deliberate departure from `wry`,
+//! whose `webkit2gtk-sys` dependency hard-requires the `webkit2gtk-4.1`
+//! pkg-config module and so bakes a `DT_NEEDED` on `libwebkit2gtk-4.1.so.0`
+//! into the binary: such a build cannot start at all on the LTS distros that
+//! ship only `webkit2gtk-4.0` (Ubuntu 20.04, Debian 11), even though the two
+//! expose the same GTK3 C API and differ only in which libsoup they link.
+//! Resolving the handful of entry points this backend needs at run time gives
+//! one binary that serves both, and drops webkit from the *build* requirements
+//! entirely. The default build still enables no web feature at all.
 //!
 //! # Runtime preconditions (host responsibility)
 //!
-//! wry 0.55's `WebViewBuilder::build` on Linux **panics** if `gtk::init()` was
-//! not called on the current thread, and a `wry::WebView` is `!Send` — it must
-//! be created and driven on the one GTK main thread. So kirie-platform must,
-//! on the thread that owns the web wallpaper: call `gtk::init()` once, create
-//! the background GTK/gtk-layer-shell window, then build the
-//! [`WebviewBackend`] from its handles and run the GTK main loop (that loop —
-//! not [`WebviewBackend::tick`] — is what actually paints webkit). These are
-//! host misconfigurations, not page input, so this crate documents rather than
+//! A `WebKitWebView` is a GTK widget: `gtk::init()` must have run on the
+//! current thread before one is created, and the object is `!Send` — it must
+//! be created and driven on the one GTK main thread. So the host must, on the
+//! thread that owns the web wallpaper: call `gtk::init()` once, create the
+//! background GTK/gtk-layer-shell window, then build the [`WebviewBackend`]
+//! against its container and run the GTK main loop (that loop — not
+//! [`WebviewBackend::tick`] — is what actually paints webkit). These are host
+//! misconfigurations, not page input, so this crate documents rather than
 //! defends against them (SPEC V9 concerns malformed *wallpaper* input).
 
 mod backend;
-mod surface;
+mod webkit_sys;
 
 pub use backend::WebviewBackend;
-pub use surface::SurfaceTarget;
 
 /// Turn a filesystem path to a wallpaper entry page into a `file://` URL.
 ///

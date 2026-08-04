@@ -39,16 +39,17 @@ pub mod cef;
 #[cfg(feature = "host")]
 pub mod hosted;
 
-/// The wry + system-`webkit2gtk` native-surface backend (feature `webview`).
+/// The system-`webkit2gtk` native-surface backend (feature `webview`).
 ///
 /// webkit2gtk has no off-screen/pixel-readback path (upstream won't-fix) and
-/// a `wry::WebView` is `!Send` (GTK main-thread-bound), so this backend can
-/// never be the composited, frame-publishing [`WebBackend`] — see [`webview`]
-/// for the evidence (wry 0.55.1 API survey). Instead it renders **natively**:
-/// the out-of-process `kirie-webviewhost` binary owns a gtk-layer-shell
-/// window on the compositor's background layer and webkit paints straight
-/// into it. The engine talks to that process through [`viewhost`]. The
-/// `unsafe` this backend needs (borrowing raw window handles) is why the
+/// its objects are `!Send` (GTK main-thread-bound), so this backend can never
+/// be the composited, frame-publishing [`WebBackend`] — see [`webview`] for
+/// the evidence (wry 0.55.1 API survey). Instead it renders **natively**: the
+/// out-of-process `kirie-webviewhost` binary owns a gtk-layer-shell window on
+/// the compositor's background layer and webkit paints straight into it. The
+/// engine talks to that process through [`viewhost`]. webkit is reached by
+/// `dlopen` rather than by linking, so one binary works against both
+/// `webkit2gtk-4.1` and `webkit2gtk-4.0`; that C-ABI boundary is why the
 /// crate-level `forbid(unsafe_code)` is relaxed for this feature too.
 #[cfg(feature = "webview")]
 pub mod webview;

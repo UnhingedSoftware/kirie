@@ -20,15 +20,15 @@ cef = ["dep:cef", "dep:cef-dll-sys", "dep:memmap2", "dep:tracing-subscriber", "d
 # Out-of-process web host CLIENT: no browser deps at all — spawns the
 # `kirie-webhost` binary and reads its shared-memory frames.
 host = []
-# wry + system webkit2gtk-4.1 native-surface backend, presented by the
-# out-of-process `kirie-webviewhost` binary: webkit has no off-screen path
-# (upstream won't-fix, see src/webview/mod.rs), so instead of compositing
-# frames the host puts a gtk-layer-shell window straight on the compositor's
-# background layer and lets webkit render into it natively. `wry` links
-# `webkit2gtk-4.1`/`libsoup-3.0` via pkg-config at COMPILE time, so this
-# feature only builds on a box with those -dev packages; gated so the default
-# build never needs them.
-webview = ["dep:wry", "dep:raw-window-handle", "dep:gtk", "dep:gtk-layer-shell", "dep:tracing-subscriber"]
+# System-webkit2gtk native-surface backend, presented by the out-of-process
+# `kirie-webviewhost` binary: webkit has no off-screen path (upstream
+# won't-fix, see src/webview/mod.rs), so instead of compositing frames the host
+# puts a gtk-layer-shell window straight on the compositor's background layer
+# and lets webkit render into it natively. webkit itself is `dlopen`ed at RUN
+# time (src/webview/webkit_sys.rs) so one binary serves both webkit2gtk-4.1 and
+# the -4.0 still shipped by old LTS distros; only GTK 3 is linked at compile
+# time. Gated anyway so the default build pulls no gtk at all.
+webview = ["dep:libloading", "dep:gtk", "dep:gtk-layer-shell", "dep:tracing-subscriber"]
 # Out-of-process webview host CLIENT: no browser/gtk deps at all — spawns the
 # `kirie-webviewhost` binary (which owns webkit + the layer surface) and
 # drives it over stdin. The engine layer stays black behind the host's own
@@ -56,11 +56,13 @@ arc-swap = { workspace = true }
 cef = { version = "149", default-features = false, optional = true }
 cef-dll-sys = { workspace = true, optional = true }
 
-# Heavy, optional, feature-gated (webview backend). `wry` pulls webkit2gtk-sys,
-# which needs the system webkit2gtk-4.1 dev package at build time. `gtk` +
-# `gtk-layer-shell` are the kirie-webviewhost window stack (background layer).
-wry = { workspace = true, optional = true }
-raw-window-handle = { workspace = true, optional = true }
+# Optional, feature-gated (webview backend). `gtk` + `gtk-layer-shell` are the
+# kirie-webviewhost window stack (background layer) and are linked normally;
+# GTK 3 is present on every target distro. `libloading` carries the runtime
+# `dlopen` of webkit itself — declared directly rather than via the workspace
+# because the root manifest must not be edited, and pinned to the 0.8 line
+# already in the lock file (wgpu/ash pull it) so no new crate enters the tree.
+libloading = { version = "0.8", optional = true }
 gtk = { workspace = true, optional = true }
 gtk-layer-shell = { workspace = true, optional = true }
 
@@ -82,5 +84,5 @@ required-features = ["cef"]
 [[bin]]
 name = "kirie-webviewhost"
 path = "src/bin/kirie-webviewhost.rs"
-# Links gtk + webkit2gtk (via wry); only exists in the `webview` build.
+# Links gtk (webkit is dlopen'd); only exists in the `webview` build.
 required-features = ["webview"]
