@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Wallpaper compatibility list
+    url: https://unhingedsoftware.github.io/kirie/
+    about: Check whether a wallpaper is already listed before reporting it.

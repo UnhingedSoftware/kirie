@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>kirie — wallpaper compatibility</title>
+<style>
+  :root {
+    --bg: #0d0f13;
+    --card: #161a21;
+    --line: #232833;
+    --fg: #e6e9ef;
+    --dim: #98a0af;
+    --ok: #6ee7a8;
+    --partial: #f5c86b;
+    --broken: #f08a8a;
+    --asset: #8fb4f0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 1.7rem; margin: 0 0 .35rem; letter-spacing: -.01em; }
+  .lede { color: var(--dim); margin: 0 0 1.25rem; max-width: 62ch; }
+  .lede a { color: inherit; }
+  .bar { display: flex; gap: .5rem; flex-wrap: wrap; align-items: center; margin-bottom: 1.75rem; }
+  .bar button {
+    background: var(--card); color: var(--fg); border: 1px solid var(--line);
+    border-radius: 999px; padding: .3rem .85rem; font: inherit; font-size: .85rem;
+    cursor: pointer;
+  }
+  .bar button[aria-pressed="true"] { background: var(--fg); color: var(--bg); border-color: var(--fg); }
+  .bar .spacer { flex: 1; }
+  .cta {
+    background: var(--fg); color: var(--bg); border: 1px solid var(--fg);
+    border-radius: 999px; padding: .3rem .95rem; font-size: .85rem; font-weight: 600;
+    text-decoration: none; white-space: nowrap;
+  }
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; display: flex; flex-direction: column;
+  }
+  .card img, .card .noshot {
+    width: 100%; aspect-ratio: 16 / 9; object-fit: cover; display: block;
+    background: #0a0c10;
+  }
+  .noshot { display: grid; place-items: center; color: var(--dim); font-size: .8rem; }
+  .meta { padding: .75rem .9rem .9rem; display: flex; flex-direction: column; gap: .35rem; }
+  .name { font-weight: 600; line-height: 1.3; }
+  .name a { color: inherit; text-decoration: none; }
+  .name a:hover { text-decoration: underline; }
+  .tags { display: flex; gap: .4rem; align-items: center; font-size: .78rem; color: var(--dim); }
+  .dot { width: .55rem; height: .55rem; border-radius: 50%; flex: none; }
+  .works .dot { background: var(--ok); }
+  .partial .dot { background: var(--partial); }
+  .broken .dot { background: var(--broken); }
+  .asset .dot { background: var(--asset); }
+  .type { border: 1px solid var(--line); border-radius: 999px; padding: 0 .5rem; }
+  .fix {
+    margin-left: auto; color: var(--dim); font-size: .75rem; text-decoration: none;
+    border-bottom: 1px dotted currentColor;
+  }
+  .fix:hover { color: var(--fg); }
+  .notes { color: var(--dim); font-size: .82rem; }
+  .how {
+    margin-top: 2.5rem; padding: 1.1rem 1.25rem; background: var(--card);
+    border: 1px solid var(--line); border-radius: 12px;
+  }
+  .how h2 { font-size: 1rem; margin: 0 0 .5rem; }
+  .how p { margin: 0 0 .6rem; color: var(--dim); font-size: .88rem; max-width: 72ch; }
+  .how p:last-child { margin-bottom: 0; }
+  .how a { color: inherit; }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85em;
+    background: rgba(127, 140, 165, .18); border-radius: 4px; padding: .05em .35em;
+  }
+  footer { color: var(--dim); font-size: .82rem; margin-top: 2rem; max-width: 70ch; }
+  footer a { color: var(--dim); }
+  @media (prefers-color-scheme: light) {
+    :root { --bg:#fbfbfd; --card:#fff; --line:#e3e6ec; --fg:#12151a; --dim:#5c6473; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>kirie — wallpaper compatibility</h1>
+  <p class="lede">
+    Wallpaper Engine items tested with
+    <a href="https://github.com/UnhingedSoftware/kirie">kirie</a>. Every image is
+    kirie's own render, captured with <code>kirie --screenshot</code> — not the
+    Workshop preview. Titles link to the item on Steam.
+  </p>
+
+  <div class="bar">
+    <span id="filters" style="display:contents"></span>
+    <span class="spacer"></span>
+    <a class="cta" id="report-any" rel="noopener">Report a wallpaper</a>
+  </div>
+  <div class="grid" id="grid"></div>
+
+  <section class="how">
+    <h2>Add or correct an entry</h2>
+    <p>
+      <strong>Don't want to touch the repo?</strong>
+      <a id="report-link" rel="noopener">Open a report</a> — paste the Workshop
+      link, say what happened, done. Running <code>kirie list --json</code> and
+      pasting the output covers most of the form.
+    </p>
+    <p>
+      <strong>Sending a change yourself?</strong> Edit
+      <a href="https://github.com/UnhingedSoftware/kirie/edit/main/site/wallpapers.json">site/wallpapers.json</a>
+      on GitHub and open a pull request. Add a screenshot by dropping
+      <code>site/shots/&lt;id&gt;.jpg</code> in the same PR — 960×540, and it must
+      be kirie's own render (<code>kirie --bg &lt;dir&gt; --screenshot out.png</code>),
+      not the Workshop preview art. This page redeploys on merge.
+    </p>
+    <p>
+      Statuses: <code>works</code> renders correctly · <code>partial</code>
+      renders with visible problems (say which in <code>notes</code>) ·
+      <code>broken</code> fails to load or renders wrong ·
+      <code>asset</code> is an effect or preset used to build wallpapers, not a
+      wallpaper itself.
+    </p>
+  </section>
+
+  <footer>
+    Wallpapers are the work of their Workshop authors and are listed here only to
+    document what kirie renders; each title links back to its page on Steam. If
+    you are an author and want your item removed, open an issue and it will be
+    taken down.
+  </footer>
+</div>
+
+<script>
+  const REPO = "https://github.com/UnhingedSoftware/kirie";
+  const STEAM = id => `https://steamcommunity.com/sharedfiles/filedetails/?id=${id}`;
+
+  // wallpapers.json is contributed content, so nothing from it is trusted as
+  // markup — every field is escaped before it reaches the DOM.
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  // Issue-form fields are addressed by their `id` in the template, so a card's
+  // report link arrives with the item already filled in.
+  const reportUrl = (w) => {
+    const q = new URLSearchParams({ template: "wallpaper-report.yml", labels: "compatibility" });
+    if (w) {
+      q.set("title", `[compat] ${w.title}`);
+      q.set("workshop", STEAM(w.id));
+      q.set("name", w.title);
+      q.set("status", w.status);
+    }
+    return `${REPO}/issues/new?${q}`;
+  };
+
+  let items = [], filter = "all";
+
+  const render = () => {
+    const grid = document.getElementById("grid");
+    grid.innerHTML = "";
+    for (const w of items) {
+      if (filter !== "all" && w.status !== filter && w.type !== filter) continue;
+      const card = document.createElement("article");
+      card.className = `card ${esc(w.status)}`;
+      // A missing screenshot is normal: web items cannot be captured without a
+      // CEF build, and not every tested item needs an image to be listed.
+      card.innerHTML = `
+        <img src="shots/${encodeURIComponent(w.id)}.jpg" alt="${esc(w.title)} rendered by kirie"
+             loading="lazy"
+             onerror="this.outerHTML='<div class=noshot>no screenshot</div>'">
+        <div class="meta">
+          <div class="name"><a href="${esc(STEAM(w.id))}" rel="noopener">${esc(w.title)}</a></div>
+          <div class="tags">
+            <span class="dot"></span>${esc(w.status)}
+            <span class="type">${esc(w.type)}</span>
+            <a class="fix" href="${esc(reportUrl(w))}" rel="noopener"
+               title="Report a different result for this wallpaper">wrong?</a>
+          </div>
+          ${w.notes ? `<div class="notes">${esc(w.notes)}</div>` : ""}
+        </div>`;
+      grid.append(card);
+    }
+  };
+
+  const buildFilters = () => {
+    const bar = document.getElementById("filters");
+    const keys = ["all", ...new Set(items.flatMap(w => [w.status, w.type]))];
+    for (const k of keys) {
+      const b = document.createElement("button");
+      b.textContent = k;
+      b.setAttribute("aria-pressed", k === filter);
+      b.onclick = () => {
+        filter = k;
+        [...bar.children].forEach(c => c.setAttribute("aria-pressed", c.textContent === k));
+        render();
+      };
+      bar.append(b);
+    }
+  };
+
+  for (const id of ["report-any", "report-link"]) {
+    document.getElementById(id).href = reportUrl(null);
+  }
+
+  fetch("wallpapers.json")
+    .then(r => r.json())
+    .then(d => {
+      items = d.wallpapers.sort((a, b) => a.title.localeCompare(b.title));
+      buildFilters();
+      render();
+    })
+    .catch(() => {
+      document.getElementById("grid").innerHTML =
+        `<p class="notes">Could not load wallpapers.json.</p>`;
+    });
+</script>
+</body>
+</html>

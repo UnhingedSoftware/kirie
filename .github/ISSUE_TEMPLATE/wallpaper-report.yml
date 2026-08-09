@@ -1,0 +1,93 @@
+name: Wallpaper compatibility report
+description: Tell us how a Wallpaper Engine item behaves in kirie — working or broken
+title: "[compat] "
+labels: ["compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports land on the [compatibility list](https://unhingedsoftware.github.io/kirie/).
+        Working wallpapers are as useful to file as broken ones — the list is only
+        trustworthy if it covers both.
+
+        Most of this form is answered by `kirie list --json`.
+
+  - type: input
+    id: workshop
+    attributes:
+      label: Workshop link or ID
+      description: The Steam Workshop page, or just the numeric ID.
+      placeholder: https://steamcommunity.com/sharedfiles/filedetails/?id=1388331347
+    validations:
+      required: true
+
+  - type: input
+    id: name
+    attributes:
+      label: Title
+      placeholder: Tree of life
+    validations:
+      required: true
+
+  - type: dropdown
+    id: status
+    attributes:
+      label: Result
+      options:
+        - works
+        - partial
+        - broken
+        - asset
+      description: |
+        `works` renders correctly · `partial` renders with visible problems ·
+        `broken` fails to load or renders wrong · `asset` is an effect or preset
+        used to build wallpapers, not a wallpaper itself
+    validations:
+      required: true
+
+  - type: dropdown
+    id: type
+    attributes:
+      label: Type
+      description: What `kirie list` reports in the type column.
+      options:
+        - scene
+        - video
+        - web
+        - image
+        - asset
+        - application
+        - unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: notes
+    attributes:
+      label: What happens
+      description: |
+        For anything short of `works`: what is wrong, and what it should look
+        like. Screenshots help — drag them in.
+      placeholder: |
+        Particles render behind the background layer instead of in front of it.
+    validations:
+      required: false
+
+  - type: textarea
+    id: env
+    attributes:
+      label: Version and GPU
+      description: Output of `kirie --version` and `kirie gpus`.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: screenshot
+    attributes:
+      label: Screenshot
+      options:
+        - label: >
+            I can attach a kirie render (`kirie --bg <dir> --screenshot out.png`)
+            for the list. Workshop preview art cannot be used.
+          required: false

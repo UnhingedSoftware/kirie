@@ -1,0 +1,75 @@
+{
+  "_comment": "Compatibility list for https://unhingedsoftware.github.io/kirie/. One entry per tested item. `status`: works | partial | broken | asset (an effect or preset used to build wallpapers, not a wallpaper itself); partial and broken must say what is wrong in `notes`. Screenshots are optional and live at shots/<id>.jpg -- they must be kirie's own render (`kirie --bg <dir> --screenshot out.png`), not the Workshop preview art. Run `python3 site/validate.py` before opening a pull request; CI runs the same check.",
+  "wallpapers": [
+    {
+      "id": "1388331347",
+      "title": "Tree of life",
+      "type": "scene",
+      "status": "works",
+      "notes": ""
+    },
+    {
+      "id": "3293156956",
+      "title": "Moonlight",
+      "type": "scene",
+      "status": "works",
+      "notes": "Nine particle systems; the heaviest scene tested."
+    },
+    {
+      "id": "3421423611",
+      "title": "Cyberpunk: Edgerunners [4K]",
+      "type": "scene",
+      "status": "works",
+      "notes": ""
+    },
+    {
+      "id": "3585875739",
+      "title": "Miku Monitoring",
+      "type": "scene",
+      "status": "works",
+      "notes": ""
+    },
+    {
+      "id": "3648988375",
+      "title": "Ethereal Light Pillar - 4K",
+      "type": "scene",
+      "status": "works",
+      "notes": ""
+    },
+    {
+      "id": "3600453929",
+      "title": "冷冰冰的誓言",
+      "type": "video",
+      "status": "works",
+      "notes": ""
+    },
+    {
+      "id": "3047596375",
+      "title": "Starscape",
+      "type": "scene",
+      "status": "works",
+      "notes": "Very dark by design; fades in over several seconds."
+    },
+    {
+      "id": "2968833989",
+      "title": "ION | Audio Responsive Wallpaper",
+      "type": "web",
+      "status": "works",
+      "notes": "Needs a web build. Audio reactivity and MPRIS now-playing both work; --screenshot of web items is CEF-only."
+    },
+    {
+      "id": "3551997868",
+      "title": "Spectrum City Audio Visualizer",
+      "type": "web",
+      "status": "works",
+      "notes": "Needs a web build."
+    },
+    {
+      "id": "3347128360",
+      "title": "Gradient generator",
+      "type": "asset",
+      "status": "asset",
+      "notes": "An effect preset wallpapers build on, not a wallpaper. kirie lists it as type asset and skips it in pickers."
+    }
+  ]
+}
