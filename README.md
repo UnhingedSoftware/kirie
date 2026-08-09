@@ -11,6 +11,22 @@ is a from-scratch Rust descendant, validated scene-by-scene against it.
 Renders scene, video, image, and web wallpapers, with audio-reactive visualizers,
 SceneScript (JS) scripting, 3D puppet/model layers, and the full effect pipeline.
 
+## Gallery
+
+Captured with `kirie --screenshot`, so these are kirie's own output rather than
+the Workshop preview art. Titles link to the item on Steam.
+
+| | |
+|:-:|:-:|
+| [![Tree of life](https://unhingedsoftware.github.io/kirie/shots/1388331347.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=1388331347)<br>[Tree of life](https://steamcommunity.com/sharedfiles/filedetails/?id=1388331347) | [![Moonlight](https://unhingedsoftware.github.io/kirie/shots/3293156956.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=3293156956)<br>[Moonlight](https://steamcommunity.com/sharedfiles/filedetails/?id=3293156956) |
+| [![Cyberpunk: Edgerunners](https://unhingedsoftware.github.io/kirie/shots/3421423611.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=3421423611)<br>[Cyberpunk: Edgerunners](https://steamcommunity.com/sharedfiles/filedetails/?id=3421423611) | [![Miku Monitoring](https://unhingedsoftware.github.io/kirie/shots/3585875739.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=3585875739)<br>[Miku Monitoring](https://steamcommunity.com/sharedfiles/filedetails/?id=3585875739) |
+| [![Ethereal Light Pillar](https://unhingedsoftware.github.io/kirie/shots/3648988375.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=3648988375)<br>[Ethereal Light Pillar](https://steamcommunity.com/sharedfiles/filedetails/?id=3648988375) | [![冷冰冰的誓言](https://unhingedsoftware.github.io/kirie/shots/3600453929.jpg)](https://steamcommunity.com/sharedfiles/filedetails/?id=3600453929)<br>[冷冰冰的誓言](https://steamcommunity.com/sharedfiles/filedetails/?id=3600453929) (video) |
+
+More, with per-item notes, on the
+[compatibility list](https://unhingedsoftware.github.io/kirie/) — and
+`kirie list` reports what is installed locally, including whether this build can
+render each item.
+
 ## Build
 
 Rust (stable) plus the system libraries the workspace links against.
