@@ -38,6 +38,14 @@ pub enum IpcEvent {
         /// Reply channel; `bounded(1)`, send never blocks.
         reply: Sender<CommandOutcome>,
     },
+    /// `list` request (docs/compat-socket.md §12, a kirie extension): the app
+    /// answers with the installed Wallpaper Engine items already serialized as
+    /// a **single-line JSON array**. The server writes it verbatim plus one
+    /// trailing `\n`, exactly as it does for `getproperties`.
+    List {
+        /// Reply channel; `bounded(1)`, send never blocks.
+        reply: Sender<String>,
+    },
     /// `status` request (doc §4.2): the app answers with an immutable
     /// snapshot; the server does the byte formatting.
     Status {

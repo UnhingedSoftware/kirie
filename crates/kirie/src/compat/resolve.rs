@@ -24,6 +24,25 @@ const STEAM_WORKSHOP_ROOTS: [&str; 4] = [
     "snap/steam/common/.local/share/Steam/steamapps/workshop/content",
 ];
 
+/// Every Wallpaper Engine workshop content directory that exists on this
+/// machine, in the same priority order [`translate_background`] probes.
+///
+/// One entry per Steam installation shape (native, `.steam` symlink tree,
+/// Flatpak, Snap); most machines have exactly one. Returns the
+/// `.../content/431960` directories themselves, so callers enumerate item
+/// folders by reading them.
+#[must_use]
+pub fn workshop_dirs() -> Vec<PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Vec::new();
+    };
+    STEAM_WORKSHOP_ROOTS
+        .iter()
+        .map(|root| home.join(root).join(WORKSHOP_APP_ID))
+        .filter(|dir| dir.is_dir())
+        .collect()
+}
+
 /// The C++ `translateBackground` (doc §3.4).
 ///
 /// * A value containing `/` is used as a filesystem path verbatim (relative
@@ -115,8 +134,14 @@ impl Wallpaper {
     pub fn unrunnable_reason(&self) -> Option<String> {
         match self {
             Wallpaper::Video { .. } | Wallpaper::Image { .. } | Wallpaper::Scene { .. } => None,
-            // Web runnability is feature-dependent; `compat/run.rs` owns the
-            // precise per-build message. This default covers the no-web build.
+            // Web runnability is feature-dependent, so it must be decided here
+            // rather than assumed: `kirie list` reports this verbatim, and a
+            // hardcoded "no web build" answer would hide every web wallpaper
+            // from a picker on a binary that renders them perfectly well.
+            // `compat/run.rs` still owns the longer per-screen launch message.
+            #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+            Wallpaper::Web { .. } => None,
+            #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
             Wallpaper::Web { .. } => Some(
                 "web wallpapers need a web build (rebuild with --features web-cef or --features web-webview)"
                     .to_owned(),

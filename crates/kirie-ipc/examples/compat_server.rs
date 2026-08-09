@@ -22,6 +22,11 @@ fn main() {
     let mut speed = 1.0f32;
     for event in rx {
         match event {
+            // The demo server has no workshop discovery of its own; the real
+            // app answers this from `kirie list`.
+            IpcEvent::List { reply } => {
+                let _ = reply.send("[]".to_owned());
+            }
             IpcEvent::Status { reply } => {
                 let _ = reply.send(StatusSnapshot {
                     speed,

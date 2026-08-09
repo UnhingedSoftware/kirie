@@ -21,6 +21,7 @@ pub mod compat;
 pub mod detect;
 pub mod extract;
 pub mod info;
+pub mod list;
 pub mod soak;
 
 use std::ffi::OsString;
@@ -56,6 +57,16 @@ enum Command {
         /// Optional wallpaper to validate (workshop item dir, or a media file).
         /// Omit to check only the environment (GPU, WE base assets, web backend).
         path: Option<PathBuf>,
+    },
+    /// List the Wallpaper Engine items installed on this machine
+    List {
+        /// Workshop content directory to read instead of probing Steam's
+        /// standard locations
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
     },
     /// Extract a scene.pkg's entries, or decode a .tex to PNG(s)
     Extract {
@@ -100,7 +111,9 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             println!(concat!("kirie ", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
-        Some(sub) if sub == "info" || sub == "extract" || sub == "check" => run_subcommand(args),
+        Some(sub) if sub == "info" || sub == "extract" || sub == "check" || sub == "list" => {
+            run_subcommand(args)
+        }
         _ => compat::run(&args),
     }
 }
@@ -127,6 +140,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             output,
             tex_to_png,
         } => extract::run(&path, &output, tex_to_png),
+        Command::List { dir, json } => list::run(dir.as_deref(), json),
         Command::Check { .. } => unreachable!("handled above"),
     };
     match result {

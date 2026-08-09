@@ -218,6 +218,11 @@ fn handle_event(state: &mut AppState, event: IpcEvent) {
             };
             let _ = reply.send(snapshot);
         }
+        IpcEvent::List { reply } => {
+            // Discovery lives in one place (`crate::list`), so the socket and
+            // `kirie list` can never disagree about what is installed.
+            let _ = reply.send(crate::list::to_json(&crate::list::scan(None)));
+        }
         IpcEvent::GetProperties { screen, reply } => {
             // kirie extension (docs/compat-socket.md §11): report the selected
             // screen's property schema with the recorded overrides folded into

@@ -38,6 +38,11 @@ pub enum Request {
         /// Screen key to report, or `None` for the default screen.
         screen: Option<String>,
     },
+    /// `list` → single-line JSON array of the Wallpaper Engine items installed
+    /// on this machine (docs/compat-socket.md §12). A **kirie extension**, like
+    /// `getproperties`: it exists so a shell that already talks to the engine
+    /// does not have to rediscover Steam's workshop layout for itself.
+    List,
     /// A recognized command, forwarded to the app as an [`crate::IpcEvent`].
     Command(Command),
     /// Recognized command with an argument the C++ app would reject with
@@ -484,6 +489,7 @@ pub fn parse_request(line: &[u8]) -> Request {
         b"ping" => Request::Ping,
         b"status" => Request::Status,
         // kirie extension (docs/compat-socket.md §11): optional screen token.
+        b"list" => Request::List,
         b"getproperties" => Request::GetProperties {
             screen: cur.token().map(|t| String::from_utf8_lossy(t).into_owned()),
         },

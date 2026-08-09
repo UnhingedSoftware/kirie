@@ -86,6 +86,11 @@ impl MockApp {
             let mut props: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
             for event in rx {
                 match event {
+                    // Discovery belongs to the app, not the socket layer; the
+                    // fake app under test has nothing installed to report.
+                    IpcEvent::List { reply } => {
+                        let _ = reply.send("[]".to_owned());
+                    }
                     IpcEvent::Status { reply } => {
                         let _ = reply.send(StatusSnapshot {
                             speed,

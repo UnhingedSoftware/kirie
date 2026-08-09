@@ -224,6 +224,15 @@ fn respond(line: &[u8], events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             let snapshot = rx.recv().ok()?;
             Some(format_status(&snapshot))
         }
+        Request::List => {
+            // Same framing contract as `getproperties`: the app owns the JSON,
+            // the server owns the newline.
+            let (tx, rx) = bounded(1);
+            events.send(IpcEvent::List { reply: tx }).ok()?;
+            let mut body = rx.recv().ok()?.into_bytes();
+            body.push(b'\n');
+            Some(body)
+        }
         Request::GetProperties { screen } => {
             // kirie extension (docs/compat-socket.md §11): the app returns the
             // JSON schema body; we frame it with exactly one trailing newline.
