@@ -11,6 +11,7 @@ import pathlib
 import sys
 
 SITE = pathlib.Path(__file__).parent
+SCHEMA = 1
 STATUSES = {"works", "partial", "broken", "asset"}
 TYPES = {"scene", "video", "web", "image", "asset", "application", "unknown"}
 FIELDS = {"id", "title", "type", "status", "notes"}
@@ -63,6 +64,10 @@ def main():
     if not isinstance(entries, list):
         print("wallpapers.json has no `wallpapers` array", file=sys.stderr)
         return 1
+    # Consumers fetch this file directly and branch on `schema`, so dropping or
+    # bumping it by accident breaks them silently.
+    if data.get("schema") != SCHEMA:
+        errors.append(f"schema must be {SCHEMA} (found {data.get('schema')!r})")
 
     seen = {}
     for index, entry in enumerate(entries):

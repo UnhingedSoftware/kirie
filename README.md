@@ -27,6 +27,24 @@ More, with per-item notes, on the
 `kirie list` reports what is installed locally, including whether this build can
 render each item.
 
+**Add a wallpaper to the list**: [report it in an
+issue](https://github.com/UnhingedSoftware/kirie/issues/new?template=wallpaper-report.yml)
+(no repo checkout needed), or edit
+[`site/wallpapers.json`](site/wallpapers.json) and open a pull request. Working
+wallpapers are as useful to file as broken ones. Run `python3 site/validate.py`
+first; CI runs the same check.
+
+**Read the list from your own code**: it is one static file, served with
+`Access-Control-Allow-Origin: *`, so there is no API to sign up for:
+
+```sh
+curl -s https://unhingedsoftware.github.io/kirie/wallpapers.json \
+  | jq -r '.wallpapers[] | select(.status == "works") | .id'
+```
+
+Branch on the top-level `schema` field — it is bumped if the entry shape ever
+changes.
+
 ## Build
 
 Rust (stable) plus the system libraries the workspace links against.

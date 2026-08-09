@@ -1,4 +1,5 @@
 {
+  "schema": 1,
   "_comment": "Compatibility list for https://unhingedsoftware.github.io/kirie/. One entry per tested item. `status`: works | partial | broken | asset (an effect or preset used to build wallpapers, not a wallpaper itself); partial and broken must say what is wrong in `notes`. Screenshots are optional and live at shots/<id>.jpg -- they must be kirie's own render (`kirie --bg <dir> --screenshot out.png`), not the Workshop preview art. Run `python3 site/validate.py` before opening a pull request; CI runs the same check.",
   "wallpapers": [
     {

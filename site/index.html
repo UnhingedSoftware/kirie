@@ -121,6 +121,14 @@
       not the Workshop preview art. This page redeploys on merge.
     </p>
     <p>
+      <strong>Reading the list from your own code?</strong> This page is only a
+      viewer — the data is one static file, served with
+      <code>Access-Control-Allow-Origin: *</code>, so fetch it directly:
+      <code>curl -s https://unhingedsoftware.github.io/kirie/wallpapers.json</code>.
+      Branch on the top-level <code>schema</code> field; it is bumped if the
+      entry shape ever changes.
+    </p>
+    <p>
       Statuses: <code>works</code> renders correctly · <code>partial</code>
       renders with visible problems (say which in <code>notes</code>) ·
       <code>broken</code> fails to load or renders wrong ·
