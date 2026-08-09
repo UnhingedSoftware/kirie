@@ -24,7 +24,8 @@ pub struct Item {
     pub id: String,
     /// `project.json` title, or the id when the manifest has none.
     pub title: String,
-    /// `scene` / `video` / `web` / `image` / `application` / `unknown`.
+    /// `scene` / `video` / `web` / `image` / `asset` / `application` /
+    /// `unknown`.
     pub kind: &'static str,
     /// The item directory.
     pub dir: PathBuf,
@@ -32,6 +33,10 @@ pub struct Item {
     pub preview: Option<PathBuf>,
     /// Whether **this build** can render it: a web item needs a web backend,
     /// and application wallpapers are unsupported everywhere.
+    ///
+    /// False on an `asset` too, but for a different reason — an effect preset
+    /// is a building block for wallpapers, not one itself. Consumers that
+    /// report failures should read `kind` before calling this a problem.
     pub renderable: bool,
     /// Why not, when `renderable` is false.
     pub reason: Option<String>,
@@ -86,6 +91,10 @@ fn describe(dir: &Path) -> Option<Item> {
     // `kind` and `renderable` cannot drift from what actually happens on load.
     let classified = resolve::classify(&dir.to_string_lossy()).ok();
     let kind = match (&classified, &project) {
+        // An asset resolves by extension to a scene, so it has to be matched
+        // ahead of one — calling it a scene would present an effect preset as
+        // a wallpaper that failed to load.
+        (Some(Wallpaper::Asset), _) => "asset",
         (Some(Wallpaper::Scene { .. }), _) => "scene",
         (Some(Wallpaper::Video { .. }), _) => "video",
         (Some(Wallpaper::Web { .. }), _) => "web",
@@ -193,7 +202,13 @@ pub fn run(root: Option<&Path>, json: bool) -> Result<()> {
 
     let width = items.iter().map(|i| i.id.len()).max().unwrap_or(0);
     for item in &items {
-        let mark = if item.renderable { ' ' } else { '!' };
+        // Assets are non-renderable by design, so they get their own marker:
+        // flagging them like a failure reads as "kirie cannot open this".
+        let mark = match (item.renderable, item.kind) {
+            (true, _) => ' ',
+            (false, "asset") => '-',
+            (false, _) => '!',
+        };
         println!(
             "{mark} {:width$}  {:<11} {}",
             item.id,
@@ -202,10 +217,19 @@ pub fn run(root: Option<&Path>, json: bool) -> Result<()> {
             width = width
         );
     }
-    let skipped = items.iter().filter(|i| !i.renderable).count();
-    if skipped > 0 {
-        println!("\n{skipped} item(s) marked ! cannot be rendered by this build:");
-        for item in items.iter().filter(|i| !i.renderable) {
+
+    let assets = items.iter().filter(|i| i.kind == "asset").count();
+    if assets > 0 {
+        println!("\n{assets} item(s) marked - are assets (effects, presets) used to build");
+        println!("wallpapers, not wallpapers themselves.");
+    }
+    let failed: Vec<&Item> = items
+        .iter()
+        .filter(|i| !i.renderable && i.kind != "asset")
+        .collect();
+    if !failed.is_empty() {
+        println!("\n{} item(s) marked ! cannot be rendered:", failed.len());
+        for item in failed {
             if let Some(reason) = &item.reason {
                 println!("  {}: {reason}", item.id);
             }
