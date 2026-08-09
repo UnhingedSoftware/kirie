@@ -20,6 +20,7 @@ pub mod check;
 pub mod compat;
 pub mod detect;
 pub mod extract;
+pub mod gpus;
 pub mod info;
 pub mod list;
 pub mod soak;
@@ -57,6 +58,12 @@ enum Command {
         /// Optional wallpaper to validate (workshop item dir, or a media file).
         /// Omit to check only the environment (GPU, WE base assets, web backend).
         path: Option<PathBuf>,
+    },
+    /// List the GPUs kirie can render on (values accepted by `--gpu`)
+    Gpus {
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
     },
     /// List the Wallpaper Engine items installed on this machine
     List {
@@ -111,7 +118,9 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             println!(concat!("kirie ", env!("CARGO_PKG_VERSION")));
             ExitCode::SUCCESS
         }
-        Some(sub) if sub == "info" || sub == "extract" || sub == "check" || sub == "list" => {
+        Some(sub)
+            if sub == "info" || sub == "extract" || sub == "check" || sub == "list" || sub == "gpus" =>
+        {
             run_subcommand(args)
         }
         _ => compat::run(&args),
@@ -141,6 +150,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             tex_to_png,
         } => extract::run(&path, &output, tex_to_png),
         Command::List { dir, json } => list::run(dir.as_deref(), json),
+        Command::Gpus { json } => gpus::run(json),
         Command::Check { .. } => unreachable!("handled above"),
     };
     match result {
