@@ -254,7 +254,7 @@ impl AudioCapture {
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .filter(|b: &f32| b.is_finite() && *b >= 0.0)
-            .unwrap_or(1.0)
+            .unwrap_or(0.25)
             .min(64.0);
         let tick = config.tick;
 
