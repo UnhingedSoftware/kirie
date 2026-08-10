@@ -42,8 +42,10 @@ globalThis.engine = {
   get frametime() { return __host.frametime; },
   get runtime() { return __host.runtime; },
   get timeOfDay() { return __host.timeOfDay; },
-  get screenResolution() { return { x: __host.resX, y: __host.resY }; },
-  get canvasSize() { return { x: __host.resX, y: __host.resY }; },
+  // Real Vec2 instances (d.ts) — scripts call vector methods on these
+  // (`engine.screenResolution.divide(2)`), which a plain {x,y} lacks.
+  get screenResolution() { return new Vec2(__host.resX, __host.resY); },
+  get canvasSize() { return new Vec2(__host.resX, __host.resY); },
   get userProperties() { var o = {}; for (var k in __host.userProps) o[k] = __host.userProps[k]; return o; },
   AUDIO_RESOLUTION_16: 16, AUDIO_RESOLUTION_32: 32, AUDIO_RESOLUTION_64: 64,
   isWallpaper: function () { return true; },

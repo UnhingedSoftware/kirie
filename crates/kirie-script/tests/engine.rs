@@ -273,6 +273,27 @@ fn cursor_screen_position_is_in_pixels() {
     }
 }
 
+/// `engine.screenResolution`/`canvasSize` are real `Vec2`s (d.ts), so vector
+/// methods work on them.
+#[test]
+fn screen_resolution_and_canvas_size_are_vec2() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "export function update(v){
+            var ok = engine.screenResolution instanceof Vec2 && engine.canvasSize instanceof Vec2;
+            return ok ? engine.screenResolution.divide(2).x : -1;
+        }",
+        Some(7),
+        ScriptValue::Float(0.0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    // QuickJS surfaces integer-valued numbers as Int.
+    assert_eq!(out.property_results[0].1, ScriptValue::Int(960));
+}
+
 // ---- cursor events (d.ts ScriptModule / ILayer.solid) ---------------------
 
 const CURSOR_LOG_SCRIPT: &str = "var log = [];
