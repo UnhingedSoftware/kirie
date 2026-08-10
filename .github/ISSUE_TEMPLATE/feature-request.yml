@@ -1,0 +1,42 @@
+name: Feature request
+description: Something kirie should do that it does not do yet
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The problem, not the solution — it often has a shorter fix.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like kirie to do
+    validations:
+      required: true
+
+  - type: dropdown
+    id: reference
+    attributes:
+      label: Does Wallpaper Engine on Windows do this?
+      description: |
+        kirie aims to match the original's behaviour, so a feature that already
+        exists there is a compatibility gap and gets priority over a new idea.
+        Both are welcome — this only decides how it is tracked.
+      options:
+        - "Yes — Wallpaper Engine does this and kirie does not"
+        - "Yes — linux-wallpaperengine does this and kirie does not"
+        - "No — this would be new"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: What you do instead today
+      description: Workarounds, other tools, or why none of them fit.
+    validations:
+      required: false

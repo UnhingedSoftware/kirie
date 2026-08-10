@@ -1,0 +1,60 @@
+name: Build or install problem
+description: kirie will not build, will not start, or is missing a library
+labels: ["packaging"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        `kirie check` names the missing piece for most startup failures — run it
+        first, and paste the output below either way.
+
+  - type: dropdown
+    id: how
+    attributes:
+      label: How you installed it
+      options:
+        - kirie-linux-x86_64 (release tarball)
+        - kirie-web-cef-linux-x86_64 (release tarball)
+        - kirie-web-webview-linux-x86_64 (release tarball)
+        - cargo build from source
+        - distro package
+    validations:
+      required: true
+
+  - type: input
+    id: distro
+    attributes:
+      label: Distro and version
+      placeholder: Debian 12, Fedora 41, Ubuntu 22.04
+    validations:
+      required: true
+
+  - type: textarea
+    id: error
+    attributes:
+      label: What failed
+      description: |
+        The full error. For a build failure include the `cargo` command and the
+        first error, not just the last line. For a missing library include the
+        loader message verbatim (`error while loading shared libraries: …`).
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: kirie check
+      description: Output of `kirie check`, if the binary runs at all.
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: rust
+    attributes:
+      label: Rust version
+      description: Output of `rustc --version` — source builds only.
+      placeholder: rustc 1.85.0
+    validations:
+      required: false

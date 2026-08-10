@@ -1,0 +1,83 @@
+name: Bug report
+description: kirie crashes, hangs, ignores a flag, or burns CPU/GPU/memory
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a *specific wallpaper* that renders wrong, use the
+        [wallpaper compatibility report](https://github.com/UnhingedSoftware/kirie/issues/new?template=wallpaper-report.yml)
+        instead —
+        it feeds the [compatibility list](https://unhingedsoftware.github.io/kirie/).
+        This form is for kirie itself misbehaving.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: The exact command line, and anything needed to trigger it.
+      render: shell
+      placeholder: |
+        kirie --screen-root DP-1 --fps 30 3421423611
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `kirie --version`.
+      placeholder: kirie 0.3.1
+    validations:
+      required: true
+
+  - type: dropdown
+    id: variant
+    attributes:
+      label: Build
+      options:
+        - kirie-linux-x86_64 (release tarball)
+        - kirie-web-cef-linux-x86_64 (release tarball)
+        - kirie-web-webview-linux-x86_64 (release tarball)
+        - built from source
+        - distro package
+    validations:
+      required: true
+
+  - type: textarea
+    id: check
+    attributes:
+      label: kirie check
+      description: |
+        Output of `kirie check` — it reports the GPU, the Wallpaper Engine base
+        assets and the web backend in one go.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: desktop
+    attributes:
+      label: Distro and compositor
+      placeholder: Arch, Hyprland 0.51
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: |
+        Re-run with `RUST_LOG=debug` and paste the relevant part. For a crash,
+        include the panic message and backtrace (`RUST_BACKTRACE=1`).
+      render: shell
+    validations:
+      required: false

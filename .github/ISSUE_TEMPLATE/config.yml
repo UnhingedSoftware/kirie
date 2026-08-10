@@ -2,4 +2,7 @@ blank_issues_enabled: true
 contact_links:
   - name: Wallpaper compatibility list
     url: https://unhingedsoftware.github.io/kirie/
-    about: Check whether a wallpaper is already listed before reporting it.
+    about: Check whether a wallpaper is already listed, and what it does in kirie.
+  - name: Is it a missing feature or a bug?
+    url: https://github.com/UnhingedSoftware/kirie/blob/main/README.md
+    about: kirie is a reimplementation, so parts of Wallpaper Engine are not built yet — the README says what is covered.
