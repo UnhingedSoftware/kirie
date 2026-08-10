@@ -36,6 +36,21 @@ const STREAM_NAME: &str = "output monitor";
 /// cheap introspection round-trips.
 const RESELECT_INTERVAL: Duration = Duration::from_secs(2);
 
+/// The level scale applied to captured samples (`KIRIE_AUDIO_BOOST`).
+///
+/// Read in one place because two consumers must agree on it: the fold scales
+/// the samples, and the noise gate's threshold has to scale with them —
+/// otherwise a boost below 1 parks the signal *at* the gate and playback
+/// flips between all-zero and full frames instead of moving smoothly.
+pub(crate) fn resolved_boost() -> f32 {
+    std::env::var("KIRIE_AUDIO_BOOST")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|b: &f32| b.is_finite() && *b >= 0.0)
+        .unwrap_or(0.15)
+        .min(64.0)
+}
+
 /// Drive one `iterate` step, mapping quit/err to a typed error.
 fn pump(mainloop: &mut Mainloop) -> Result<(), AudioError> {
     match mainloop.iterate(false) {
@@ -379,12 +394,7 @@ fn open_stream(
         let mut carry: Option<u8> = None;
         let mut scratch: Vec<i16> = Vec::new();
         let mut folded: Vec<u8> = Vec::new();
-        let boost: f32 = std::env::var("KIRIE_AUDIO_BOOST")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|b: &f32| b.is_finite() && *b >= 0.0)
-            .unwrap_or(4.0)
-            .min(64.0);
+        let boost = resolved_boost();
         stream
             .borrow_mut()
             .set_read_callback(Some(Box::new(move |_nbytes| {
@@ -415,13 +425,13 @@ fn open_stream(
                             // background-volume music produced full-height
                             // spikes 24/7.
                             //
-                            // The boost exists because only the top 8 of 16
-                            // bits survive the fold: a desktop listening at a
-                            // low software volume lands at a few percent of
-                            // full scale, which truncates to almost nothing.
-                            // A small constant multiplier keeps that visible
-                            // while staying linear in volume. Override with
-                            // KIRIE_AUDIO_BOOST (1.0 = faithful raw).
+                            // The tap is forced to 100%, so what arrives is
+                            // the stream's full digital level — most desktops
+                            // attenuate in hardware after that point, so raw
+                            // full scale reads far louder than what the user
+                            // hears. Scale down to a calm default; override
+                            // with KIRIE_AUDIO_BOOST (1.0 = faithful raw,
+                            // higher amplifies a genuinely quiet stream).
                             let gain = boost;
                             folded.clear();
                             folded.reserve(scratch.len());

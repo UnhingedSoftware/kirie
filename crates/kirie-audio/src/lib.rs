@@ -243,7 +243,11 @@ impl AudioCapture {
 
         let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
         let device = config.device.clone();
-        let gate = config.resolved_gate();
+        // The gate threshold tracks the boost: samples are scaled before the
+        // DSP sees them, so an unscaled gate would sit proportionally higher
+        // the quieter the boost — at low boosts the music parks exactly at the
+        // threshold and the spectrum flips between silence and full frames.
+        let gate = config.resolved_gate() * capture::resolved_boost().min(1.0);
         let tick = config.tick;
 
         // SPSC ring: producer → capture thread, consumer → worker thread (V3).

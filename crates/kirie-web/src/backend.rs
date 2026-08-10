@@ -300,6 +300,12 @@ pub fn gpu_offload_env() -> Vec<(&'static str, String)> {
     // so the webview host lands on the same GPU the engine renders on.
     if let Some(node) = render_node_for_vendor(vendor_id) {
         env.push(("WEBKIT_WEB_RENDER_DEVICE_FILE", node));
+        // Opening the node is not the same as painting on it: Skia falls back
+        // to CPU raster on drivers it distrusts and still allocates its
+        // buffers from the node, which looks GPU-bound in `lsof` while every
+        // pixel is drawn by the CPU. Painting was explicitly requested onto
+        // this device, so turn the CPU fallback off with it.
+        env.push(("WEBKIT_SKIA_ENABLE_CPU_RENDERING", "0".to_owned()));
     }
     env
 }
