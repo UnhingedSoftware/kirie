@@ -15,7 +15,13 @@ use smithay_client_toolkit::reexports::calloop_wayland_source::WaylandSource;
 use std::collections::HashMap;
 
 use crate::renderer::RenderCommand;
+use smithay_client_toolkit::reexports::protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{self, WpCursorShapeDeviceV1},
+    wp_cursor_shape_manager_v1::WpCursorShapeManagerV1,
+};
 use smithay_client_toolkit::registry::{ProvidesRegistryState, RegistryState};
+use smithay_client_toolkit::seat::pointer::{PointerEvent, PointerEventKind, PointerHandler};
+use smithay_client_toolkit::seat::{Capability, SeatHandler, SeatState};
 use smithay_client_toolkit::shell::WaylandSurface;
 use smithay_client_toolkit::shell::wlr_layer::{
     Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface, LayerSurfaceConfigure,
@@ -23,8 +29,10 @@ use smithay_client_toolkit::shell::wlr_layer::{
 use smithay_client_toolkit::{
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, registry_handlers,
 };
+use smithay_client_toolkit::{delegate_pointer, delegate_seat};
 use wayland_client::globals::registry_queue_init;
 use wayland_client::protocol::{wl_output, wl_surface};
+use wayland_client::protocol::{wl_pointer, wl_seat};
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, event_created_child};
 use wayland_protocols_wlr::foreign_toplevel::v1::client::{
     zwlr_foreign_toplevel_handle_v1::{self, ZwlrForeignToplevelHandleV1},
@@ -147,6 +155,19 @@ struct PlatformState {
     preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
     /// Global cursor poller (T26; Hyprland IPC — inert elsewhere).
     pointer: crate::pointer::PointerPoll,
+    /// Wayland seat plumbing for pointer button input (see
+    /// [`crate::pointer::PointerButtons`] for why buttons come from the seat
+    /// while position keeps the IPC poll: the poll sees the cursor everywhere,
+    /// the seat only over the wallpaper — each is right for its half).
+    seat_state: SeatState,
+    /// cursor-shape-v1 manager, when the compositor offers it. Without an
+    /// explicit shape the compositor may keep the previous app's cursor image
+    /// while hovering the wallpaper.
+    cursor_shape: Option<WpCursorShapeManagerV1>,
+    /// Live pointers with their cursor-shape devices.
+    pointers: Vec<(wl_pointer::WlPointer, Option<WpCursorShapeDeviceV1>)>,
+    /// Shared button state the frame path reads.
+    buttons: crate::pointer::PointerButtons,
     /// Supplies the off-thread launch-time build for an output (P1.6); `None`
     /// (or a `None` result) keeps that output on the synchronous factory.
     initial_build: Option<crate::renderer::InitialBuildFn>,
@@ -211,6 +232,10 @@ impl WaylandPlatform {
         let compositor_state = CompositorState::bind(&globals, &qh)?;
         let layer_shell = LayerShell::bind(&globals, &qh)?;
         let output_state = OutputState::new(&globals, &qh);
+        let seat_state = SeatState::new(&globals, &qh);
+        // Optional: absent on compositors without cursor-shape-v1; hovering
+        // then shows whatever cursor the compositor decides.
+        let cursor_shape: Option<WpCursorShapeManagerV1> = globals.bind(&qh, 1..=1, ()).ok();
         let registry_state = RegistryState::new(&globals);
 
         let event_loop = EventLoop::try_new()?;
@@ -296,6 +321,10 @@ impl WaylandPlatform {
                 cmd_tx,
                 preloaded: HashMap::new(),
                 pointer: crate::pointer::PointerPoll::start(),
+                seat_state,
+                cursor_shape,
+                pointers: Vec::new(),
+                buttons: crate::pointer::PointerButtons::default(),
                 initial_build: None,
                 loop_handle,
                 toplevels,
@@ -1182,6 +1211,7 @@ impl PlatformState {
                 renderer.set_pointer(nx as f32, ny as f32);
             }
         }
+        renderer.set_pointer_buttons(self.buttons.left());
 
         renderer.render(&view, ctx.physical_size, dt);
 
@@ -1537,9 +1567,117 @@ impl ProvidesRegistryState for PlatformState {
         &mut self.registry_state
     }
 
-    registry_handlers![OutputState];
+    registry_handlers![OutputState, SeatState];
 }
 
+impl SeatHandler for PlatformState {
+    fn seat_state(&mut self) -> &mut SeatState {
+        &mut self.seat_state
+    }
+
+    fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+
+    fn new_capability(
+        &mut self,
+        _conn: &Connection,
+        qh: &QueueHandle<Self>,
+        seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability != Capability::Pointer {
+            return;
+        }
+        let Ok(pointer) = self.seat_state.get_pointer(qh, &seat) else {
+            return;
+        };
+        let device = self
+            .cursor_shape
+            .as_ref()
+            .map(|mgr| mgr.get_pointer(&pointer, qh, ()));
+        self.pointers.push((pointer, device));
+    }
+
+    fn remove_capability(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        _seat: wl_seat::WlSeat,
+        capability: Capability,
+    ) {
+        if capability == Capability::Pointer {
+            for (pointer, device) in self.pointers.drain(..) {
+                if let Some(d) = device {
+                    d.destroy();
+                }
+                pointer.release();
+            }
+            self.buttons.set_left(false);
+        }
+    }
+
+    fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+}
+
+impl PointerHandler for PlatformState {
+    fn pointer_frame(
+        &mut self,
+        _conn: &Connection,
+        _qh: &QueueHandle<Self>,
+        pointer: &wl_pointer::WlPointer,
+        events: &[PointerEvent],
+    ) {
+        /// Linux evdev BTN_LEFT.
+        const BTN_LEFT: u32 = 0x110;
+        for event in events {
+            match event.kind {
+                PointerEventKind::Enter { serial } => {
+                    // The wallpaper never wants a special cursor; an explicit
+                    // Default keeps the compositor from freezing the previous
+                    // client's image while over the desktop.
+                    if let Some(device) = self
+                        .pointers
+                        .iter()
+                        .find(|(p, _)| p == pointer)
+                        .and_then(|(_, d)| d.as_ref())
+                    {
+                        device.set_shape(serial, wp_cursor_shape_device_v1::Shape::Default);
+                    }
+                }
+                PointerEventKind::Leave { .. } => self.buttons.set_left(false),
+                PointerEventKind::Press { button: BTN_LEFT, .. } => self.buttons.set_left(true),
+                PointerEventKind::Release { button: BTN_LEFT, .. } => self.buttons.set_left(false),
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for PlatformState {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeManagerV1,
+        _: <WpCursorShapeManagerV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, ()> for PlatformState {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeDeviceV1,
+        _: <WpCursorShapeDeviceV1 as Proxy>::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+delegate_seat!(PlatformState);
+delegate_pointer!(PlatformState);
 delegate_compositor!(PlatformState);
 delegate_output!(PlatformState);
 delegate_layer!(PlatformState);

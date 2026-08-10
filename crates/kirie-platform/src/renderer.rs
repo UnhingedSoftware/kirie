@@ -127,6 +127,11 @@ pub trait Renderer {
     /// parallax, SceneScript `pointer_screen` and the web backend's mouse.
     fn set_pointer(&mut self, _x: f32, _y: f32) {}
 
+    /// Pointer button state (T26/SceneScript cursor events). `left_down` is
+    /// true only while the cursor is over the wallpaper surface itself —
+    /// clicks on windows never reach here, matching the reference.
+    fn set_pointer_buttons(&mut self, _left_down: bool) {}
+
     /// Hand back a still of what this renderer is *currently showing*, as raw
     /// 32-bit pixels, so the platform can leave that image on the surface when
     /// the renderer itself is torn down (`--release-hidden-after`).

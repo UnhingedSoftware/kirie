@@ -12,8 +12,33 @@
 //! `None`; consumers fall back to the centered pointer they used before.
 
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
+
+/// Pointer button state, fed by the Wayland seat listener.
+///
+/// Buttons arrive only while the cursor is over the wallpaper surface — that
+/// is, over bare desktop — which is exactly the reference's semantics: a
+/// click on a window belongs to the window, a click on the desktop belongs
+/// to the wallpaper.
+#[derive(Clone, Default)]
+pub struct PointerButtons {
+    left: Arc<AtomicBool>,
+}
+
+impl PointerButtons {
+    /// Whether the left button is currently held over the wallpaper.
+    #[must_use]
+    pub fn left(&self) -> bool {
+        self.left.load(Ordering::Relaxed)
+    }
+
+    /// Record a left-button transition (seat listener only).
+    pub(crate) fn set_left(&self, down: bool) {
+        self.left.store(down, Ordering::Relaxed);
+    }
+}
 
 /// Shared global cursor position (logical coordinates), `None` until the first
 /// successful poll (or forever, off Hyprland).
