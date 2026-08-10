@@ -1932,6 +1932,14 @@ impl Renderer for SceneRenderer {
             if let Some(f) = newest
                 && (f.width, f.height) == vt.size
             {
+                // NV12 frames convert on the GPU (see texture::Nv12Rig); RGBA
+                // frames (non-NV12 streams) upload directly as before.
+                if f.pixels == kirie_video::FramePixels::Nv12 {
+                    if let Some(rig) = &vt.nv12 {
+                        rig.convert(&self.device, &self.queue, f.width, f.height, &f.data);
+                    }
+                    continue;
+                }
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
                         texture: &vt.gpu.texture,

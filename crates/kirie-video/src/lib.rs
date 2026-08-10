@@ -46,7 +46,7 @@ mod player;
 mod renderer;
 mod scaling;
 
-pub use decode::{DecodedFrame, FRAME_QUEUE_CAP, VideoInfo};
+pub use decode::{DecodedFrame, FRAME_QUEUE_CAP, FramePixels, VideoInfo};
 pub use error::VideoError;
 pub use pacing::{LoopTimeline, Pacer, PacerStats, Timed};
 pub use player::{VideoControl, VideoOptions, VideoPlayer};

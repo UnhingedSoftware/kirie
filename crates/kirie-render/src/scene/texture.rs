@@ -57,6 +57,285 @@ type TextureCell = std::sync::Arc<std::sync::OnceLock<Option<std::sync::Arc<GpuT
 /// A live video-backed `.tex`: the decode thread keeps producing frames and the
 /// renderer streams the newest into `gpu.texture` each frame (the reference
 /// plays these; a frozen first frame was the 3445942378 divergence).
+/// GPU-side NV12 → RGBA conversion for one video texture.
+///
+/// The decode thread hands NV12 planes straight through
+/// ([`kirie_video::FramePixels::Nv12`]); this rig uploads them into an R8 luma
+/// texture and an RG8 half-resolution chroma texture and runs a fullscreen
+/// pass writing the converted color into the RGBA texture every material pass
+/// already binds. What it buys: the CPU never touches pixels again — the
+/// `sws_scale` RGBA conversion was the decode thread's dominant cost once
+/// VAAPI took over the actual decode (most of a core for one 4K stream).
+pub struct Nv12Rig {
+    y: wgpu::Texture,
+    uv: wgpu::Texture,
+    bind: wgpu::BindGroup,
+    pipeline: std::sync::Arc<wgpu::RenderPipeline>,
+    target_view: wgpu::TextureView,
+}
+
+/// BT.709 limited-range NV12 → RGBA, fullscreen triangle.
+const NV12_WGSL: &str = r#"
+@group(0) @binding(0) var yt: texture_2d<f32>;
+@group(0) @binding(1) var uvt: texture_2d<f32>;
+@group(0) @binding(2) var s: sampler;
+struct VOut { @builtin(position) pos: vec4f, @location(0) uv: vec2f }
+@vertex fn vs(@builtin(vertex_index) i: u32) -> VOut {
+  var p = array<vec2f, 3>(vec2f(-1.0, -3.0), vec2f(-1.0, 1.0), vec2f(3.0, 1.0));
+  var o: VOut;
+  let q = p[i];
+  o.pos = vec4f(q, 0.0, 1.0);
+  o.uv = vec2f((q.x + 1.0) * 0.5, 1.0 - (q.y + 1.0) * 0.5);
+  return o;
+}
+@fragment fn fs(in: VOut) -> @location(0) vec4f {
+  let y = textureSample(yt, s, in.uv).r;
+  let uv = textureSample(uvt, s, in.uv).rg - vec2f(0.5, 0.5);
+  let yl = (y - 16.0 / 255.0) * (255.0 / 219.0);
+  let u = uv.x * (255.0 / 224.0);
+  let v = uv.y * (255.0 / 224.0);
+  let rgb = vec3f(yl + 1.5748 * v, yl - 0.1873 * u - 0.4681 * v, yl + 1.8556 * u);
+  return vec4f(clamp(rgb, vec3f(0.0), vec3f(1.0)), 1.0);
+}
+"#;
+
+impl Nv12Rig {
+    /// Build the rig for a `w`×`h` video whose passes bind `target`.
+    fn new(
+        device: &wgpu::Device,
+        pipeline: std::sync::Arc<wgpu::RenderPipeline>,
+        target: &GpuTexture,
+        w: u32,
+        h: u32,
+    ) -> Self {
+        let plane = |width: u32, height: u32, format: wgpu::TextureFormat, label: &str| {
+            device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let y = plane(w, h, wgpu::TextureFormat::R8Unorm, "kirie-nv12-y");
+        let uv = plane(w / 2, h / 2, wgpu::TextureFormat::Rg8Unorm, "kirie-nv12-uv");
+        let y_view = y.create_view(&wgpu::TextureViewDescriptor::default());
+        let uv_view = uv.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("kirie-nv12-bind"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&y_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&uv_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let target_view = target
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            y,
+            uv,
+            bind,
+            pipeline,
+            target_view,
+        }
+    }
+
+    /// Upload one NV12 frame's planes and convert into the bound RGBA target.
+    pub fn convert(&self, device: &wgpu::Device, queue: &wgpu::Queue, w: u32, h: u32, data: &[u8]) {
+        let y_bytes = (w * h) as usize;
+        let uv_bytes = (w * (h / 2)) as usize;
+        if data.len() < y_bytes + uv_bytes {
+            return; // malformed frame: keep the previous picture (V9)
+        }
+        let write = |tex: &wgpu::Texture, bytes: &[u8], row: u32, height: u32| {
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+                wgpu::Extent3d {
+                    width: tex.width(),
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        };
+        write(&self.y, &data[..y_bytes], w, h);
+        write(&self.uv, &data[y_bytes..y_bytes + uv_bytes], w, h / 2);
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("kirie-nv12-convert"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("kirie-nv12-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.target_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, &self.bind, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        queue.submit([encoder.finish()]);
+    }
+}
+
+/// Upload a video frame's RGBA target texture: identical to [`upload_rgba8`]
+/// except the usage includes `RENDER_ATTACHMENT`, because the NV12 rig renders
+/// converted frames into it.
+#[allow(clippy::too_many_arguments)]
+fn upload_video_target(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    name: &str,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+    nearest: bool,
+    clamp: bool,
+) -> GpuTexture {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(name),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_DST
+            | wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let filter = if nearest {
+        wgpu::FilterMode::Nearest
+    } else {
+        wgpu::FilterMode::Linear
+    };
+    let address = if clamp {
+        wgpu::AddressMode::ClampToEdge
+    } else {
+        wgpu::AddressMode::Repeat
+    };
+    let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+        mag_filter: filter,
+        min_filter: filter,
+        address_mode_u: address,
+        address_mode_v: address,
+        ..Default::default()
+    });
+    GpuTexture {
+        texture,
+        view,
+        sampler,
+        width,
+        height,
+        real_size: [width as f32, height as f32],
+        uv_crop: [1.0, 1.0],
+    }
+}
+
+/// Build the shared NV12 conversion pipeline (one per scene build).
+fn nv12_pipeline(device: &wgpu::Device) -> std::sync::Arc<wgpu::RenderPipeline> {
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("kirie-nv12"),
+        source: wgpu::ShaderSource::Wgsl(NV12_WGSL.into()),
+    });
+    std::sync::Arc::new(device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("kirie-nv12"),
+        layout: None,
+        vertex: wgpu::VertexState {
+            module: &module,
+            entry_point: Some("vs"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &module,
+            entry_point: Some("fs"),
+            compilation_options: Default::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    }))
+}
+
+/// A live video-backed `.tex`: the decode thread keeps producing frames and
+/// the renderer streams the newest into `gpu.texture` each frame — directly
+/// for RGBA frames, through [`Nv12Rig`] for NV12 ones.
 pub struct VideoTexture {
     /// The registry key this video was uploaded under — what a material pass's
     /// texture slot names. The renderer matches it against each object's
@@ -74,6 +353,9 @@ pub struct VideoTexture {
     pub paused: std::cell::Cell<bool>,
     /// The sampled texture every pass bound — updated in place.
     pub gpu: std::sync::Arc<GpuTexture>,
+    /// GPU-side NV12 conversion, present when the decoder delivers NV12
+    /// (see [`Nv12Rig`]); `None` means frames arrive as ready RGBA.
+    pub nv12: Option<Nv12Rig>,
     /// Frame dimensions at allocation (upload guard).
     pub size: (u32, u32),
 }
@@ -376,6 +658,9 @@ impl TextureRegistry {
             kirie_video::VideoOptions {
                 enable_audio: false,
                 silent: true,
+                // GPU-side conversion (see Nv12Rig): the decode thread skips
+                // its dominant CPU cost and this path handles both layouts.
+                nv12: true,
                 ..kirie_video::VideoOptions::default()
             },
         );
@@ -399,19 +684,39 @@ impl TextureRegistry {
             return None;
         }
 
-        // Frame pixels are top-row-first RGBA8 (kirie-video's converter), the
-        // same layout `upload_rgba8` expects. A video frame is already at real
-        // size, so no NPOT crop; honor the `.tex` sampler flags for wrap/filter.
-        let gpu = std::sync::Arc::new(upload_rgba8(
+        // Allocate the RGBA texture every material pass binds. For an RGBA
+        // frame its pixels upload directly; for NV12 it starts black and the
+        // rig's first convert pass fills it before anything samples it.
+        // RENDER_ATTACHMENT is needed either way-the rig renders into it.
+        let is_nv12 = frame.pixels == kirie_video::FramePixels::Nv12;
+        let rgba_seed: std::borrow::Cow<[u8]> = if is_nv12 {
+            std::borrow::Cow::Owned(vec![0u8; (frame.width * frame.height * 4) as usize])
+        } else {
+            std::borrow::Cow::Borrowed(&frame.data)
+        };
+        let gpu = std::sync::Arc::new(upload_video_target(
             &self.device,
             &self.queue,
             name,
             frame.width,
             frame.height,
-            &frame.data,
+            &rgba_seed,
             tex.flags.no_interpolation(),
             tex.flags.clamp_uvs(),
         ));
+        let nv12 = is_nv12.then(|| {
+            let rig = Nv12Rig::new(
+                &self.device,
+                nv12_pipeline(&self.device),
+                &gpu,
+                frame.width,
+                frame.height,
+            );
+            // First frame: convert now so the wallpaper never shows the black
+            // seed (build order runs before the first render tick).
+            rig.convert(&self.device, &self.queue, frame.width, frame.height, &frame.data);
+            rig
+        });
         // Keep the player: the renderer streams later frames into this same
         // texture every tick (the reference PLAYS video .tex, docs §10).
         if let Some((player, control)) = player {
@@ -424,6 +729,7 @@ impl TextureRegistry {
                     control,
                     paused: std::cell::Cell::new(false),
                     gpu: gpu.clone(),
+                    nv12,
                     size: (frame.width, frame.height),
                 });
         }

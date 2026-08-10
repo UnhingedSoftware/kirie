@@ -52,9 +52,28 @@ pub struct DecodedFrame {
     pub width: u32,
     /// Frame height in pixels.
     pub height: u32,
-    /// Tightly packed RGBA8 pixels (`width * height * 4` bytes, row 0 =
-    /// top).
+    /// How `data` is laid out.
+    pub pixels: FramePixels,
+    /// Pixel bytes, tightly packed, row 0 = top. RGBA8 (`w*h*4`) or NV12
+    /// (`w*h` luma rows then `w*(h/2)` interleaved chroma rows) per `pixels`.
     pub data: Vec<u8>,
+}
+
+/// Pixel layout of a [`DecodedFrame`].
+///
+/// NV12 exists because the RGBA conversion is the decode thread's dominant
+/// steady-state cost once hardware decode is on: `sws_scale` touches every
+/// pixel on the CPU, and a 4K stream burns most of a core doing it. A consumer
+/// that can convert on the GPU (the scene video-texture path) requests NV12
+/// via [`VideoOptions::nv12`] and receives the decoder's planes as-is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FramePixels {
+    /// RGBA8, `width * height * 4` bytes.
+    Rgba,
+    /// NV12: `width * height` luma bytes then `width * (height/2)` bytes of
+    /// interleaved UV at half resolution. Even dimensions guaranteed (odd
+    /// streams fall back to RGBA).
+    Nv12,
 }
 
 impl Timed for DecodedFrame {
@@ -97,6 +116,8 @@ pub(crate) struct Decoder {
     /// Consecutive undecodable packets skipped, for log throttling (SPEC
     /// V9: a corrupt run must degrade gracefully, not flood the journal).
     undecodable: u64,
+    /// Consumer asked for NV12 output (see [`FramePixels::Nv12`]).
+    pub(crate) want_nv12: bool,
     /// Consecutive unconvertible frames dropped, same throttling story
     /// (e.g. a persistently failing VAAPI hw→system download).
     unconvertible: u64,
@@ -109,6 +130,9 @@ pub(crate) struct Decoder {
 /// RGBA conversion state; created on (and confined to) the decode thread
 /// because `SwsContext` is not `Send`.
 struct Converter {
+    /// Emit NV12 planes instead of running the sws RGBA conversion, when the
+    /// decoded frame really is NV12 (see [`FramePixels::Nv12`]).
+    nv12: bool,
     scaler: Option<scaling::Context>,
     rgb: ffmpeg::frame::Video,
     /// VAAPI surface → system-memory download state; idle (allocating
@@ -118,8 +142,9 @@ struct Converter {
 }
 
 impl Converter {
-    fn new() -> Self {
+    fn new(nv12: bool) -> Self {
         Self {
+            nv12,
             scaler: None,
             rgb: ffmpeg::frame::Video::empty(),
             #[cfg(feature = "vaapi")]
@@ -177,6 +202,7 @@ impl Decoder {
             decoded: ffmpeg::frame::Video::empty(),
             last_raw: None,
             undecodable: 0,
+            want_nv12: false,
             unconvertible: 0,
             frame_dur,
             synth_pts: 0.0,
@@ -193,7 +219,7 @@ impl Decoder {
     pub fn run(mut self, frames: &Sender<DecodedFrame>, recycle: &Receiver<Vec<u8>>) {
         // The sws scaler is not `Send`; it is created here, on the decode
         // thread, and never leaves it.
-        let mut converter = Converter::new();
+        let mut converter = Converter::new(self.want_nv12);
         let mut consecutive_read_errors = 0u32;
         loop {
             // One pass through the file.
@@ -314,6 +340,36 @@ impl Decoder {
             return Err(VideoError::InvalidDimensions { width, height });
         }
 
+        // NV12 passthrough: hand the planes to the consumer untouched and let
+        // it convert on the GPU. Only when the frame really is NV12 with even
+        // geometry — anything else keeps the sws path below, so the consumer
+        // must handle both layouts.
+        if converter.nv12 && decoded.format() == Pixel::NV12 && width % 2 == 0 && height % 2 == 0 {
+            let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
+                Some(ts) => ts as f64 * self.time_base - self.start,
+                None => self.synth_pts,
+            };
+            if let Some(last) = self.last_raw {
+                let delta = raw - last;
+                if delta > 0.0 && delta < 1.0 {
+                    self.frame_dur = delta;
+                }
+            }
+            self.last_raw = Some(raw);
+            self.synth_pts = raw + self.frame_dur;
+            let play_pts = self.timeline.map(raw, self.frame_dur);
+
+            let mut data = recycle.try_recv().unwrap_or_default();
+            copy_nv12(decoded, &mut data);
+            return Ok(DecodedFrame {
+                play_pts,
+                width,
+                height,
+                pixels: FramePixels::Nv12,
+                data,
+            });
+        }
+
         // (Re)build the scaler only when the source geometry/format
         // changes — the mpv contract resizes output on VIDEO_RECONFIG
         // only (docs/subsystems-misc.md §2.2).
@@ -378,8 +434,27 @@ impl Decoder {
             play_pts,
             width,
             height,
+            pixels: FramePixels::Rgba,
             data,
         })
+    }
+}
+
+/// Copy an NV12 frame's two planes into `buf`, stride-tight: `w*h` luma bytes
+/// then `w*(h/2)` interleaved UV bytes.
+fn copy_nv12(frame: &ffmpeg::frame::Video, buf: &mut Vec<u8>) {
+    let (w, h) = (frame.width() as usize, frame.height() as usize);
+    buf.clear();
+    buf.reserve(w * h + w * (h / 2));
+    let y = frame.data(0);
+    let ys = frame.stride(0);
+    for row in 0..h {
+        buf.extend_from_slice(&y[row * ys..row * ys + w]);
+    }
+    let uv = frame.data(1);
+    let uvs = frame.stride(1);
+    for row in 0..h / 2 {
+        buf.extend_from_slice(&uv[row * uvs..row * uvs + w]);
     }
 }
 

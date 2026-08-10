@@ -1288,6 +1288,9 @@ fn build_for_spec(
                 silent,
                 paused: false,
                 scaling: to_video_scaling(*scaling),
+                // Full-screen video keeps the proven RGBA delivery; the
+                // NV12/GPU-convert path currently serves scene video textures.
+                nv12: false,
                 enable_audio: true,
             };
             match VideoPlayer::open(media, options) {

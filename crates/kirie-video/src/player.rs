@@ -60,6 +60,11 @@ pub struct VideoOptions {
     /// Start paused (docs/subsystems-misc.md §2.1 pause: freeze frame,
     /// keep state; latched values apply from the start).
     pub paused: bool,
+    /// Deliver NV12 planes instead of RGBA when the stream allows it
+    /// ([`crate::FramePixels::Nv12`]): the consumer converts on the GPU and
+    /// the decode thread skips its dominant CPU cost. Consumers must then
+    /// handle both layouts — RGBA still arrives for non-NV12 streams.
+    pub nv12: bool,
     /// Output scaling mode (docs/render-architecture.md §4).
     pub scaling: ScalingMode,
     /// `false` skips the audio pipeline entirely (headless/tests; the
@@ -78,6 +83,7 @@ impl Default for VideoOptions {
             silent: false,
             paused: false,
             scaling: ScalingMode::Default,
+            nv12: false,
             enable_audio: true,
         }
     }
@@ -119,7 +125,8 @@ impl VideoPlayer {
     pub fn open(path: impl Into<PathBuf>, options: VideoOptions) -> Result<(Self, VideoControl), VideoError> {
         let path = path.into();
 
-        let decoder = Decoder::open(&path)?;
+        let mut decoder = Decoder::open(&path)?;
+        decoder.want_nv12 = options.nv12;
         let info = decoder.info();
 
         // Bounded frame queue: the only decode-side pacing (SPEC V4).
