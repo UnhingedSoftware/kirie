@@ -694,6 +694,13 @@ fn apply_frame(ctx: &Ctx<'_>, frame: &HostFrame) -> Result<(), ScriptError> {
         for (k, v) in &map {
             host.set(k.as_str(), json_to_js(ctx, v).internal()?).internal()?;
         }
+        // `skip_serializing_if` drops a `None` audio from the snapshot, which
+        // would leave the previous tick's bands visible forever — but a frame
+        // without audio means "no capture" and must read as silence (the JS
+        // getter zero-fills from a null buffer).
+        if !map.contains_key("audio") {
+            host.set("audio", Value::new_null(ctx.clone())).internal()?;
+        }
     }
     Ok(())
 }

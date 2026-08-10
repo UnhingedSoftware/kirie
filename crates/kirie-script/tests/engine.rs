@@ -381,6 +381,35 @@ fn cursor_events_require_the_solid_flag() {
     assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
 }
 
+/// A frame without audio must read as silence, not as the previous tick's
+/// bands (`skip_serializing_if` would otherwise leave `__host.audio` stale).
+#[test]
+fn audio_reads_silent_after_a_frame_without_bands() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_4",
+        "var b = engine.registerAudioBuffers(16);
+         export function update(v){ return b.average[0]; }",
+        Some(4),
+        ScriptValue::Float(0.0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        audio: Some(AudioBuffers {
+            audio16: vec![0.75; 16],
+            audio32: vec![0.75; 32],
+            audio64: vec![0.75; 64],
+        }),
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Float(0.75));
+    // No audio this frame → zeros, not the stale 0.75.
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
+}
+
 // ---- resizeScreen / applyGeneralSettings (d.ts ScriptModule) ---------------
 
 /// `resizeScreen(Vec2)` fires on resolution transitions only — the initial
