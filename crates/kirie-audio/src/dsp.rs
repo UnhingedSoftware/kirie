@@ -16,9 +16,16 @@ pub const SAMPLE_RATE: u32 = 44100;
 /// Real-FFT bin count for a 1024-point transform: `N/2 + 1` = 513 (cpp:149).
 pub const FFT_BINS: usize = WAVE_BUFFER_SIZE / 2 + 1;
 
-/// Per-frame slew rate toward the latest FFT result — the ONLY temporal
-/// smoothing (`movetowards(.., .., 0.3f)`, cpp:229-240). No attack/decay
-/// asymmetry.
+/// Fraction of the distance to the target covered per frame on the way UP.
+/// Exponential rather than the fork's fixed step (`movetowards 0.3`): a fixed
+/// step larger than the working range is no smoothing at all — at an on-screen
+/// level of 0.25 every band snapped straight to target and the display
+/// flickered like noise. Attack faster than release so beats still hit.
+pub const SMOOTH_ATTACK: f32 = 0.55;
+/// Fraction covered per frame on the way DOWN — the fall-off that makes bars
+/// glide instead of blink.
+pub const SMOOTH_RELEASE: f32 = 0.18;
+/// Kept for API compatibility with earlier consumers of the fork constant.
 pub const SMOOTH_RATE: f32 = 0.3;
 
 /// Default noise-gate RMS threshold. The fork uses 10.0 (cpp:248), tuned for
@@ -244,23 +251,52 @@ impl Smoother {
         }
     }
 
-    /// Latch new targets (a fresh FFT frame arrived).
-    pub fn set_targets(&mut self, targets: BandTargets) {
+    /// Latch new targets (a fresh FFT frame arrived), lightly smoothed across
+    /// neighbouring bands first. Each band reads a single FFT bin, whose
+    /// magnitude jumps frame to frame even in steady music; a 3-tap kernel
+    /// (¼,½,¼) keeps every peak's position and height character while turning
+    /// the between-band jitter into a contour.
+    pub fn set_targets(&mut self, mut targets: BandTargets) {
+        fn blur(values: &mut [f32]) {
+            let n = values.len();
+            if n < 3 {
+                return;
+            }
+            let mut prev = values[0];
+            for i in 0..n {
+                let here = values[i];
+                let next = if i + 1 < n { values[i + 1] } else { here };
+                values[i] = prev.mul_add(0.25, here.mul_add(0.5, next * 0.25));
+                prev = here;
+            }
+        }
+        blur(&mut targets.b16);
+        blur(&mut targets.b32);
+        blur(&mut targets.b64);
         self.targets = targets;
     }
 
-    /// Advance one frame: slew every displayed band toward its target by at
-    /// most [`SMOOTH_RATE`]. Runs whether or not a new FFT frame exists
-    /// (cpp:229-240), so gated silence decays to zero at 0.3/frame.
+    /// Advance one frame: move every displayed band a fixed *fraction* of the
+    /// remaining distance toward its target — [`SMOOTH_ATTACK`] rising,
+    /// [`SMOOTH_RELEASE`] falling. Runs whether or not a new FFT frame exists,
+    /// so gated silence still decays smoothly to zero.
     pub fn tick(&mut self) {
+        fn step(current: f32, target: f32) -> f32 {
+            let k = if target > current {
+                SMOOTH_ATTACK
+            } else {
+                SMOOTH_RELEASE
+            };
+            (target - current).mul_add(k, current)
+        }
         for i in 0..BANDS_16 {
-            self.b16[i] = move_towards(self.b16[i], self.targets.b16[i], SMOOTH_RATE);
+            self.b16[i] = step(self.b16[i], self.targets.b16[i]);
         }
         for i in 0..BANDS_32 {
-            self.b32[i] = move_towards(self.b32[i], self.targets.b32[i], SMOOTH_RATE);
+            self.b32[i] = step(self.b32[i], self.targets.b32[i]);
         }
         for i in 0..BANDS_64 {
-            self.b64[i] = move_towards(self.b64[i], self.targets.b64[i], SMOOTH_RATE);
+            self.b64[i] = step(self.b64[i], self.targets.b64[i]);
         }
     }
 }
@@ -334,7 +370,11 @@ mod tests {
         let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
         spec[126] = Complex::new(512.0, 0.0);
         let out = bands_from_spectrum(&spec, REF_DB_MAX);
-        assert!((out.b64[63] - boost(1.0).min(1.0f32)).abs() < 0.02, "got {}", out.b64[63]);
+        assert!(
+            (out.b64[63] - boost(1.0).min(1.0f32)).abs() < 0.02,
+            "got {}",
+            out.b64[63]
+        );
         // Quieter than the window floor → exactly zero, not negative.
         let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
         spec[2] = Complex::new(0.4, 0.0); // ≈ -8 dB, below REF_DB - RANGE_DB
@@ -408,19 +448,29 @@ mod tests {
     fn smoother_slew_and_decay() {
         let mut sm = Smoother::new();
         let mut target = BandTargets::zero();
-        target.b64[0] = 1.0;
+        target.b64[1] = 1.0;
         sm.set_targets(target);
+        // The 3-tap spatial blur halves an isolated interior spike and leaks
+        // a quarter into each neighbour.
+        assert!(
+            (sm.targets.b64[1] - 0.5).abs() < 1e-6,
+            "blurred {}",
+            sm.targets.b64[1]
+        );
+        assert!((sm.targets.b64[0] - 0.25).abs() < 1e-6);
+        assert!((sm.targets.b64[2] - 0.25).abs() < 1e-6);
+        // Rising covers SMOOTH_ATTACK of the remaining distance per tick…
         sm.tick();
-        assert!((sm.b64[0] - 0.3).abs() < 1e-6);
+        assert!((sm.b64[1] - 0.5 * SMOOTH_ATTACK).abs() < 1e-6);
+        let after_one = sm.b64[1];
         sm.tick();
-        assert!((sm.b64[0] - 0.6).abs() < 1e-6);
-        sm.tick();
-        assert!((sm.b64[0] - 0.9).abs() < 1e-6);
-        sm.tick();
-        assert_eq!(sm.b64[0], 1.0); // snaps (0.1 <= 0.3)
-        // Decay to zero.
+        let expected = after_one + (0.5 - after_one) * SMOOTH_ATTACK;
+        assert!((sm.b64[1] - expected).abs() < 1e-6);
+        // …and falling uses the slower SMOOTH_RELEASE.
+        let peak = sm.b64[1];
         sm.set_targets(BandTargets::zero());
         sm.tick();
-        assert!((sm.b64[0] - 0.7).abs() < 1e-6);
+        assert!((sm.b64[1] - peak * (1.0 - SMOOTH_RELEASE)).abs() < 1e-6);
+        assert!(sm.b64[1] < peak);
     }
 }
