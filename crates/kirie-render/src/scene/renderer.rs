@@ -114,6 +114,9 @@ struct PassGpu {
     vs_params: BTreeMap<String, Vec<f32>>,
     fs_params: BTreeMap<String, Vec<f32>>,
     vertex_buffer: wgpu::Buffer,
+    /// The UV crop baked into this pass's quad (atlas sub-rect), reapplied
+    /// when a script transform rewrites the vertices.
+    uv_crop: [f32; 2],
     /// Puppet-warp index buffer (`u16` triangle list). `Some` only for a puppet
     /// base pass, whose draw is `draw_indexed` over the mesh instead of the
     /// 4-vertex quad strip.
@@ -192,6 +195,9 @@ struct ObjectGpu {
     /// frame — the reference's per-pass texture-animation state
     /// (`CPass.cpp:287-306`). Page streaming lives on [`SceneRenderer`].
     atlas: Option<Arc<super::texture::AtlasTexture>>,
+    /// The layer image's pixel size, for rebuilding the scene quad when a
+    /// script writes origin/scale/angles.
+    image_size: (u32, u32),
 }
 
 /// One animated atlas plus the page currently uploaded into its bound texture
@@ -370,6 +376,10 @@ pub struct SceneRenderer {
     /// `object id → parent id` over every object (docs §7.1). Used to gate a
     /// layer off when any ancestor group/image is hidden.
     parent_by_id: HashMap<i64, Option<i64>>,
+    /// Per-object local transforms (the same map the build composed quads
+    /// from), retained so script origin/scale/angles writes can recompose
+    /// `world_xf` and rewrite the affected quads in place.
+    locals: HashMap<i64, LocalXf>,
     /// `object id → live visibility` over every object (incl. non-drawn groups),
     /// kept current by script visibility updates (docs §7.1 ancestor gating).
     visible_by_id: HashMap<i64, bool>,
@@ -869,6 +879,7 @@ impl SceneRenderer {
             pointer: [0.5, 0.5],
             pointer_last: [0.5, 0.5],
             pointer_left: false,
+            locals: local_xf,
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
             runtime_templates,
@@ -969,6 +980,71 @@ impl SceneRenderer {
     /// creation (`thisScene.createLayer`) and the runtime camera override
     /// (`thisScene.setCameraTransforms`). Shared by the per-frame tick and the
     /// live `setProperty` dispatch (both can run scripts that issue these).
+    /// Live script transforms for 2D image layers: update the retained local
+    /// transform, recompose `world_xf` for the object and every descendant
+    /// (their baked quads embed the parent chain), and rewrite each affected
+    /// scene-geometry quad in place (an 80-byte buffer write — no rebuild).
+    fn apply_image_transforms(&mut self, updates: &[PropUpdate]) {
+        let mut dirty: Vec<i64> = Vec::new();
+        for u in updates {
+            if !matches!(
+                u.target,
+                PropTarget::Origin | PropTarget::Scale | PropTarget::Angles
+            ) {
+                continue;
+            }
+            let Some(l) = self.locals.get_mut(&u.object_id) else {
+                continue;
+            };
+            let Some(v) = as_vec3(&u.value) else { continue };
+            match u.target {
+                PropTarget::Origin => l.origin = [v[0], v[1]],
+                PropTarget::Scale => l.scale = [v[0], v[1]],
+                // Only the in-plane Z angle exists in the 2D composition.
+                PropTarget::Angles => l.angle_z = v[2],
+                _ => unreachable!(),
+            }
+            dirty.push(u.object_id);
+        }
+        if dirty.is_empty() {
+            return;
+        }
+        let (sw, sh) = (self.proj_w, self.proj_h);
+        for item in &mut self.items {
+            let SceneItem::Image(o) = item else { continue };
+            // Affected = the written object or any descendant of one.
+            let mut affected = dirty.contains(&o.id);
+            let mut cur = self.locals.get(&o.id).and_then(|l| l.parent);
+            for _ in 0..64 {
+                if affected {
+                    break;
+                }
+                let Some(c) = cur else { break };
+                affected = dirty.contains(&c);
+                cur = self.locals.get(&c).and_then(|l| l.parent);
+            }
+            if !affected {
+                continue;
+            }
+            let (origin, scale, angle_z) = world_xf(o.id, &self.locals);
+            let quad = scene_space_quad(origin, o.image_size, scale, angle_z, (sw, sh));
+            for pass in &o.passes {
+                if pass.geometry != Geometry::Scene {
+                    continue;
+                }
+                let mut verts = quad;
+                if pass.uv_crop != [1.0, 1.0] {
+                    apply_uv_crop(&mut verts, pass.uv_crop);
+                }
+                self.queue
+                    .write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+            }
+            // Keep the pointer-unprojection anchor in step with the quad.
+            o.scene_center = [origin[0] - sw as f32 / 2.0, origin[1] - sh as f32 / 2.0];
+            o.angle_z = angle_z;
+        }
+    }
+
     fn apply_script_scene_ops(&mut self) {
         let Some(script) = self.script.as_mut() else {
             return;
@@ -1647,6 +1723,7 @@ fn build_object(
             puppet_index_count,
             output,
             geometry,
+            uv_crop,
             model_matrix,
             blending: effective_blending(is_puppet_base, raw_pass.blending),
             tex_resolution,
@@ -1681,6 +1758,7 @@ fn build_object(
         ],
         angle_z: world_angle_z,
         atlas: layer_atlas,
+        image_size: (iw, ih),
     })
 }
 
@@ -1847,6 +1925,7 @@ impl Renderer for SceneRenderer {
             }
             apply_runtime_updates(&mut self.runtime_layers, &updates);
             apply_script_updates(&mut self.items, &updates);
+            self.apply_image_transforms(&updates);
         }
 
         // Script-driven text layers (clock/date drivers): tick each and
@@ -2526,6 +2605,7 @@ impl Renderer for SceneRenderer {
         if !updates.is_empty() {
             apply_runtime_updates(&mut self.runtime_layers, &updates);
             apply_script_updates(&mut self.items, &updates);
+            self.apply_image_transforms(&updates);
         }
         // Effect-visibility divergence: the chain physically lacks (or still
         // contains) passes the new value wants. The object-level flip above
