@@ -305,10 +305,14 @@ impl ControlPoint {
                 .and_then(Value::as_str)
                 .and_then(|s| parse_vec::<3>(s).ok())
                 .unwrap_or([0.0, 0.0, 0.0]),
+            // Real workshop files encode cursor binding as bit 0 of `flags`
+            // (the boolean spelling exists in docs but not in the corpus:
+            // every cursor-trail preset ships `"flags": 1`). Honour both.
             locktopointer: obj
                 .get("locktopointer")
                 .and_then(crate::value::coerce_bool)
-                .unwrap_or(false),
+                .unwrap_or(false)
+                || obj.get("flags").and_then(coerce_u32).unwrap_or(0) & 1 != 0,
         }
     }
 }

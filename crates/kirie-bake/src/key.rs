@@ -15,7 +15,7 @@ use std::fmt;
 /// On-disk bundle layout version. Bump whenever the [`crate::BakedBundle`] shape
 /// or its encoding changes so every prior bundle keys to a different directory
 /// and is transparently re-baked (SPEC.md §V8 — no migration).
-pub const BAKE_FORMAT_VERSION: u32 = 1;
+pub const BAKE_FORMAT_VERSION: u32 = 2;
 
 /// The 256-bit content-addressed key for a bundle (SPEC.md §V8). Its lowercase
 /// hex form names the cache subdirectory.

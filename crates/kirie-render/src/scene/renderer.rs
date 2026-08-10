@@ -212,6 +212,14 @@ struct RuntimeLayer {
     angles: [f32; 3],
     color: [f32; 3],
     alpha: f32,
+    /// Material appearance from the created model (see `RuntimeTemplate`):
+    /// sprite texture, user-resolved tint and alpha, and the sprite's natural
+    /// size the script's scale multiplies. Defaults reproduce the old solid
+    /// quad for layers whose model was not found.
+    texture: Option<std::sync::Arc<super::texture::GpuTexture>>,
+    tint: [f32; 3],
+    tint_alpha: f32,
+    base_size: [f32; 2],
     visible: bool,
     /// Draw order among runtime layers (Stage 1b2): creation sequence by
     /// default (the reference appends created layers to its render order),
@@ -227,6 +235,10 @@ impl Default for RuntimeLayer {
             scale: [1.0; 3],
             angles: [0.0; 3],
             color: [1.0; 3],
+            texture: None,
+            tint: [1.0; 3],
+            tint_alpha: 1.0,
+            base_size: [1.0, 1.0],
             alpha: 1.0,
             visible: true,
             order: 0,
@@ -290,6 +302,12 @@ pub struct SceneRenderer {
     pointer_last: [f32; 2],
     /// Script-created runtime layers keyed by their synthetic (negative) id.
     runtime_layers: std::collections::HashMap<i64, RuntimeLayer>,
+    /// Materials pre-built for the model paths scene scripts `createLayer`,
+    /// keyed by the path literal (see `collect_runtime_templates`). Built at
+    /// scene build because the asset source does not outlive it.
+    runtime_templates: std::collections::HashMap<String, RuntimeTemplate>,
+    /// 1×1 white — the sampler-slot filler for solid runtime layers.
+    runtime_white: std::sync::Arc<super::texture::GpuTexture>,
     /// Next creation-order value for a runtime layer (monotonic; reset above
     /// the script host's layer count whenever a `sortLayer` renumber lands so
     /// later creations still draw on top).
@@ -794,6 +812,12 @@ impl SceneRenderer {
             .any(|it| matches!(it, SceneItem::Model(_)))
             .then(|| super::model::create_depth_texture(device, fbo_w, fbo_h));
 
+        // Pre-build the materials scene scripts `createLayer` at runtime: the
+        // literal model paths are visible in the script sources, and the asset
+        // source + resolved user properties only exist here at build.
+        let runtime_templates = collect_runtime_templates(model, source, user_props, &registry);
+        let runtime_white = registry.white();
+
         Ok(SceneRenderer {
             device: device.clone(),
             queue: queue.clone(),
@@ -843,6 +867,8 @@ impl SceneRenderer {
             pointer_last: [0.5, 0.5],
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
+            runtime_templates,
+            runtime_white,
             runtime_seq: 0,
             runtime_pipeline: None,
             text_pipeline,
@@ -948,8 +974,26 @@ impl SceneRenderer {
             // Creation order doubles as the default draw order — the reference
             // appends created layers to its render order (top).
             let order = self.runtime_seq;
+            let template = self.runtime_templates.get(&path).or_else(|| {
+                // Scripts write `models/bar.json`; the template may have been
+                // collected under a workshop-prefixed spelling (or vice
+                // versa) — match on the trailing file name as a fallback.
+                let tail = path.rsplit('/').next().unwrap_or(path.as_str());
+                self.runtime_templates
+                    .iter()
+                    .find(|(k, _)| k.rsplit('/').next() == Some(tail))
+                    .map(|(_, v)| v)
+            });
+            let (texture, tint, tint_alpha, base_size) = template
+                .map_or((None, [1.0; 3], 1.0, [1.0, 1.0]), |t| {
+                    (t.texture.clone(), t.tint, t.alpha, t.size)
+                });
             self.runtime_layers.entry(id).or_insert_with(|| RuntimeLayer {
                 order,
+                texture,
+                tint,
+                tint_alpha,
+                base_size,
                 ..RuntimeLayer::default()
             });
             self.runtime_seq += 1;
@@ -2156,7 +2200,10 @@ impl Renderer for SceneRenderer {
         // JSON→scene→NDC space as scene_quad_verts.
         if self.runtime_layers.values().any(|l| l.visible && l.alpha > 0.0) {
             let (sw, sh) = (self.proj_w as f32, self.proj_h as f32);
-            let mut verts: Vec<f32> = Vec::with_capacity(self.runtime_layers.len() * 36);
+            let mut verts: Vec<f32> = Vec::with_capacity(self.runtime_layers.len() * 48);
+            // Batches: consecutive z-order runs sharing one texture, so bars
+            // (all one sprite) stay a single draw and ordering is preserved.
+            let mut batches: Vec<(std::sync::Arc<super::texture::GpuTexture>, u32, u32)> = Vec::new();
             // Draw in z-order, not HashMap order: creation sequence by default,
             // `sortLayer` overrides (the vertex append order *is* the composite
             // order — later quads alpha-blend over earlier ones).
@@ -2177,7 +2224,12 @@ impl Renderer for SceneRenderer {
                 }
                 let cx = l.origin[0] - sw / 2.0;
                 let cy = l.origin[1] - sh / 2.0;
-                let (hw, hh) = (l.scale[0] / 2.0, l.scale[1] / 2.0);
+                // The script's scale multiplies the sprite's natural size,
+                // exactly as the reference scales the created image object.
+                let (hw, hh) = (
+                    l.scale[0] * l.base_size[0] / 2.0,
+                    l.scale[1] * l.base_size[1] / 2.0,
+                );
                 let (sn, cs) = (-l.angles[2].to_radians()).sin_cos();
                 let corner = |dx: f32, dy: f32| {
                     [
@@ -2189,9 +2241,27 @@ impl Renderer for SceneRenderer {
                 let bl = corner(-hw, -hh);
                 let tr = corner(hw, hh);
                 let br = corner(hw, -hh);
-                let (r, g, b, a) = (l.color[0], l.color[1], l.color[2], l.alpha);
-                for v in [tl, bl, tr, tr, bl, br] {
-                    verts.extend_from_slice(&[v[0], v[1], r, g, b, a]);
+                let (r, g, b, a) = (
+                    l.color[0] * l.tint[0],
+                    l.color[1] * l.tint[1],
+                    l.color[2] * l.tint[2],
+                    l.alpha * l.tint_alpha,
+                );
+                let tex = l.texture.clone().unwrap_or_else(|| self.runtime_white.clone());
+                let first = (verts.len() / 8) as u32;
+                for (v, uv) in [
+                    (tl, [0.0, 0.0]),
+                    (bl, [0.0, 1.0]),
+                    (tr, [1.0, 0.0]),
+                    (tr, [1.0, 0.0]),
+                    (bl, [0.0, 1.0]),
+                    (br, [1.0, 1.0]),
+                ] {
+                    verts.extend_from_slice(&[v[0], v[1], uv[0], uv[1], r, g, b, a]);
+                }
+                match batches.last_mut() {
+                    Some((t, _, count)) if std::sync::Arc::ptr_eq(t, &tex) => *count += 6,
+                    _ => batches.push((tex, first, 6)),
                 }
             }
             if !verts.is_empty() {
@@ -2217,6 +2287,26 @@ impl Renderer for SceneRenderer {
                 }
                 if let Some((pipeline, buf, _)) = &self.runtime_pipeline {
                     self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&verts));
+                    let layout = pipeline.get_bind_group_layout(0);
+                    let binds: Vec<wgpu::BindGroup> = batches
+                        .iter()
+                        .map(|(t, _, _)| {
+                            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                                label: Some("kirie-runtime-layer-tex"),
+                                layout: &layout,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::TextureView(&t.view),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Sampler(&t.sampler),
+                                    },
+                                ],
+                            })
+                        })
+                        .collect();
                     let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("kirie-runtime-layers"),
                         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2235,7 +2325,10 @@ impl Renderer for SceneRenderer {
                     });
                     rp.set_pipeline(pipeline);
                     rp.set_vertex_buffer(0, buf.slice(..));
-                    rp.draw(0..(verts.len() / 6) as u32, 0..1);
+                    for ((_, first, count), bind) in batches.iter().zip(&binds) {
+                        rp.set_bind_group(0, bind, &[]);
+                        rp.draw(*first..*first + *count, 0..1);
+                    }
                 }
             }
         }
@@ -2399,37 +2492,231 @@ impl Renderer for SceneRenderer {
 
 /// Solid translucent pipeline for runtime layers: NDC position + straight RGBA
 /// per vertex, standard alpha blend into the RGBA16F scene FBO.
+/// The material appearance a script-created layer draws with, pre-built from
+/// the model path its `createLayer` call names (see
+/// [`collect_runtime_templates`]).
+struct RuntimeTemplate {
+    texture: Option<std::sync::Arc<super::texture::GpuTexture>>,
+    tint: [f32; 3],
+    alpha: f32,
+    size: [f32; 2],
+}
+
+/// Scan every script source in the scene for `createLayer('path')` literals
+/// and pre-build each named model's material: sprite texture, and the
+/// material's `color`/`Alpha` constants resolved through the user's project
+/// properties. The reference builds these layers as full image objects at
+/// runtime; kirie draws them as textured tinted quads, which covers the
+/// visualizer-bar pattern these scripts exist for — but only if the material
+/// is resolved, otherwise every bar renders as a default white block no
+/// matter what the user configured.
+fn collect_runtime_templates(
+    model: &SceneModel,
+    source: &dyn AssetSource,
+    user_props: &[(String, kirie_scene::PropertyValue)],
+    registry: &super::texture::TextureRegistry,
+) -> std::collections::HashMap<String, RuntimeTemplate> {
+    use kirie_scene::user::UserSetting;
+
+    // Each entry: the literal path plus the script's workshop id, because the
+    // reference resolves a script's relative asset paths under
+    // `<kind>/workshop/<__workshopId>/…` — the literal alone often names a
+    // file that only exists in that remapped location.
+    let mut paths: std::collections::HashSet<(String, Option<String>)> = std::collections::HashSet::new();
+    let mut scan = |script: &Option<kirie_scene::user::ScriptBinding>| {
+        let Some(b) = script else { return };
+        let wid = b
+            .source
+            .find("__workshopId")
+            .and_then(|i| {
+                let rest = &b.source[i..];
+                let open = rest.find(['\'', '"'])?;
+                let quote = rest.as_bytes()[open] as char;
+                let close = rest[open + 1..].find(quote)?;
+                Some(rest[open + 1..open + 1 + close].to_owned())
+            })
+            .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()));
+        for (i, _) in b.source.match_indices("createLayer") {
+            let rest = &b.source[i + "createLayer".len()..];
+            let Some(open) = rest.find(['\'', '"']) else {
+                continue;
+            };
+            let quote = rest.as_bytes()[open] as char;
+            let Some(close) = rest[open + 1..].find(quote) else {
+                continue;
+            };
+            let path = &rest[open + 1..open + 1 + close];
+            if !path.is_empty() && path.len() < 256 {
+                paths.insert((path.to_owned(), wid.clone()));
+            }
+        }
+    };
+    for object in &model.scene.objects {
+        match &object.kind {
+            kirie_scene::object::ObjectKind::Image(img) => {
+                scan(&img.alpha.script);
+                scan(&img.brightness.script);
+                scan(&img.color.script);
+                scan(&img.visible.script);
+            }
+            kirie_scene::object::ObjectKind::Text(txt) => {
+                scan(&txt.text.script);
+                scan(&txt.alpha.script);
+                scan(&txt.color.script);
+                scan(&txt.visible.script);
+            }
+            kirie_scene::object::ObjectKind::Particle(p) => {
+                scan(&p.instanceoverride.rate.script);
+            }
+            _ => {}
+        }
+        let _ = &object.base;
+    }
+
+    let lookup = |name: &str| -> Option<&kirie_scene::PropertyValue> {
+        user_props.iter().find(|(n, _)| n == name).map(|(_, v)| v)
+    };
+    let resolve_color = |v: &serde_json::Value| -> Option<[f32; 3]> {
+        let obj = v.as_object();
+        if let Some(o) = obj
+            && let Some(user) = o.get("user").and_then(|u| u.as_str())
+            && let Some(kirie_scene::PropertyValue::Color(c)) = lookup(user)
+        {
+            return Some([c[0], c[1], c[2]]);
+        }
+        let s = obj
+            .and_then(|o| o.get("value"))
+            .and_then(|x| x.as_str())
+            .or_else(|| v.as_str())?;
+        let mut it = s.split_whitespace().filter_map(|t| t.parse::<f32>().ok());
+        Some([it.next()?, it.next()?, it.next()?])
+    };
+    let resolve_f32 = |v: &serde_json::Value| -> Option<f32> {
+        let obj = v.as_object();
+        if let Some(o) = obj
+            && let Some(user) = o.get("user").and_then(|u| u.as_str())
+            && let Some(kirie_scene::PropertyValue::Number(n)) = lookup(user)
+        {
+            return Some(*n as f32);
+        }
+        obj.and_then(|o| o.get("value"))
+            .and_then(serde_json::Value::as_f64)
+            .or_else(|| v.as_f64())
+            .map(|f| f as f32)
+    };
+
+    let mut out = std::collections::HashMap::new();
+    for (path, wid) in paths {
+        // Literal first, then the workshop-remapped spelling
+        // (`models/X` → `models/workshop/<id>/X`).
+        let remapped = wid.as_ref().and_then(|w| {
+            path.split_once('/')
+                .map(|(kind, rest)| format!("{kind}/workshop/{w}/{rest}"))
+        });
+        let Some(model_bytes) = source
+            .load(&path)
+            .or_else(|| remapped.as_ref().and_then(|p| source.load(p)))
+        else {
+            tracing::debug!(%path, "createLayer model not found; layer stays a solid quad");
+            continue;
+        };
+        let Ok(model_json) = serde_json::from_slice::<serde_json::Value>(&model_bytes) else {
+            continue;
+        };
+        let Some(mat_path) = model_json.get("material").and_then(|m| m.as_str()) else {
+            continue;
+        };
+        let mat_remap = wid.as_ref().and_then(|w| {
+            mat_path
+                .split_once('/')
+                .map(|(kind, rest)| format!("{kind}/workshop/{w}/{rest}"))
+        });
+        let Some(mat_bytes) = source
+            .load(mat_path)
+            .or_else(|| mat_remap.as_ref().and_then(|p| source.load(p)))
+        else {
+            continue;
+        };
+        let Ok(mat) = serde_json::from_slice::<serde_json::Value>(&mat_bytes) else {
+            continue;
+        };
+        let Some(pass) = mat.get("passes").and_then(|p| p.get(0)) else {
+            continue;
+        };
+        let consts = pass.get("constantshadervalues");
+        let tint = consts
+            .and_then(|c| c.as_object())
+            .and_then(|c| {
+                c.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("color"))
+                    .and_then(|(_, v)| resolve_color(v))
+            })
+            .unwrap_or([1.0, 1.0, 1.0]);
+        let alpha = consts
+            .and_then(|c| c.as_object())
+            .and_then(|c| {
+                c.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("alpha"))
+                    .and_then(|(_, v)| resolve_f32(v))
+            })
+            .unwrap_or(1.0);
+        let texture = pass
+            .get("textures")
+            .and_then(|t| t.get(0))
+            .and_then(|t| t.as_str())
+            .map(|name| registry.get(name, source));
+        let size = texture.as_ref().map_or([1.0, 1.0], |t| t.real_size);
+        tracing::info!(%path, ?tint, alpha, "runtime layer material resolved");
+        out.insert(
+            path,
+            RuntimeTemplate {
+                texture,
+                tint,
+                alpha,
+                size,
+            },
+        );
+    }
+    let _: Option<&UserSetting<f32>> = None;
+    out
+}
+
 fn build_runtime_pipeline(device: &wgpu::Device) -> wgpu::RenderPipeline {
     const SRC: &str = r#"
-struct VOut { @builtin(position) pos: vec4<f32>, @location(0) color: vec4<f32> };
+@group(0) @binding(0) var t: texture_2d<f32>;
+@group(0) @binding(1) var s: sampler;
+struct VOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
 @vertex
-fn vs(@location(0) pos: vec2<f32>, @location(1) color: vec4<f32>) -> VOut {
+fn vs(@location(0) pos: vec2<f32>, @location(1) uv: vec2<f32>, @location(2) color: vec4<f32>) -> VOut {
     var o: VOut;
     o.pos = vec4<f32>(pos, 0.0, 1.0);
+    o.uv = uv;
     o.color = color;
     return o;
 }
 @fragment
-fn fs(i: VOut) -> @location(0) vec4<f32> { return i.color; }
+fn fs(i: VOut) -> @location(0) vec4<f32> {
+    return textureSample(t, s, i.uv) * i.color;
+}
 "#;
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("kirie-runtime-layer-shader"),
         source: wgpu::ShaderSource::Wgsl(SRC.into()),
     });
-    let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("kirie-runtime-layer-layout"),
-        bind_group_layouts: &[],
-        immediate_size: 0,
-    });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("kirie-runtime-layer-pipeline"),
-        layout: Some(&layout),
+        // Auto layout: one texture+sampler group, derived from the shader.
+        layout: None,
         vertex: wgpu::VertexState {
             module: &module,
             entry_point: Some("vs"),
             compilation_options: Default::default(),
             buffers: &[Some(wgpu::VertexBufferLayout {
-                array_stride: 24,
+                array_stride: 32,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &[
                     wgpu::VertexAttribute {
@@ -2438,9 +2725,14 @@ fn fs(i: VOut) -> @location(0) vec4<f32> { return i.color; }
                         shader_location: 0,
                     },
                     wgpu::VertexAttribute {
-                        format: wgpu::VertexFormat::Float32x4,
+                        format: wgpu::VertexFormat::Float32x2,
                         offset: 8,
                         shader_location: 1,
+                    },
+                    wgpu::VertexAttribute {
+                        format: wgpu::VertexFormat::Float32x4,
+                        offset: 16,
+                        shader_location: 2,
                     },
                 ],
             })],
@@ -2471,6 +2763,17 @@ fn fs(i: VOut) -> @location(0) vec4<f32> { return i.color; }
 fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
     for u in updates {
         for item in items.iter_mut() {
+            // Particle targets live on particle items; everything else on
+            // image objects.
+            if let SceneItem::Particle(pg) = item {
+                if pg.id == u.object_id
+                    && matches!(u.target, PropTarget::ParticleRate)
+                    && let Some(rate) = as_f32(&u.value)
+                {
+                    pg.sim.set_rate_override(rate);
+                }
+                continue;
+            }
             let SceneItem::Image(object) = item else { continue };
             if object.id != u.object_id {
                 continue;
@@ -2498,7 +2801,11 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                 }
                 // Text handled by the text pipeline; transforms only drive
                 // runtime layers (applied in `apply_runtime_updates`).
-                PropTarget::Text | PropTarget::Origin | PropTarget::Scale | PropTarget::Angles => {}
+                PropTarget::Text
+                | PropTarget::Origin
+                | PropTarget::Scale
+                | PropTarget::Angles
+                | PropTarget::ParticleRate => {}
             }
         }
     }
@@ -2555,7 +2862,7 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
                     l.visible = *v;
                 }
             }
-            PropTarget::Brightness | PropTarget::Text => {}
+            PropTarget::Brightness | PropTarget::Text | PropTarget::ParticleRate => {}
         }
     }
 }

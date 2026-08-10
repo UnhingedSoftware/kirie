@@ -258,6 +258,15 @@ impl ParticleSim {
         self.particles.retain(|p| p.lifetime > 0.0 && p.age < p.lifetime);
     }
 
+    /// Set the live `instanceoverride.rate` multiplier — the seam a property
+    /// script (the standard audio-reactive particle recipe) drives per frame.
+    /// Read by every emitter tick, so it takes effect immediately.
+    pub fn set_rate_override(&mut self, rate: f32) {
+        if rate.is_finite() && rate >= 0.0 {
+            self.overrides.rate = rate;
+        }
+    }
+
     /// Move every cursor-bound control point to `pos` (system-local, y-up),
     /// keeping its authored offset. Systems without `locktopointer` points
     /// are untouched.

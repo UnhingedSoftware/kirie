@@ -51,6 +51,11 @@ pub enum PropTarget {
     Visible,
     /// Text object content.
     Text,
+    /// Particle `instanceoverride.rate` — live emission-rate multiplier. The
+    /// standard audio-reactive particle recipe drives exactly this: a property
+    /// script reads `engine.registerAudioBuffers(..)` and returns the scaled
+    /// rate every frame.
+    ParticleRate,
     /// `origin` — layer translation (runtime layers; scene units, JSON space).
     Origin,
     /// `scale` — layer scale (runtime bar layers: pixel dims).
@@ -68,6 +73,7 @@ impl PropTarget {
             "color" => Self::Color,
             "visible" => Self::Visible,
             "text" => Self::Text,
+            "rate" => Self::ParticleRate,
             "origin" => Self::Origin,
             "scale" => Self::Scale,
             "angles" => Self::Angles,
@@ -239,6 +245,15 @@ impl ScriptHost {
                     collect(&mut pending, id, "visible", &img.visible.script, || {
                         ScriptValue::Bool(img.visible.value)
                     });
+                }
+                ObjectKind::Particle(pobj) => {
+                    collect(
+                        &mut pending,
+                        id,
+                        "rate",
+                        &pobj.instanceoverride.rate.script,
+                        || ScriptValue::Float(f64::from(pobj.instanceoverride.rate.value)),
+                    );
                 }
                 ObjectKind::Text(txt) => {
                     collect(&mut pending, id, "text", &txt.text.script, || {
@@ -643,8 +658,8 @@ impl ScriptHost {
                 }
             }
             // Brightness is not a registered `thisLayer` property (docs §4.1),
-            // so there is nothing to mirror.
-            PropTarget::Brightness => {}
+            // and a particle rate has no layer mirror either.
+            PropTarget::Brightness | PropTarget::ParticleRate => {}
         }
     }
 }
