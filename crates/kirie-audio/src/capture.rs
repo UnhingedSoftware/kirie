@@ -423,9 +423,15 @@ fn open_stream(
                                 .iter()
                                 .map(|s| f32::from(s.unsigned_abs() as u16))
                                 .fold(0.0, f32::max);
-                            running_peak = frag_peak.max(running_peak * 0.98);
+                            // Slow leveler, not a compressor: the peak decays
+                            // over ~15 s (0.9995 per ~10 ms fragment), so gain
+                            // tracks the track's overall loudness while beats
+                            // keep their dynamics — a fast release here slams
+                            // every band to full scale and the visualiser
+                            // strobes at screen height on every frame.
+                            running_peak = frag_peak.max(running_peak * 0.9995);
                             let gain = if running_peak > 327.0 {
-                                (30000.0 / running_peak).min(100.0)
+                                (8000.0 / running_peak).clamp(1.0, 30.0)
                             } else {
                                 1.0
                             };

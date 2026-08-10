@@ -259,3 +259,36 @@ pub enum WebError {
     #[error("failed to start the browser thread: {0}")]
     Thread(String),
 }
+
+/// GL device-selection environment for a web host child, from `KIRIE_GPU`.
+///
+/// `--gpu` pins kirie's own Vulkan device, but a browser host renders through
+/// GL and chooses its device independently — on a hybrid machine that means
+/// the default GPU, silently, no matter what the user selected. The engine
+/// exports the selection as `KIRIE_GPU` when it pins itself; this translates
+/// it into the offload variables the child's GL stack understands.
+///
+/// Only the NVIDIA PRIME offload variables are emitted today: they are
+/// documented, stable, and strictly additive (an all-Mesa machine ignores
+/// them). Mesa's `DRI_PRIME` is deliberately *not* set for `amd`/`intel`
+/// tokens — it selects the *non-default* GPU, so setting it when the chosen
+/// GPU already is the default would flip rendering onto the wrong one.
+#[must_use]
+pub fn gpu_offload_env() -> Vec<(&'static str, String)> {
+    match std::env::var("KIRIE_GPU").as_deref() {
+        Ok("nvidia") => {
+            let mut env = vec![
+                ("__NV_PRIME_RENDER_OFFLOAD", "1".to_owned()),
+                ("__GLX_VENDOR_LIBRARY_NAME", "nvidia".to_owned()),
+            ];
+            // EGL picks its vendor through glvnd; point it at the NVIDIA
+            // manifest when present (WebKitGTK and CEF's Ozone path are EGL).
+            let egl = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
+            if std::path::Path::new(egl).is_file() {
+                env.push(("__EGL_VENDOR_LIBRARY_FILENAMES", egl.to_owned()));
+            }
+            env
+        }
+        _ => Vec::new(),
+    }
+}

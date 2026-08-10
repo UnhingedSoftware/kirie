@@ -157,6 +157,7 @@ fn spawn_host(url: &str, size: WebSize) -> Result<SpawnedHost, WebError> {
             .arg(size.width.to_string())
             .arg("--height")
             .arg(size.height.to_string())
+            .envs(crate::backend::gpu_offload_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // stderr inherits → the child's tracing lands in the engine log.

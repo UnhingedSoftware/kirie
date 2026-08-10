@@ -116,8 +116,13 @@ fn pin_gpu(argv: &[OsString]) {
         return;
     };
     // Already pointed at exactly this driver (e.g. the daemon set it) — the
-    // loader has what it needs, so skip the re-exec.
-    if std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| v == manifest) {
+    // loader has what it needs. Still re-exec once if `KIRIE_GPU` is missing:
+    // the web hosts derive their GL offload environment from it, and skipping
+    // here would leave a daemon-launched engine rendering web wallpapers on
+    // the default GPU while scenes obey the selection.
+    if std::env::var_os("VK_DRIVER_FILES").is_some_and(|v| v == manifest)
+        && std::env::var_os("KIRIE_GPU").is_some()
+    {
         return;
     }
     let Ok(exe) = std::env::current_exe() else {
@@ -127,6 +132,12 @@ fn pin_gpu(argv: &[OsString]) {
         .args(argv.iter().skip(1))
         .env("VK_DRIVER_FILES", &manifest)
         .env("VK_ICD_FILENAMES", &manifest) // older loaders read this spelling
+        // The token itself, for the web host spawns: a browser renders through
+        // GL, not through kirie's Vulkan device, so kirie-web translates this
+        // into the matching GL offload environment for its child process —
+        // without it a web wallpaper silently renders on the default GPU no
+        // matter what --gpu said.
+        .env("KIRIE_GPU", &sel)
         .env(SENTINEL, "1")
         .exec();
     // `exec` only returns on failure; carry on with the loader default.
