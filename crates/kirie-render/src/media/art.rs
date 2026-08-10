@@ -7,9 +7,11 @@
 //! `CWeb.cpp:64-152`). This module decodes local + `data:` art into an
 //! [`AlbumArt`] RGBA image and derives that palette in [`MediaPlaybackEvent`].
 //!
-//! Remote (`http(s)://`) art is **not** fetched here (the C++ shells out to
-//! `curl`); the URL is passed through unchanged and [`load_art`] returns `None`
-//! so nothing blocks the media worker on the network.
+//! Remote (`http(s)://`) art is fetched via `curl`, as the reference does — a
+//! streaming player publishes nothing else, so refusing would leave every such
+//! wallpaper with an empty cover. The fetch runs on the MPRIS worker thread and
+//! is cached by URL, so it costs one request per track change and never blocks
+//! the render thread.
 
 /// Longest edge a [`AlbumArt::png_data_uri`] thumbnail is downscaled to.
 ///
@@ -286,13 +288,16 @@ pub fn load_art(url: &str) -> Option<AlbumArt> {
     if let Some(rest) = url.strip_prefix("data:") {
         return load_data_uri(rest);
     }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return load_remote(url);
+    }
     let path = if let Some(rest) = url.strip_prefix("file://") {
         percent_decode(rest)
     } else if url.starts_with('/') {
         // Bare absolute path (some players emit this).
         url.to_owned()
     } else {
-        // http(s):// or unknown scheme — not handled locally.
+        // Unknown scheme — nothing safe to open.
         return None;
     };
 
@@ -300,6 +305,78 @@ pub fn load_art(url: &str) -> Option<AlbumArt> {
         Ok(img) => Some(AlbumArt::from_rgba(img.to_rgba8())),
         Err(e) => {
             tracing::debug!(path = %path, error = %e, "album art decode failed");
+            None
+        }
+    }
+}
+
+/// Longest a remote fetch may take before the cover is given up on.
+const REMOTE_TIMEOUT_SECS: &str = "6";
+/// Hard ceiling on a downloaded cover, handed to curl so an oversized body is
+/// refused rather than streamed into memory and discarded.
+const REMOTE_MAX_BYTES: &str = "16777216";
+
+/// Fetch cover art served over HTTP(S) and decode it.
+///
+/// Every streaming player publishes `mpris:artUrl` as a remote URL — Spotify
+/// only ever does — so refusing to fetch means those wallpapers show an empty
+/// cover no matter what else works. The reference solves this the same way,
+/// by shelling out to `curl` (docs/subsystems-misc.md §5); doing likewise keeps
+/// a TLS stack out of a wallpaper renderer, and a machine without curl simply
+/// gets the behaviour it has today: no cover, nothing else disturbed.
+///
+/// This runs on the MPRIS worker thread, never the render thread, and the whole
+/// result is cached by URL upstream, so a track change costs one fetch.
+///
+/// The URL comes from whichever media player happens to be running, so it is
+/// constrained rather than trusted: the scheme is pinned to http/https on both
+/// the initial request and any redirect, redirects are bounded, and the
+/// response is capped in both time and size.
+fn load_remote(url: &str) -> Option<AlbumArt> {
+    let output = std::process::Command::new("curl")
+        .args([
+            "--silent",
+            "--show-error",
+            "--location",
+            "--max-redirs",
+            "3",
+            // Pin the scheme on the first request *and* every redirect, so a
+            // redirect cannot walk the fetch onto file:// or another protocol.
+            "--proto",
+            "=http,https",
+            "--proto-redir",
+            "=http,https",
+            "--max-time",
+            REMOTE_TIMEOUT_SECS,
+            "--max-filesize",
+            REMOTE_MAX_BYTES,
+            "--url",
+        ])
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .output();
+
+    let output = match output {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!(error = %e, "cover art fetch needs curl; page gets no thumbnail");
+            return None;
+        }
+    };
+    if !output.status.success() {
+        tracing::debug!(
+            url = %url,
+            status = ?output.status.code(),
+            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
+            "cover art fetch failed"
+        );
+        return None;
+    }
+
+    match image::load_from_memory(&output.stdout) {
+        Ok(img) => Some(AlbumArt::from_rgba(img.to_rgba8())),
+        Err(e) => {
+            tracing::debug!(url = %url, error = %e, "remote album art decode failed");
             None
         }
     }
@@ -452,9 +529,11 @@ mod tests {
     }
 
     #[test]
-    fn load_art_remote_and_unknown_return_none() {
-        assert!(load_art("https://example.com/cover.jpg").is_none());
+    fn load_art_unknown_scheme_returns_none() {
+        // Remote URLs are covered by `load_remote`, which is deliberately not
+        // exercised here: it would make the unit suite depend on the network.
         assert!(load_art("weird:thing").is_none());
+        assert!(load_art("ftp://example.com/cover.jpg").is_none());
     }
 
     #[test]

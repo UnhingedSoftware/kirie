@@ -481,9 +481,30 @@ pub(crate) fn build_offscreen_renderer(
                 width: capture_size.width,
                 height: capture_size.height,
             };
-            let backend = <HostedBackend as WebBackend>::new(&url, size)
+            let mut backend = <HostedBackend as WebBackend>::new(&url, size)
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
-            Box::new(WebRenderer::new(render_target, Box::new(backend)))
+
+            // The same two steps the live path performs (`run::build_web`). A
+            // capture that skips them is not a faster screenshot, it is a
+            // screenshot of a different page: WE pages read their whole
+            // configuration from the property batch — several block init on it
+            // outright — and an audio-reactive page with no spectrum draws its
+            // rest state, which is a correct frame of nothing happening.
+            let props = super::run::web_props_json(dir, properties);
+            if props != "{}" {
+                backend.apply_properties(&props);
+            }
+            let mut renderer = WebRenderer::new(render_target, Box::new(backend));
+            // MPRIS is started here rather than threaded in from the caller:
+            // a now-playing wallpaper is exactly the kind whose capture is
+            // worthless without it, and the source stops with the process.
+            let media = Some(Arc::new(kirie_render::MediaSource::start(
+                kirie_render::MediaConfig::default(),
+            )));
+            if let Some(feed) = crate::compat::webfeed::EngineWebFeed::new(audio, media) {
+                renderer.set_feed(Box::new(feed));
+            }
+            Box::new(renderer)
         }
         #[cfg(not(feature = "web-cef"))]
         Wallpaper::Web { .. } => {

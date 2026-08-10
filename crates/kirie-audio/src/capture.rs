@@ -109,9 +109,22 @@ pub(crate) fn run(
         }
     };
 
-    // Record stream: U8 / 44100 / mono (cpp:107-110).
+    // Record stream: S16LE / 44100 / mono, folded to the U8 domain the DSP
+    // works in (`sample - 128`, cpp:248-273) by the read callback below.
+    //
+    // The reference records U8 directly (cpp:107-110), which is correct against
+    // a real PulseAudio server. PipeWire's PulseAudio compatibility layer,
+    // however, hands back a stream of pure silence for a U8 record stream on a
+    // monitor source — measurably so: the same monitor, at the same instant,
+    // yields a full-scale signal as S16 and a flat 128 as U8. Since PipeWire is
+    // what nearly every current desktop runs, keeping the reference's format
+    // meant every audio-reactive wallpaper — scene and web alike — sat still on
+    // a machine whose audio was working perfectly.
+    //
+    // S16 is a universally supported capture format, so this costs nothing on a
+    // real PulseAudio server and the DSP downstream is unchanged.
     let spec = Spec {
-        format: Format::U8,
+        format: Format::S16le,
         channels: 1,
         rate: SAMPLE_RATE,
     };
@@ -122,11 +135,30 @@ pub(crate) fn run(
         });
     }
 
+    // Opt the record stream out of the session manager's saved routing.
+    //
+    // PipeWire's stream-restore remembers, per application name, which source a
+    // recording stream was last moved to, and re-applies it in place of the
+    // source the application asked for. A wallpaper's capture is not a stream a
+    // user routes by choice — it is "whatever is coming out of the speakers" —
+    // so a routing saved once (or inherited from another app that used this
+    // name) silently pins it to an unrelated device forever. That failure is
+    // invisible: the stream connects, reports Running, and reads a valid,
+    // permanently silent signal, so every audio-reactive wallpaper sits still
+    // with nothing in any log to explain it.
+    //
+    // `--audio-device` remains the way to choose a source deliberately.
+    let mut stream_props = Proplist::new().ok_or_else(|| AudioError::Connect("no stream proplist".into()))?;
+    let _ = stream_props.set_str("state.restore-props", "false");
+    let _ = stream_props.set_str("state.restore-target", "false");
+
     let stream = Rc::new(RefCell::new(
-        Stream::new(&mut context, STREAM_NAME, &spec, None).ok_or_else(|| AudioError::StreamConnect {
-            source_name: source.clone(),
-            reason: "stream alloc failed".into(),
-        })?,
+        Stream::new_with_proplist(&mut context, STREAM_NAME, &spec, None, &mut stream_props).ok_or_else(
+            || AudioError::StreamConnect {
+                source_name: source.clone(),
+                reason: "stream alloc failed".into(),
+            },
+        )?,
     ));
 
     // Read callback: drain every peeked fragment into the ring; drop holes
@@ -135,6 +167,11 @@ pub(crate) fn run(
     {
         let stream_cb = stream.clone();
         let producer_cb = producer.clone();
+        // A fragment can end mid-sample, so the odd trailing byte is carried
+        // into the next callback rather than dropped — dropping it would shift
+        // the byte parity and turn the rest of the stream into noise.
+        let carry: Rc<RefCell<Option<u8>>> = Rc::new(RefCell::new(None));
+        let mut scratch: Vec<u8> = Vec::new();
         stream
             .borrow_mut()
             .set_read_callback(Some(Box::new(move |_nbytes| {
@@ -142,7 +179,23 @@ pub(crate) fn run(
                 loop {
                     match s.peek() {
                         Ok(PeekResult::Data(data)) => {
-                            producer_cb.borrow_mut().push_slice(data);
+                            // S16LE → the DSP's U8 domain: take the high byte
+                            // (a plain >>8 on the signed value) and bias to
+                            // unsigned, which is exactly what a U8 capture of
+                            // the same signal would have produced.
+                            scratch.clear();
+                            scratch.reserve(data.len() / 2 + 1);
+                            let mut iter = data.iter().copied();
+                            let mut lo = carry.borrow_mut().take();
+                            while let Some(low) = lo.take().or_else(|| iter.next()) {
+                                let Some(high) = iter.next() else {
+                                    *carry.borrow_mut() = Some(low);
+                                    break;
+                                };
+                                let sample = i16::from_le_bytes([low, high]);
+                                scratch.push(((sample >> 8) as i32 + 128) as u8);
+                            }
+                            producer_cb.borrow_mut().push_slice(&scratch);
                             let _ = s.discard();
                         }
                         Ok(PeekResult::Hole(_)) => {
@@ -185,8 +238,28 @@ pub(crate) fn run(
         _ => None,
     })?;
 
+    // What the server actually bound us to, which is not necessarily what was
+    // asked for: the opt-out above covers stream-restore, but a user rule or a
+    // manual move can still land the stream elsewhere, and reading silence off
+    // the wrong monitor is indistinguishable from a quiet desktop. Naming both
+    // devices turns "the visualiser does nothing" into a one-line diagnosis.
+    let bound = stream.borrow().get_device_name().map(|d| d.to_string());
+    match &bound {
+        Some(actual) if actual != &source => {
+            tracing::warn!(
+                requested = %source,
+                actual = %actual,
+                "audio capture was routed to a different source than requested; \
+                 the spectrum will follow that device, not the one asked for \
+                 (move it back with `pactl move-source-output <id> {source}`, \
+                 or select it explicitly with --audio-device)"
+            );
+        }
+        _ => {}
+    }
+
     status.store(CaptureStatus::Running.as_u8(), Ordering::Relaxed);
-    tracing::info!(source = %source, "audio capture running");
+    tracing::info!(source = %source, bound = ?bound, "audio capture running");
 
     // Drive the mainloop; the read callback fires as fragments arrive.
     while !shutdown.load(Ordering::Relaxed) {

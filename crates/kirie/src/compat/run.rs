@@ -43,7 +43,9 @@ use std::time::{Duration, Instant};
 
 use kirie_audio::{AudioCapture, AudioConfig, AutoMute};
 use kirie_platform::{CommandSender, Platform, RenderCommand, RenderTarget, Renderer, SurfaceSize};
-use kirie_render::{ImageContent, ImageOptions, ImageRenderer, MediaConfig, MediaSource};
+use kirie_render::{ImageContent, ImageOptions, ImageRenderer};
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
+use kirie_render::{MediaConfig, MediaSource};
 use kirie_video::{VideoControl, VideoOptions, VideoPlayer, VideoRenderer};
 
 use crate::compat::args::{ClampMode, CompatArgs, ScalingMode, WindowMode};
@@ -153,16 +155,9 @@ fn wants_audio(spec: &RunSpec) -> bool {
 /// The scene-side consumer described in §5 (the `$mediaThumbnail` virtual
 /// asset) is not wired yet, so a build with no web backend starts no D-Bus
 /// worker at all.
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn wants_media(spec: &RunSpec) -> bool {
-    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
-    {
-        matches!(spec, RunSpec::Web { .. })
-    }
-    #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
-    {
-        let _ = spec;
-        false
-    }
+    matches!(spec, RunSpec::Web { .. })
 }
 
 /// Build the audio-capture config from the parsed CLI (doc §2).
@@ -178,6 +173,81 @@ pub fn audio_config(args: &CompatArgs) -> AudioConfig {
         AudioConfig::disabled()
     } else {
         AudioConfig::with_device(args.audio_device.clone())
+    }
+}
+
+/// The system-audio capture and the MPRIS now-playing source, each started the
+/// first time a wallpaper actually asks for it.
+///
+/// Both used to be decided once at launch, from the wallpapers named on the
+/// command line. That was right when an engine ran one wallpaper for its
+/// lifetime, and wrong now: a single engine drives every output and swaps
+/// wallpapers over the control socket, so an engine launched on a scene can be
+/// showing a web wallpaper a moment later. MPRIS is wanted by web wallpapers
+/// only, so that engine started no D-Bus worker and the page's
+/// `wallpaperRegisterMedia*Listener` callbacks never fired for the life of the
+/// process — the wallpaper looked broken, with nothing in any log to say why.
+///
+/// Deferring the decision to the point of use keeps what the launch-time gate
+/// was actually for (an image wallpaper still opens neither PulseAudio nor
+/// D-Bus) while making it track what is on screen rather than what was on the
+/// command line.
+pub(crate) struct LazySources {
+    audio_config: AudioConfig,
+    audio: std::sync::OnceLock<Arc<AudioCapture>>,
+    /// Only a web backend reads now-playing state, so the field only exists in
+    /// a build that has one.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+    media: std::sync::OnceLock<Arc<MediaSource>>,
+}
+
+impl LazySources {
+    fn new(audio_config: AudioConfig) -> Self {
+        Self {
+            audio_config,
+            audio: std::sync::OnceLock::new(),
+            #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+            media: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The shared capture handle, connecting PulseAudio on the first call.
+    /// `--no-audio-processing` still yields a handle here — a disabled config
+    /// starts no threads and reads as permanent silence (V9).
+    fn audio(&self) -> Arc<AudioCapture> {
+        self.audio
+            .get_or_init(|| {
+                let cap = Arc::new(AudioCapture::start(self.audio_config.clone()));
+                tracing::info!(status = ?cap.status(), device = ?cap.device(), "audio capture");
+                cap
+            })
+            .clone()
+    }
+
+    /// The shared MPRIS source, connecting D-Bus on the first call.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+    fn media(&self) -> Arc<MediaSource> {
+        self.media
+            .get_or_init(|| {
+                // Default 1 s tick: the reference re-fetches every 2 s, and the
+                // page's timeline listener is what benefits from the faster one.
+                let src = Arc::new(MediaSource::start(MediaConfig::default()));
+                tracing::info!(status = ?src.status(), "mpris media source");
+                src
+            })
+            .clone()
+    }
+
+    /// The capture handle if `spec` reads the spectrum, else `None` — the call
+    /// that keeps an image-only output from ever opening PulseAudio.
+    fn audio_for(&self, spec: &RunSpec) -> Option<Arc<AudioCapture>> {
+        wants_audio(spec).then(|| self.audio())
+    }
+
+    /// The now-playing source if `spec` reads it, else `None`.
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+    fn media_for(&self, spec: &RunSpec) -> Option<Arc<MediaSource>> {
+        wants_media(spec).then(|| self.media())
     }
 }
 
@@ -422,29 +492,13 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let playlist_stop = Arc::new(AtomicBool::new(false));
     let mut playlist_handle: Option<std::thread::JoinHandle<()>> = None;
 
-    // One shared system-audio capture for every output (mono monitor source;
-    // the spectrum is scene-global, docs subsystems-misc.md §1.3). Started once,
-    // its lock-free spectrum is read per-frame by each scene renderer and, on a
-    // web build, pushed into every page's `wallpaperRegisterAudioListener` (V4).
-    // Only those two consume it, so image/video-only launches never open
-    // PulseAudio (no needless capture threads — SPEC.md §V5/§V6 spirit).
-    let audio = specs.iter().any(|(_, spec)| wants_audio(spec)).then(|| {
-        let cap = Arc::new(AudioCapture::start(audio_config(&args)));
-        tracing::info!(status = ?cap.status(), device = ?cap.device(), "audio capture");
-        cap
-    });
-
-    // One shared MPRIS now-playing source, on the same "start it only if
-    // something reads it" rule (docs subsystems-misc.md §5). Today that is web
-    // wallpapers only: the scene-side `$mediaThumbnail` virtual asset is not
-    // wired yet, so a scene/image/video launch starts no D-Bus worker at all.
-    let media: Option<Arc<MediaSource>> = specs.iter().any(|(_, spec)| wants_media(spec)).then(|| {
-        // Default 1 s tick: the reference re-fetches every 2 s, and the page's
-        // timeline listener is the thing that benefits from the faster one.
-        let src = Arc::new(MediaSource::start(MediaConfig::default()));
-        tracing::info!(status = ?src.status(), "mpris media source");
-        src
-    });
+    // One shared system-audio capture and one shared MPRIS source for every
+    // output (the spectrum is scene-global, docs subsystems-misc.md §1.3; the
+    // now-playing state is per-machine, §5). Neither is started here: each
+    // begins on the first build that asks for it, so an image-only output still
+    // opens neither PulseAudio nor D-Bus (SPEC.md §V5/§V6 spirit) while a
+    // wallpaper swapped in later over the socket gets both.
+    let sources = Arc::new(LazySources::new(audio_config(&args)));
 
     // Automute: mute the wallpaper's own audio while another application is
     // playing sound (docs subsystems-misc.md §1.2/§2.3). `--noautomute`
@@ -490,9 +544,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         volume,
         silent,
         registrar: registrar.clone(),
-        audio: audio.clone(),
-        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
-        media: media.clone(),
+        sources: sources.clone(),
         automute_controls: video_controls.clone(),
     });
 
@@ -506,7 +558,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         specs.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
     let window_spec: Option<RunSpec> = specs.first().map(|(_, s)| s.clone());
     let ib_registrar = registrar.clone();
-    let ib_audio = audio.clone();
+    let ib_sources = sources.clone();
     let ib_properties = properties.clone();
     let ib_controls = video_controls.clone();
     let initial_build: kirie_platform::InitialBuildFn = Box::new(move |output: &str| {
@@ -523,7 +575,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
             _ => return None,
         }
         let registrar = ib_registrar.clone();
-        let audio = ib_audio.clone();
+        let audio = ib_sources.audio_for(&spec);
         let properties = ib_properties.clone();
         let controls = ib_controls.clone();
         let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size| {
@@ -550,7 +602,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     });
 
     let factory_controls = video_controls.clone();
-    let factory_media = media.clone();
+    let factory_sources = sources.clone();
     let factory: kirie_platform::RendererFactory = Box::new(move |target: &RenderTarget<'_>| {
         build_renderer(
             target,
@@ -559,8 +611,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
             volume,
             silent,
             registrar.as_ref(),
-            audio.clone(),
-            factory_media.clone(),
+            &factory_sources,
             &properties,
             &factory_controls,
         )
@@ -1032,8 +1083,7 @@ fn build_renderer(
     volume: i64,
     silent: bool,
     registrar: Option<&crossbeam_channel::Sender<Register>>,
-    audio: Option<Arc<AudioCapture>>,
-    media: Option<Arc<MediaSource>>,
+    sources: &LazySources,
     properties: &[(String, String)],
     automute_controls: &Arc<Mutex<Vec<VideoControl>>>,
 ) -> Box<dyn Renderer> {
@@ -1061,12 +1111,16 @@ fn build_renderer(
     // async-swap paths also call from a worker thread.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     if let RunSpec::Web { url, dir } = spec {
-        return build_web(target, url, dir, silent, properties, audio.clone(), media.clone());
+        return build_web(
+            target,
+            url,
+            dir,
+            silent,
+            properties,
+            sources.audio_for(spec),
+            sources.media_for(spec),
+        );
     }
-    // Web is the only consumer of the now-playing source. Dropping it here
-    // rather than cfg-gating the parameter keeps one signature across every
-    // feature set, which is what the factory and the swap paths both call.
-    drop(media);
     build_for_spec(
         target,
         screen_key,
@@ -1074,7 +1128,7 @@ fn build_renderer(
         volume,
         silent,
         registrar,
-        audio,
+        sources.audio_for(spec),
         properties,
         automute_controls,
     )
@@ -1146,7 +1200,7 @@ fn build_web(
 /// everything else a JSON string. `--set-property` overrides replace the
 /// project defaults by declared type.
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
-fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> String {
+pub(super) fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> String {
     use kirie_formats::project::{Project, PropertyEntry, PropertyKind};
     let Ok(project) = Project::from_path(dir.join("project.json")) else {
         return "{}".to_owned();
@@ -1337,12 +1391,9 @@ pub(crate) struct BuildContext {
     volume: i64,
     silent: bool,
     registrar: Option<crossbeam_channel::Sender<Register>>,
-    audio: Option<Arc<AudioCapture>>,
-    /// MPRIS now-playing, for a web wallpaper swapped in live (`bg`, playlist
-    /// rotation). Only a web backend consumes it, so the field only exists in a
-    /// build that has one — otherwise it would be a permanently dead `None`.
-    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
-    media: Option<Arc<MediaSource>>,
+    /// The audio/MPRIS sources, resolved per wallpaper at build time rather
+    /// than held as a launch-time decision (see [`LazySources`]).
+    sources: Arc<LazySources>,
     automute_controls: Arc<Mutex<Vec<VideoControl>>>,
 }
 
@@ -1430,7 +1481,7 @@ impl BuildContext {
                 ctx.volume,
                 ctx.silent,
                 ctx.registrar.as_ref(),
-                ctx.audio.clone(),
+                ctx.sources.audio_for(&spec),
                 &properties,
                 &ctx.automute_controls,
             )
@@ -1464,8 +1515,11 @@ impl BuildContext {
         let silent = self.silent;
         // Cloned out of the context here, not captured by `Arc<Self>`: the
         // closure has to be `Send` and is run once on the render thread.
-        let audio = self.audio.clone();
-        let media = self.media.clone();
+        // Resolved here, before the closure crosses to the render thread: a
+        // web wallpaper wants both, and asking the sources now is what starts
+        // MPRIS for an engine that launched on something else.
+        let audio = Some(self.sources.audio());
+        let media = Some(self.sources.media());
         let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name, size| {
             let rt = RenderTarget {
                 device,
