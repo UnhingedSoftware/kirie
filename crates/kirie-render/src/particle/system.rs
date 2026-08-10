@@ -74,6 +74,9 @@ pub struct ParticleSim {
     initializers: Vec<Initializer>,
     operators: Vec<Operator>,
     control_points: Vec<Vec3>,
+    /// For each control point: `Some(authored offset)` when it is bound to
+    /// the cursor (`locktopointer`), applied on top of the pointer position.
+    cp_pointer_offset: Vec<Option<Vec3>>,
     overrides: Overrides,
     perspective: bool,
     sequence_multiplier: f32,
@@ -103,8 +106,10 @@ impl ParticleSim {
             .map(|(i, s)| Operator::compile(s, 0x9E37_79B9u32.wrapping_mul(i as u32 + 1), &mut rng))
             .collect();
 
-        // Control points (system-local; mouse-linked ones would update per
-        // frame — static without a pointer). At least CP0 at the origin.
+        // Control points, system-local. A `locktopointer` point follows the
+        // cursor: [`Self::set_pointer_local`] re-bases it every frame (offset
+        // preserved), which is what makes cursor-trail systems trail the
+        // cursor instead of sitting wherever the author left CP0.
         let mut control_points: Vec<Vec3> = system
             .controlpoints
             .iter()
@@ -113,6 +118,12 @@ impl ParticleSim {
         if control_points.is_empty() {
             control_points.push([0.0, 0.0, 0.0]);
         }
+        let mut cp_pointer_offset: Vec<Option<Vec3>> = system
+            .controlpoints
+            .iter()
+            .map(|cp| cp.locktopointer.then(|| super::math::flip_y(cp.offset)))
+            .collect();
+        cp_pointer_offset.resize(control_points.len(), None);
 
         let perspective = system.flags & 0x4 != 0;
 
@@ -123,6 +134,7 @@ impl ParticleSim {
             initializers,
             operators,
             control_points,
+            cp_pointer_offset,
             overrides: ov,
             perspective,
             sequence_multiplier: system.sequencemultiplier,
@@ -244,6 +256,23 @@ impl ParticleSim {
     /// order and does not allocate.
     fn compact(&mut self) {
         self.particles.retain(|p| p.lifetime > 0.0 && p.age < p.lifetime);
+    }
+
+    /// Move every cursor-bound control point to `pos` (system-local, y-up),
+    /// keeping its authored offset. Systems without `locktopointer` points
+    /// are untouched.
+    pub fn set_pointer_local(&mut self, pos: Vec3) {
+        for (point, offset) in self.control_points.iter_mut().zip(&self.cp_pointer_offset) {
+            if let Some(off) = offset {
+                *point = [pos[0] + off[0], pos[1] + off[1], pos[2] + off[2]];
+            }
+        }
+    }
+
+    /// Whether any control point follows the cursor.
+    #[must_use]
+    pub fn follows_pointer(&self) -> bool {
+        self.cp_pointer_offset.iter().any(Option::is_some)
     }
 
     /// The live particles, oldest first.

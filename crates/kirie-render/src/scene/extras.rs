@@ -48,6 +48,10 @@ use super::texture::{GpuTexture, TextureRegistry};
 pub struct ParticleGpu {
     /// The owning scene-object id (script `sortLayer` targeting).
     pub id: i64,
+    /// The object's authored origin in scene coordinates (top-left, y-down):
+    /// what converts the surface pointer into this system's local space for
+    /// `locktopointer` control points.
+    pub origin: [f32; 3],
     /// The CPU particle simulation (advanced per frame by `dt`).
     pub sim: ParticleSim,
     /// The instanced-quad sprite renderer targeting the scene FBO.
@@ -248,6 +252,7 @@ pub fn build_particle(
 
     Some(ParticleGpu {
         id: object.base.id,
+        origin: object.base.origin.value,
         sim,
         renderer,
         view_projection,

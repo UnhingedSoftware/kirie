@@ -1865,6 +1865,13 @@ impl Renderer for SceneRenderer {
         let visible_by_id = &self.visible_by_id;
         // Reused UBO-pack buffer (disjoint field from `items` below), so no pass
         // allocates its `_WEGlobals` bytes each frame (SPEC §V5).
+        // Precomputed for the particle pointer mapping below: calling
+        // `self.projection_size()` inside the item loop would re-borrow
+        // `self` while `pack_scratch` is held.
+        let pointer_scene = {
+            let (pw, ph) = self.projection_size();
+            [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
+        };
         let pack_scratch = &mut self.pack_scratch;
         // Pointer + parallax snapshots for the draw loops (disjoint fields).
         let pointer = self.pointer;
@@ -2077,6 +2084,16 @@ impl Renderer for SceneRenderer {
                 SceneItem::Particle(pg) => {
                     // Advance the CPU sim, refill the shared scratch (no realloc
                     // once warm — SPEC.md §V5), upload + draw instanced sprites.
+                    // Cursor-bound control points (`locktopointer`): surface
+                    // pointer [0,1] → scene pixels → this system's local
+                    // y-up space (same convention as its model matrix).
+                    if pg.sim.follows_pointer() {
+                        pg.sim.set_pointer_local([
+                            pointer_scene[0] - pg.origin[0],
+                            pg.origin[1] - pointer_scene[1],
+                            0.0,
+                        ]);
+                    }
                     pg.sim.update(dt);
                     pg.sim.write_sprites(&mut self.sprite_scratch);
                     let n = pg
