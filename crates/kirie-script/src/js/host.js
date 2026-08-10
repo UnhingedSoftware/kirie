@@ -56,7 +56,10 @@ globalThis.engine = {
   isPortrait: function () { return __host.resY > __host.resX; },
   isLandscape: function () { return __host.resX >= __host.resY; },
   openUserShortcut: function () { },
-  registerAsset: function (file) { return (typeof file === 'string') ? { file: file } : undefined; },
+  // d.ts: registerAsset(file, precache) → IAssetHandle. Precache is a
+  // publish/load hint the reference uses to warm the asset; kirie resolves
+  // assets lazily at createLayer, so the flag is accepted and ignored.
+  registerAsset: function (file, _precache) { return (typeof file === 'string') ? { file: file } : undefined; },
   registerAudioBuffers: function (resolution) {
     var res = (resolution === 16 || resolution === 32 || resolution === 64) ? resolution : 64;
     // docs/scripting-api.md §6.1: read the *matching* audioN reduction, not the
