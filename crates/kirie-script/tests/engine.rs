@@ -410,6 +410,43 @@ fn audio_reads_silent_after_a_frame_without_bands() {
     assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
 }
 
+/// `getInitialLayerConfig` returns the authored values even after scripts
+/// mutated the layer (d.ts IScene).
+#[test]
+fn initial_layer_config_survives_script_writes() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_42",
+        "var t = 0;
+         export function update(v){
+            t++;
+            if (t === 1) { thisLayer.alpha = 0.9; return v; }
+            var c = thisScene.getInitialLayerConfig(thisLayer);
+            return c ? c.alpha : -1;
+         }",
+        Some(42),
+        ScriptValue::Float(0.0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = || HostFrame {
+        layers: vec![LayerState {
+            id: 42,
+            name: "L".into(),
+            alpha: Some(0.25),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    e.tick(frame(), vec![]).unwrap();
+    // The scripted write is live in the snapshot the host feeds back…
+    let mut mutated = frame();
+    mutated.layers[0].alpha = Some(0.9);
+    let out = e.tick(mutated, vec![]).unwrap();
+    // …but the initial config still reports the authored 0.25.
+    assert_eq!(out.property_results[0].1, ScriptValue::Float(0.25));
+}
+
 // ---- resizeScreen / applyGeneralSettings (d.ts ScriptModule) ---------------
 
 /// `resizeScreen(Vec2)` fires on resolution transitions only — the initial

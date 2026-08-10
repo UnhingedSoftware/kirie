@@ -263,14 +263,49 @@ var __scene = {
   // this frame's scripts updated (the op drains at end of tick, and the next
   // frame's snapshot no longer carries the record).
   destroyLayer: function (arg) {
-    var id = null;
-    if (typeof arg === 'number') { var byIdx = __host.layers[arg]; id = byIdx ? byIdx.id : null; }
-    else if (typeof arg === 'string') { for (var i = 0; i < __host.layers.length; i++) if (__host.layers[i].name === arg) { id = __host.layers[i].id; break; } }
-    else if (arg && arg.__id !== undefined && __layerById(arg.__id)) id = arg.__id;
+    var id = __resolveLayerId(arg);
     if (id === null) return false;
     __host.ops.push({ op: 'destroyLayer', id: id });
     return true;
   },
+  // d.ts: the layer's authored (scene.json) configuration, regardless of what
+  // scripts changed since — served from the first-frame snapshot.
+  getInitialLayerConfig: function (arg) {
+    var id = __resolveLayerId(arg);
+    if (id === null) return undefined;
+    var src = (__host.initialLayers && __host.initialLayers[id]) || __layerById(id);
+    if (!src) return undefined;
+    var out = {};
+    for (var k in src) {
+      if (!Object.prototype.hasOwnProperty.call(src, k) || k === 'id' || k === 'parent') continue;
+      var v = src[k];
+      if (__VEC3_PROPS[k]) out[k] = new Vec3(v[0], v[1], v[2]);
+      else out[k] = (v && v.slice && Array.isArray(v)) ? v.slice() : v;
+    }
+    return out;
+  },
+};
+
+// Resolve a layer argument (name, scriptable index, or proxy) to its id.
+function __resolveLayerId(arg) {
+  if (typeof arg === 'number') { var byIdx = __host.layers[arg]; return byIdx ? byIdx.id : null; }
+  if (typeof arg === 'string') { for (var i = 0; i < __host.layers.length; i++) if (__host.layers[i].name === arg) return __host.layers[i].id; return null; }
+  if (arg && arg.__id !== undefined && __layerById(arg.__id)) return arg.__id;
+  return null;
+}
+
+// One-time deep copy of the first frame's layer snapshot, backing
+// getInitialLayerConfig. Called by the host right after the first frame
+// marshal, before any script runs.
+globalThis.__snapshotInitialLayers = function () {
+  if (__host.initialLayers) return;
+  var snap = {};
+  for (var i = 0; i < __host.layers.length; i++) {
+    var l = __host.layers[i]; var c = {};
+    for (var k in l) if (Object.prototype.hasOwnProperty.call(l, k)) c[k] = (l[k] && l[k].slice && Array.isArray(l[k])) ? l[k].slice() : l[k];
+    snap[l.id] = c;
+  }
+  __host.initialLayers = snap;
 };
 ['bloom', 'bloomstrength', 'bloomthreshold', 'clearenabled', 'fov', 'nearz', 'farz', 'camerafade', 'camerashake', 'camerashakespeed', 'camerashakeamplitude', 'camerashakeroughness', 'cameraparallax', 'cameraparallaxamount', 'cameraparallaxdelay', 'cameraparallaxmouseinfluence'].forEach(function (k) {
   Object.defineProperty(__scene, k, { enumerable: true, get: function () { return __host.scene[k]; } });

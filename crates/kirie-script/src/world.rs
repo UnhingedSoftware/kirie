@@ -236,6 +236,9 @@ impl World {
             if let Err(e) = apply_frame(&ctx, frame) {
                 out.errors.push(e);
             }
+            // First frame only: snapshot the authored layer configs for
+            // `getInitialLayerConfig` (no-op afterwards).
+            let _ = call_void(&ctx, "__snapshotInitialLayers", ());
             // docs §3.2.a: fire due engine timers (self-catching in JS).
             let _ = call_void(&ctx, "__tickTimers", ());
             // Cursor events fire before the frame's update() calls, mirroring
