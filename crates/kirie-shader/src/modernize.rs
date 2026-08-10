@@ -131,7 +131,13 @@ pub fn modernize(_stage: Stage, assembled: Assembled) -> (String, Reflection) {
                     continue;
                 }
                 UniformDecl::Loose(member) => {
-                    block_members.push(member);
+                    // The member is hoisted into the globals block at the top
+                    // of the file, above any `#define` that names its array
+                    // size (the PBR legacy header sizes its light arrays with
+                    // LEGACY_CLUSTER_LIGHTS defined a line earlier) — resolve
+                    // known macro sizes to their integers so the hoisted
+                    // declaration stands alone.
+                    block_members.push(resolve_macro_array_sizes(&member, &defines));
                     continue;
                 }
                 UniformDecl::Other => { /* fall through, keep the line */ }
@@ -161,6 +167,35 @@ pub fn modernize(_stage: Stage, assembled: Assembled) -> (String, Reflection) {
     reflection.globals_block = block_members.iter().map(|m| member_name(m).to_string()).collect();
 
     (out, reflection)
+}
+
+/// Replace `[MACRO]` array sizes with their integer values when the macro is
+/// a known object-like define. Unknown names are left untouched — the shader
+/// then fails translation exactly as it would have, with the real name in the
+/// error.
+fn resolve_macro_array_sizes(
+    member: &str,
+    defines: &std::collections::HashMap<String, Option<i64>>,
+) -> String {
+    let mut out = String::with_capacity(member.len());
+    let mut rest = member;
+    while let Some(open) = rest.find('[') {
+        let Some(close_rel) = rest[open + 1..].find(']') else {
+            break;
+        };
+        let name = rest[open + 1..open + 1 + close_rel].trim();
+        out.push_str(&rest[..=open]);
+        match defines.get(name) {
+            Some(Some(v)) if name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') => {
+                out.push_str(&v.to_string());
+            }
+            _ => out.push_str(name),
+        }
+        out.push(']');
+        rest = &rest[open + 2 + close_rel..];
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Tri-state truth of a preprocessor branch: known-true, known-false, or
