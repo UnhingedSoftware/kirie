@@ -4,9 +4,8 @@ A fast, memory-safe wallpaper renderer for Linux, compatible with
 [Wallpaper Engine](https://www.wallpaperengine.io/) content. Written in Rust on
 wgpu/Vulkan, fully multithreaded, with a hash-keyed prebaked scene-bundle cache.
 
-Drop-in compatible with the CLI and control socket of
-[linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) — kirie
-is a from-scratch Rust descendant, validated scene-by-scene against it.
+Every wallpaper is validated scene by scene against how Wallpaper Engine itself
+renders it, so what you see on Linux is what the author published.
 
 Renders scene, video, image, and web wallpapers, with audio-reactive visualizers,
 SceneScript (JS) scripting, 3D puppet/model layers, and the full effect pipeline.
@@ -83,8 +82,8 @@ cargo build --release -p kirie --features web-webview  # needs webkit2gtk-4.1
 
 ## Usage
 
-kirie mirrors the `linux-wallpaperengine` CLI and control socket, so it drops
-into the same launchers:
+One binary, driven by flags or by its control socket, so a shell or panel can
+launch and steer it without a wrapper:
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg /path/to/workshop/item --scaling fill
@@ -94,10 +93,10 @@ kirie extract <scene.pkg|.tex> -o DIR  # unpack
 
 ## Credits
 
-- [Almamu/linux-wallpaperengine](https://github.com/Almamu/linux-wallpaperengine) —
-  the C++ reference implementation this project derives from and is validated against.
 - Wallpaper Engine is a product of Wallpaper Engine Team; this project is an
   independent, unaffiliated renderer for its content formats.
+- Wallpapers on the [compatibility list](https://unhingedsoftware.github.io/kirie/)
+  are the work of their Workshop authors.
 
 ## License
 

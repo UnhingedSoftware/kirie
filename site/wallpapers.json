@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "_comment": "Compatibility list for https://unhingedsoftware.github.io/kirie/. One entry per tested item. `status`: works | partial | broken | asset (an effect or preset used to build wallpapers, not a wallpaper itself); partial and broken must say what is wrong in `notes`. Screenshots are optional and live at shots/<id>.jpg -- they must be kirie's own render (`kirie --bg <dir> --screenshot out.png`), not the Workshop preview art. Run `python3 site/validate.py` before opening a pull request; CI runs the same check.",
+  "_comment": "Compatibility list for https://unhingedsoftware.github.io/kirie/. One entry per tested item. `status`: works | partial | broken | asset (an effect or preset used to build wallpapers, not a wallpaper itself); partial and broken must say what is wrong in `notes`. Images: shots/<id>.jpg is kirie's own render (`kirie --bg <dir> --screenshot out.png`) and is preferred. `preview_url` is an optional fallback for items kirie cannot capture -- it must be the Steam-hosted preview from ISteamRemoteStorage/GetPublishedFileDetails, hotlinked rather than copied here, and the page labels it as the author's Workshop preview. Run `python3 site/validate.py` before opening a pull request; CI runs the same check.",
   "wallpapers": [
     {
       "id": "1388331347",
@@ -56,21 +56,24 @@
       "title": "ION | Audio Responsive Wallpaper",
       "type": "web",
       "status": "works",
-      "notes": "Needs a web build. Audio reactivity and MPRIS now-playing both work; --screenshot of web items is CEF-only."
+      "notes": "Needs a web build. Audio reactivity and MPRIS now-playing both work on screen; the offscreen capture has no audio bridge, so it renders the idle state -- the image here is the author's preview.",
+      "preview_url": "https://images.steamusercontent.com/ugc/2079017828203972922/22B330F9A1EA5426C22006D2C19044E9C4CD79E9/"
     },
     {
       "id": "3551997868",
       "title": "Spectrum City Audio Visualizer",
       "type": "web",
       "status": "works",
-      "notes": "Needs a web build."
+      "notes": "Needs a web build. Audio-reactive: the offscreen capture has no audio bridge, so it renders the idle state -- the image here is the author's preview.",
+      "preview_url": "https://images.steamusercontent.com/ugc/14311757581059826381/37B84DE950FD79C2BFAD0E4E31FD969DE8934C46/"
     },
     {
       "id": "3347128360",
       "title": "Gradient generator",
       "type": "asset",
       "status": "asset",
-      "notes": "An effect preset wallpapers build on, not a wallpaper. kirie lists it as type asset and skips it in pickers."
+      "notes": "An effect preset wallpapers build on, not a wallpaper. kirie lists it as type asset and skips it in pickers.",
+      "preview_url": "https://images.steamusercontent.com/ugc/12639238444423967353/1494EE5E55EB0B99CA2F4B6BAFB75E3D533C63C7/"
     }
   ]
 }

@@ -27,7 +27,6 @@ body:
         Both are welcome — this only decides how it is tracked.
       options:
         - "Yes — Wallpaper Engine does this and kirie does not"
-        - "Yes — linux-wallpaperengine does this and kirie does not"
         - "No — this would be new"
         - "Not sure"
     validations:

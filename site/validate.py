@@ -15,6 +15,10 @@ SCHEMA = 1
 STATUSES = {"works", "partial", "broken", "asset"}
 TYPES = {"scene", "video", "web", "image", "asset", "application", "unknown"}
 FIELDS = {"id", "title", "type", "status", "notes"}
+OPTIONAL = {"preview_url"}
+# Workshop preview art is hotlinked from Steam, never copied into this repo, so
+# the URL has to be one Steam actually serves.
+PREVIEW_HOSTS = ("https://images.steamusercontent.com/", "https://steamuserimages-a.akamaihd.net/")
 
 errors = []
 
@@ -29,8 +33,15 @@ def check(entry, index):
     missing = FIELDS - entry.keys()
     if missing:
         errors.append(f"{where}: missing {', '.join(sorted(missing))}")
-    for extra in entry.keys() - FIELDS:
+    for extra in entry.keys() - FIELDS - OPTIONAL:
         errors.append(f"{where}: unknown field {extra!r}")
+
+    preview = entry.get("preview_url")
+    if preview is not None and not str(preview).startswith(PREVIEW_HOSTS):
+        errors.append(
+            f"{where}: preview_url must be the Steam-hosted preview "
+            f"(starting {' or '.join(PREVIEW_HOSTS)}), not a copy elsewhere"
+        )
 
     item_id = entry.get("id")
     if not isinstance(item_id, str) or not item_id.isdigit():
