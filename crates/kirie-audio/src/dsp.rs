@@ -36,16 +36,10 @@ pub const BANDS_32: usize = 32;
 /// See [`BANDS_16`].
 pub const BANDS_64: usize = 64;
 
-/// Default linear scale applied to the band targets (`KIRIE_AUDIO_BOOST`).
-///
-/// The fork's band formula (`0.35·log10(mag²)`, [`bands_from_spectrum`])
-/// yields ~0.7–1.0 for ordinary music, but workshop pages are visually tuned
-/// for the much smaller values real Wallpaper Engine produces — they clamp
-/// bands around 0.6 and ship height multipliers up to ×15, which only makes
-/// sense when a typical band reads ~0.05–0.2. Emitting the raw formula makes
-/// every audio-driven visual sit at full amplitude no matter how the page is
-/// configured. 0.12 lands ordinary music in the range those pages expect.
-pub const DEFAULT_LEVEL: f32 = 0.12;
+/// Legacy alias: the band curve is reshaped in the worker (affine remap of
+/// the fork formula into the range pages are tuned for); the user-facing
+/// level knob defaults to 1.0 on top of it.
+pub const DEFAULT_LEVEL: f32 = 1.0;
 
 /// `movetowards(c, t, d) = t if |t-c| <= d else c + sign(t-c)*d`
 /// (cpp:9-15). Slews `current` toward `target` by at most `delta` per call.
@@ -124,12 +118,13 @@ pub fn analyze_frame(
     fft: &dyn rustfft::Fft<f32>,
     samples: &[u8; WAVE_BUFFER_SIZE],
     gate: f32,
-) -> BandTargets {
+    ref_db: f32,
+) -> (BandTargets, Option<f32>) {
     debug_assert_eq!(fft.len(), WAVE_BUFFER_SIZE);
 
     // Noise gate (cpp:248-273): below threshold → all zeros, stop.
     if gate > 0.0 && gate_rms(samples) < gate {
-        return BandTargets::zero();
+        return (BandTargets::zero(), None);
     }
 
     // Normalize input (cpp:276-278). rustfft is a full complex FFT; feeding
@@ -140,38 +135,82 @@ pub fn analyze_frame(
         .collect();
     fft.process(&mut buf);
 
-    bands_from_spectrum(&buf[..FFT_BINS])
+    let spectrum = &buf[..FFT_BINS];
+    (bands_from_spectrum(spectrum, ref_db), frame_peak_db(spectrum))
 }
 
-/// Band reduction (cpp:285-302) from the first [`FFT_BINS`] complex bins.
-/// Split out so tests can drive it with a synthetic spectrum directly.
+/// Decibel window a band value spans: 0.0 at `ref_db - RANGE_DB`, 1.0 at
+/// `ref_db`. 50 dB is the span a hardware spectrum analyser typically draws:
+/// wide enough for music's quiet detail, narrow enough that the noise floor
+/// stays off screen.
+pub const RANGE_DB: f32 = 50.0;
+/// Power (dB) of a full-scale sine's bin in this unnormalized 1024-point FFT:
+/// magnitude N/2 = 512 → `20·log10(512)` ≈ 54.2. The auto-ranging reference
+/// starts here and can never rise above it.
+pub const REF_DB_MAX: f32 = 54.2;
+/// Lowest the auto-ranging reference may fall (bin magnitude ≈ 3). Below
+/// this there is no music to range onto — only quantisation noise — and
+/// following it down would draw bars in silence.
+pub const REF_DB_MIN: f32 = 10.0;
+/// How fast the reference falls toward quieter content, in dB per analysis
+/// frame (~23 ms → ≈ 2.6 dB/s). Rising is instant: a loud transient must
+/// never draw off the top of the window for seconds.
+pub const REF_DECAY_DB: f32 = 0.06;
+
+/// Band reduction from the first [`FFT_BINS`] complex bins: even bins
+/// `0,2,..,126` (the C++ fork's bin selection), mapped through a normalized
+/// dB window instead of the fork's `0.35·log10(mag²)`.
 ///
-/// ```text
-/// idx  = band * 2                        // even bins 0,2,..,126
-/// mag2 = re^2 + im^2                      // squared magnitude
-/// f1   = mag2 > 0 ? 0.35 * log10(mag2) : 0
-/// dest64[band]      = min(1.0, f1 * boost(band/63))
-/// dest32[band >> 1] = min(1.0, f1 * boost(band/31))   // overwritten, not averaged
-/// dest16[band >> 2] = min(1.0, f1 * boost(band/15))   // overwritten, not averaged
-/// ```
+/// The fork's curve is not kept, deliberately. Its active span is 28 dB
+/// (`mag² ∈ 1..720`): any bin louder than that pins at 1.0 and anything
+/// quieter goes negative, which a page clamps to zero — with real music,
+/// whose bins span ~80 dB, every band reads as either full or empty. On
+/// screen that is a visualizer with towering bass, a dead middle, and no
+/// in-between motion at any listening volume.
 ///
-/// Quirks preserved: only `min(1,·)` — no lower clamp, so bands go negative
-/// when `mag2 < 1`; the 32/16 entries keep the value from the *highest* band
-/// index in their group (band ≡ 1 mod 2 / 3 mod 4).
+/// `value = (power_dB - (REF_DB - RANGE_DB)) / RANGE_DB`, clamped to `0..=1`,
+/// then shaped by the fork's frequency [`boost`] so bass/treble balance stays
+/// familiar. A full-scale bin reads 1.0; 60 dB below it reads 0; ordinary
+/// music spreads across 0.1–0.7.
+///
+/// Split out so tests can drive it with a synthetic spectrum directly. The
+/// 32/16 entries keep the value from the highest band index in their group
+/// (band ≡ 1 mod 2 / 3 mod 4) — the fork's overwrite quirk, preserved so the
+/// three arrays stay mutually consistent.
 #[must_use]
-pub fn bands_from_spectrum(spectrum: &[Complex<f32>]) -> BandTargets {
+pub fn bands_from_spectrum(spectrum: &[Complex<f32>], ref_db: f32) -> BandTargets {
     let mut out = BandTargets::zero();
     for band in 0..BANDS_64 {
         let idx = band * 2;
         let c = spectrum[idx];
         let mag2 = c.re * c.re + c.im * c.im;
-        let f1 = if mag2 > 0.0 { 0.35 * mag2.log10() } else { 0.0 };
+        let f1 = if mag2 > 0.0 {
+            ((10.0 * mag2.log10() - (ref_db - RANGE_DB)) / RANGE_DB).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         let bf = band as f32;
         out.b64[band] = (f1 * boost(bf / 63.0)).min(1.0);
         out.b32[band >> 1] = (f1 * boost(bf / 31.0)).min(1.0);
         out.b16[band >> 2] = (f1 * boost(bf / 15.0)).min(1.0);
     }
     out
+}
+
+/// The loudest bin's power (dB) among the even bins the bands read, or `None`
+/// when every read bin is silent. Feeds the worker's auto-ranging reference.
+#[must_use]
+pub fn frame_peak_db(spectrum: &[Complex<f32>]) -> Option<f32> {
+    let mut peak: Option<f32> = None;
+    for band in 0..BANDS_64 {
+        let c = spectrum[band * 2];
+        let mag2 = c.re * c.re + c.im * c.im;
+        if mag2 > 0.0 {
+            let db = 10.0 * mag2.log10();
+            peak = Some(peak.map_or(db, |p: f32| p.max(db)));
+        }
+    }
+    peak
 }
 
 /// Displayed band arrays that slew toward [`BandTargets`] at [`SMOOTH_RATE`].
@@ -278,17 +317,29 @@ mod tests {
         assert!(gate_rms(&loud) > DEFAULT_GATE);
     }
 
-    /// `bands_from_spectrum` applies `0.35*log10(mag2)*boost` exactly.
+    /// `bands_from_spectrum` applies the normalized dB window exactly:
+    /// `(10*log10(mag2) - (REF_DB - RANGE_DB)) / RANGE_DB`, then `boost`.
     #[test]
     fn bands_formula_exact() {
         let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
-        // band 1 → idx 2. Choose magnitude so mag2 == 100 → log10 = 2.
+        // band 1 → idx 2. mag2 == 100 → 20 dB.
         spec[2] = Complex::new(10.0, 0.0);
-        let out = bands_from_spectrum(&spec);
-        let expected = 0.35 * 100.0f32.log10() * boost(1.0 / 63.0);
+        let out = bands_from_spectrum(&spec, REF_DB_MAX);
+        let f1 = (20.0 - (REF_DB_MAX - RANGE_DB)) / RANGE_DB;
+        let expected = f1 * boost(1.0 / 63.0);
         assert!((out.b64[1] - expected).abs() < 1e-5, "got {}", out.b64[1]);
-        // band 0 untouched → zero (mag2 == 0 → f1 == 0).
+        // band 0 untouched → zero (mag2 == 0 → no signal).
         assert_eq!(out.b64[0], 0.0);
+        // A full-scale bin (mag = 512) reads 1.0 before the frequency boost.
+        let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
+        spec[126] = Complex::new(512.0, 0.0);
+        let out = bands_from_spectrum(&spec, REF_DB_MAX);
+        assert!((out.b64[63] - boost(1.0).min(1.0f32)).abs() < 0.02, "got {}", out.b64[63]);
+        // Quieter than the window floor → exactly zero, not negative.
+        let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
+        spec[2] = Complex::new(0.4, 0.0); // ≈ -8 dB, below REF_DB - RANGE_DB
+        let out = bands_from_spectrum(&spec, REF_DB_MAX);
+        assert_eq!(out.b64[1], 0.0);
     }
 
     /// The 32/16 destinations keep the value from the *highest* band index in
@@ -298,10 +349,11 @@ mod tests {
         let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
         // Group for b32[0] is bands {0,1}; give band 1 (idx 2) energy only.
         spec[2] = Complex::new(10.0, 0.0);
-        let out = bands_from_spectrum(&spec);
+        let out = bands_from_spectrum(&spec, REF_DB_MAX);
         // b32[0] is written last by band 1 (band>>1 == 0) → equals band-1 value
         // under the /31 boost, NOT the band-0 (zero) value.
-        let expected = 0.35 * 100.0f32.log10() * boost(1.0 / 31.0);
+        let f1 = (20.0 - (REF_DB_MAX - RANGE_DB)) / RANGE_DB;
+        let expected = f1 * boost(1.0 / 31.0);
         assert!((out.b32[0] - expected).abs() < 1e-5, "got {}", out.b32[0]);
     }
 
@@ -318,7 +370,7 @@ mod tests {
             let v = 128.0 + 100.0 * (std::f32::consts::TAU * 40.0 * i as f32 / 1024.0).sin();
             *s = v.round().clamp(0.0, 255.0) as u8;
         }
-        let out = analyze_frame(fft.as_ref(), &samples, DEFAULT_GATE);
+        let (out, _) = analyze_frame(fft.as_ref(), &samples, DEFAULT_GATE, REF_DB_MAX);
         // Band 20 is strong (clamps toward 1.0); DC band 0 is ~0.
         assert!(out.b64[20] > 0.5, "band 20 = {}", out.b64[20]);
         assert!(out.b64[0] <= 0.0, "DC band 0 = {}", out.b64[0]);
@@ -328,7 +380,7 @@ mod tests {
 
         // Silence → gate zeros everything.
         let silent = [128u8; WAVE_BUFFER_SIZE];
-        let zero = analyze_frame(fft.as_ref(), &silent, DEFAULT_GATE);
+        let (zero, _) = analyze_frame(fft.as_ref(), &silent, DEFAULT_GATE, REF_DB_MAX);
         assert_eq!(zero, BandTargets::zero());
     }
 
@@ -343,9 +395,9 @@ mod tests {
                 *s = 129;
             }
         }
-        let gated = analyze_frame(fft.as_ref(), &samples, DEFAULT_GATE);
+        let (gated, _) = analyze_frame(fft.as_ref(), &samples, DEFAULT_GATE, REF_DB_MAX);
         assert_eq!(gated, BandTargets::zero());
-        let ungated = analyze_frame(fft.as_ref(), &samples, 0.0);
+        let (ungated, _) = analyze_frame(fft.as_ref(), &samples, 0.0, REF_DB_MAX);
         // Nyquist-ish content → some band is non-zero (not all zero).
         assert!(ungated != BandTargets::zero());
     }

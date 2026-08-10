@@ -73,6 +73,7 @@ pub(crate) fn run(
     // thread).
     let mut drain = [0u8; 8192];
 
+    let mut ref_db: f32 = crate::dsp::REF_DB_MAX;
     while !shutdown.load(Ordering::Relaxed) {
         // Drain everything currently available, assembling frames; keep the
         // newest completed window.
@@ -88,13 +89,20 @@ pub(crate) fn run(
         }
 
         if let Some(frame) = latest {
-            let mut targets: BandTargets = crate::dsp::analyze_frame(fft.as_ref(), &frame, params.gate);
-            // On-screen level control. The bands are logarithmic in sample
-            // amplitude (0.35·log10(mag²), dsp.rs), so pre-scaling the
-            // samples barely moves them — any audible signal lands near 1.0.
-            // Scaling here is linear in what a page actually draws: 0.5 means
-            // half-height bars. KIRIE_AUDIO_BOOST, default 1.0 (reference
-            // behaviour).
+            // Auto-ranging window reference: jumps up instantly to the
+            // loudest bin seen, falls back slowly (~2.6 dB/s) toward quieter
+            // content, and never chases below the noise floor. Spectrum shape
+            // within the window is untouched — this only decides where the
+            // window sits, so the same track looks the same at any source
+            // level.
+            let (mut targets, frame_peak) =
+                crate::dsp::analyze_frame(fft.as_ref(), &frame, params.gate, ref_db);
+            match frame_peak {
+                Some(peak) if peak > ref_db => ref_db = peak.min(crate::dsp::REF_DB_MAX),
+                _ => ref_db = (ref_db - crate::dsp::REF_DECAY_DB).max(crate::dsp::REF_DB_MIN),
+            }
+            // Optional linear trim on what pages draw (KIRIE_AUDIO_BOOST,
+            // default 1.0 = the window output untouched).
             if (params.level - 1.0).abs() > f32::EPSILON {
                 for v in targets
                     .b64
@@ -102,7 +110,7 @@ pub(crate) fn run(
                     .chain(targets.b32.iter_mut())
                     .chain(targets.b16.iter_mut())
                 {
-                    *v *= params.level;
+                    *v = (*v * params.level).min(1.0);
                 }
             }
             smoother.set_targets(targets);
