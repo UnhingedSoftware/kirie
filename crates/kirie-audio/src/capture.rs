@@ -377,7 +377,11 @@ fn open_stream(
         // into the next callback rather than dropped — dropping it would shift
         // the byte parity and turn the rest of the stream into noise.
         let mut carry: Option<u8> = None;
-        let mut scratch: Vec<u8> = Vec::new();
+        let mut scratch: Vec<i16> = Vec::new();
+        let mut folded: Vec<u8> = Vec::new();
+        // Running peak for the auto-gain below, decayed per fragment (~10 ms
+        // each) so a track change re-converges in well under a second.
+        let mut running_peak: f32 = 0.0;
         stream
             .borrow_mut()
             .set_read_callback(Some(Box::new(move |_nbytes| {
@@ -385,10 +389,6 @@ fn open_stream(
                 loop {
                     match s.peek() {
                         Ok(PeekResult::Data(data)) => {
-                            // S16LE → the DSP's U8 domain: take the high byte
-                            // (a plain >>8 on the signed value) and bias to
-                            // unsigned, which is exactly what a U8 capture of
-                            // the same signal would have produced.
                             scratch.clear();
                             scratch.reserve(data.len() / 2 + 1);
                             let mut iter = data.iter().copied();
@@ -398,10 +398,44 @@ fn open_stream(
                                     carry = Some(low);
                                     break;
                                 };
-                                let sample = i16::from_le_bytes([low, high]);
-                                scratch.push(((sample >> 8) as i32 + 128) as u8);
+                                scratch.push(i16::from_le_bytes([low, high]));
                             }
-                            producer_cb.borrow_mut().push_slice(&scratch);
+
+                            // S16 → the DSP's U8 domain, with auto-gain.
+                            //
+                            // A monitor rarely carries a full-scale signal: the
+                            // player's stream volume, a mixer strip fader, or
+                            // the server's softvol all attenuate it, and only
+                            // the top 8 of the 16 bits survive the fold. Music
+                            // at a few percent then folds to ±2..6 — beneath
+                            // the reference's noise gate (`DEFAULT_GATE`), so
+                            // the spectrum reads as permanent silence even
+                            // though signal is flowing. Normalising against a
+                            // decayed running peak hands the DSP the same
+                            // full-scale waveform the reference gets from a
+                            // plain Windows loopback, at any playback volume.
+                            //
+                            // True silence must stay silence, so gain is only
+                            // applied once the peak clears a noise floor (~1%
+                            // of full scale) — an idle monitor's hiss is never
+                            // amplified into a phantom beat.
+                            let frag_peak = scratch
+                                .iter()
+                                .map(|s| f32::from(s.unsigned_abs() as u16))
+                                .fold(0.0, f32::max);
+                            running_peak = frag_peak.max(running_peak * 0.98);
+                            let gain = if running_peak > 327.0 {
+                                (30000.0 / running_peak).min(100.0)
+                            } else {
+                                1.0
+                            };
+                            folded.clear();
+                            folded.reserve(scratch.len());
+                            for &sample in &scratch {
+                                let scaled = (f32::from(sample) * gain).clamp(-32768.0, 32767.0) as i32;
+                                folded.push(((scaled >> 8) + 128) as u8);
+                            }
+                            producer_cb.borrow_mut().push_slice(&folded);
                             let _ = s.discard();
                         }
                         Ok(PeekResult::Hole(_)) => {
