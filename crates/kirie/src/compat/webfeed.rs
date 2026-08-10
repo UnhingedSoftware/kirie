@@ -197,6 +197,7 @@ mod tests {
         let feed = feed();
         let a = art(200);
         let mut state = MediaState {
+            player_pid: None,
             available: true,
             player: None,
             playback: kirie_render::PlaybackState::Playing,

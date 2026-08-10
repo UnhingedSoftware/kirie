@@ -70,8 +70,15 @@ struct AppState {
     /// Mute gate (doc §4.5).
     muted: bool,
     /// Stored per-key property overrides (doc §4.9: recorded even when not
-    /// live-applicable; "applies in P4/P5").
+    /// live-applicable; "applies in P4/P5"). These belong to the wallpaper
+    /// currently shown — see `staged` for why the distinction matters.
     properties: BTreeMap<String, String>,
+    /// Overrides staged for the NEXT wallpaper (`stage` commands, sent by the
+    /// daemon before `bg`). A swap replaces `properties` with this table
+    /// wholesale: overrides are per-wallpaper, and merging them across a swap
+    /// leaks one wallpaper's settings into another — a scheme color saved for
+    /// one background repainted the next one's black sky light blue.
+    staged: BTreeMap<String, String>,
     /// Live-swap context (render-command sender + build params), set once the
     /// platform is up. `None` until then (and on X11) → `bg`/`preload` error.
     swap: Arc<Mutex<Option<SwapCtx>>>,
@@ -121,6 +128,7 @@ impl IpcApp {
             volume,
             muted,
             properties: BTreeMap::new(),
+            staged: BTreeMap::new(),
             swap: swap.clone(),
             prop_gen: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         };
@@ -323,6 +331,12 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             // wallpaper's path at schedule time; firing after this switch would
             // swap the old wallpaper back in. Invalidate it.
             state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // Overrides are per-wallpaper: the staged table (this wallpaper's
+            // saved settings, sent via `stage` just before this command)
+            // replaces the previous wallpaper's outright. No staging ⇒ the new
+            // wallpaper runs on its project defaults, which is what an absent
+            // config means.
+            state.properties = std::mem::take(&mut state.staged);
             let sc = state
                 .swap
                 .lock()
@@ -408,6 +422,15 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             // doc §4.9: error if the screen has no registered background. The
             // override is recorded regardless (stored-before-validation) so a
             // later swap/reload picks it up...
+            //
+            // `stage` (empty screen) records for the NEXT wallpaper only: the
+            // daemon stages the incoming wallpaper's saved overrides before
+            // `bg`, and the swap replaces the active table with the staged
+            // one. A live `property` targets the wallpaper on screen now.
+            if screen.is_empty() {
+                state.staged.insert(key.clone(), value.clone());
+                return CommandOutcome::Ok;
+            }
             state.properties.insert(key.clone(), value.clone());
             // ...and applied LIVE to the running renderer on `screen` (a real
             // monitor). `stage` maps here with an empty screen, which targets no
