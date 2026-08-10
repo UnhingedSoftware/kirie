@@ -1002,6 +1002,25 @@ impl SceneRenderer {
             });
             self.runtime_seq += 1;
         }
+        for id in script.take_destroyed() {
+            // `thisScene.destroyLayer`: a script-created layer is really
+            // removed (the runtime map is ours); a scene-built item is
+            // tombstoned — hidden and gated off for its descendants — because
+            // actually deleting it would invalidate the video/donor indices
+            // built at scene build (documented deviation, same net pixels).
+            if self.runtime_layers.remove(&id).is_none() {
+                self.visible_by_id.insert(id, false);
+                for item in &mut self.items {
+                    match item {
+                        SceneItem::Image(o) if o.id == id => o.visible = false,
+                        SceneItem::Text(t) if t.id == id => t.visible = false,
+                        SceneItem::Particle(p) if p.id == id => p.visible = false,
+                        SceneItem::Model(m) if m.id == id => m.visible = false,
+                        _ => {}
+                    }
+                }
+            }
+        }
         if let Some(cam) = script.take_camera() {
             // Runtime camera override (`scene_set_camera_transforms`,
             // `Scripting/SceneObject.cpp:261-286`): only the perspective camera

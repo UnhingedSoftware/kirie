@@ -142,6 +142,47 @@ fn text_writes_and_created_layer_writes_reach_updates() {
     }
 }
 
+/// `thisScene.destroyLayer` drains the id (take_destroyed), removes the
+/// record from the next snapshot, and later writes to the dead proxy no-op.
+#[test]
+fn destroy_layer_drains_and_forgets_the_record() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 7,
+                "name": "layer",
+                "image": "models/x.json",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "var made = null, t = 0; export function update(v) { t++; if (t === 1) { made = thisScene.createLayer('models/glow.json'); } if (t === 2) { if (!thisScene.destroyLayer(made)) console.error('destroy failed'); } if (t === 3) { made.alpha = 0.5; } return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+
+    // Tick 1: created.
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    let created = host.take_created();
+    assert_eq!(created.len(), 1, "created: {created:?}");
+    let id = created[0].0;
+    assert!(host.take_destroyed().is_empty());
+
+    // Tick 2: destroyed — id drained exactly once.
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    assert_eq!(host.take_destroyed(), vec![id]);
+
+    // Tick 3: writing through the dead proxy produces no update for it.
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    assert!(
+        updates.iter().all(|u| u.object_id != id),
+        "write to a destroyed layer must no-op: {updates:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

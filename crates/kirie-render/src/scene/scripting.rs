@@ -169,6 +169,9 @@ pub struct ScriptHost {
     /// Runtime layers created by scripts this session (`thisScene.createLayer`),
     /// drained by the renderer via [`Self::take_created`]: (synthetic id, path).
     created: Vec<(i64, String)>,
+    /// Layer ids destroyed by scripts (`thisScene.destroyLayer`), drained via
+    /// [`Self::take_destroyed`].
+    destroyed: Vec<i64>,
     /// Pending runtime camera override (`thisScene.setCameraTransforms`),
     /// merged across the tick's ops, drained via [`Self::take_camera`].
     camera_op: Option<CameraOp>,
@@ -332,6 +335,7 @@ impl ScriptHost {
             res: [res.0 as f32, res.1 as f32],
             elapsed: 0.0,
             created: Vec::new(),
+            destroyed: Vec::new(),
             camera_op: None,
             order_dirty: false,
             parent_updates: Vec::new(),
@@ -605,9 +609,23 @@ impl ScriptHost {
                         self.parent_updates.push(u);
                     }
                 }
+                SceneOp::DestroyLayer { layer_id } => {
+                    // Drop the snapshot record — next tick's marshal no longer
+                    // carries it, so every proxy read returns null from here on
+                    // (the d.ts end-of-frame removal). The renderer drains the
+                    // id via take_destroyed.
+                    self.layers.retain(|l| l.id != layer_id);
+                    self.destroyed.push(layer_id);
+                }
             }
         }
         updates
+    }
+
+    /// Drain the layer ids destroyed by scripts this tick
+    /// (`thisScene.destroyLayer`).
+    pub fn take_destroyed(&mut self) -> Vec<i64> {
+        std::mem::take(&mut self.destroyed)
     }
 
     /// Drain the tick's merged runtime camera override, if any

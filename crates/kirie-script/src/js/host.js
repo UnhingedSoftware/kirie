@@ -259,6 +259,18 @@ var __scene = {
     return __makeLayer(id);
   },
   sortLayer: function (layer, index) { if (layer && layer.__id !== undefined) __host.ops.push({ op: 'sortLayer', id: layer.__id, index: index }); },
+  // d.ts: remove by name, index or object; the layer disappears after all of
+  // this frame's scripts updated (the op drains at end of tick, and the next
+  // frame's snapshot no longer carries the record).
+  destroyLayer: function (arg) {
+    var id = null;
+    if (typeof arg === 'number') { var byIdx = __host.layers[arg]; id = byIdx ? byIdx.id : null; }
+    else if (typeof arg === 'string') { for (var i = 0; i < __host.layers.length; i++) if (__host.layers[i].name === arg) { id = __host.layers[i].id; break; } }
+    else if (arg && arg.__id !== undefined && __layerById(arg.__id)) id = arg.__id;
+    if (id === null) return false;
+    __host.ops.push({ op: 'destroyLayer', id: id });
+    return true;
+  },
 };
 ['bloom', 'bloomstrength', 'bloomthreshold', 'clearenabled', 'fov', 'nearz', 'farz', 'camerafade', 'camerashake', 'camerashakespeed', 'camerashakeamplitude', 'camerashakeroughness', 'cameraparallax', 'cameraparallaxamount', 'cameraparallaxdelay', 'cameraparallaxmouseinfluence'].forEach(function (k) {
   Object.defineProperty(__scene, k, { enumerable: true, get: function () { return __host.scene[k]; } });

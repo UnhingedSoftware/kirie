@@ -783,6 +783,9 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
             index: obj.get::<_, f64>("index").ok()? as i64,
         }),
+        "destroyLayer" => Some(SceneOp::DestroyLayer {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+        }),
         _ => None,
     }
 }

@@ -330,6 +330,13 @@ pub enum SceneOp {
         /// New scriptable index.
         index: i64,
     },
+    /// `thisScene.destroyLayer(...)` — remove a layer. Applied after the
+    /// frame's scripts ran (d.ts: "removed after all scripts on that frame
+    /// updated"), which drain-then-apply gives for free.
+    DestroyLayer {
+        /// Target layer id.
+        layer_id: i64,
+    },
 }
 
 /// A single console line drained from a tick.
