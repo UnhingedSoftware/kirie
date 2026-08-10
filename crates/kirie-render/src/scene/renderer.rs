@@ -1847,6 +1847,24 @@ impl Renderer for SceneRenderer {
                     tg.retext(&self.device, &self.queue, tp, fonts, &new_text);
                 }
             }
+            // `thisLayer.text = …` from property scripts (module ops), applied
+            // at the same seam so both write paths share the change-dedupe.
+            for u in &updates {
+                if u.target != PropTarget::Text {
+                    continue;
+                }
+                let kirie_script::ScriptValue::Str(s) = &u.value else {
+                    continue;
+                };
+                for item in &mut self.items {
+                    if let SceneItem::Text(tg) = item
+                        && tg.id == u.object_id
+                        && tg.current_text() != s.as_str()
+                    {
+                        tg.retext(&self.device, &self.queue, tp, fonts, s);
+                    }
+                }
+            }
         }
 
         // Recompute the blit UV window on resize (docs §4; cached like the

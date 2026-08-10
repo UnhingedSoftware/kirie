@@ -193,9 +193,9 @@ function __makeLayer(id) {
         else if (__VEC2_PROPS[name]) { if (typeof val === 'number') stored = [val, val]; else stored = [val.x || 0, val.y || 0]; }
         else if (__BOOL_PROPS[name]) stored = !!val;
         else if (__NUM_PROPS[name]) stored = +val;
-        else stored = val; // string props ignored by C++ ILayer set; we store for reads
+        else stored = String(val);
         l[name] = stored;
-        if (!__STR_PROPS[name]) __recordProp(id, name, (stored && stored.slice) ? stored.slice() : stored);
+        __recordProp(id, name, (stored && Array.isArray(stored)) ? stored.slice() : stored);
       },
     });
   });

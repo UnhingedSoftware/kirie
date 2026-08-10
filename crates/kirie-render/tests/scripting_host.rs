@@ -102,6 +102,46 @@ fn retained_frame_refreshes_user_props() {
     assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false)) - 0.9).abs() < 1e-6);
 }
 
+/// `thisLayer.text = …` from a property script must surface as a Text
+/// property update (the renderer routes it to the re-rasterize seam) — and
+/// writes to a script-created layer must keep flowing on ticks after the
+/// creation tick (the synthetic record persists in the layer snapshot).
+#[test]
+fn text_writes_and_created_layer_writes_reach_updates() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 9,
+                "name": "label",
+                "text": "hi",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "var made = null; export function update(v) { thisLayer.text = 'tick ' + engine.runtime; if (!made) { made = thisScene.createLayer('models/glow.json'); } made.alpha = engine.runtime; return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    for t in 0..3 {
+        let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+        assert!(
+            updates.iter().any(|u| u.object_id == 9
+                && u.target == PropTarget::Text
+                && matches!(&u.value, kirie_script::ScriptValue::Str(s) if s.starts_with("tick "))),
+            "tick {t}: no Text update for the thisLayer.text write"
+        );
+        assert!(
+            updates
+                .iter()
+                .any(|u| u.object_id <= -1000 && u.target == PropTarget::Alpha),
+            "tick {t}: created-layer alpha write was dropped"
+        );
+    }
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{
