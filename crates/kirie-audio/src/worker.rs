@@ -12,7 +12,7 @@ use ringbuf::HeapCons;
 use ringbuf::traits::Consumer;
 use rustfft::{Fft, FftPlanner};
 
-use crate::dsp::{BandTargets, Smoother, WAVE_BUFFER_SIZE};
+use crate::dsp::{Smoother, WAVE_BUFFER_SIZE};
 use crate::spectrum::AudioSpectrum;
 
 /// Assembles the ring's byte stream into 1024-sample frames, keeping only the
