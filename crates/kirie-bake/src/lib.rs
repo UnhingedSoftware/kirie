@@ -46,6 +46,31 @@ pub use baker::{BackgroundBaker, BakeOutcome, BakerConfig, ContentFn, PauseFn, S
 /// reliably releases the main arena. Capping the count early keeps transient
 /// build allocations in a couple of arenas the trims actually reach, so RSS
 /// doesn't ratchet up across wallpaper switches. Call once at startup.
+/// The installed Wallpaper Engine `assets/shaders` directory, when present.
+///
+/// Mirrors the engine's Steam-root probe (kept tiny and duplicated here on
+/// purpose: kirie-bake stays dependency-light, and these four spellings are
+/// the stable Steam install layouts). Used by [`key::BundleKey`]'s assets
+/// fingerprint — see there for why bundles must track asset updates.
+pub(crate) fn we_assets_shaders_dir() -> Option<std::path::PathBuf> {
+    const ROOTS: [&str; 4] = [
+        ".local/share/Steam/steamapps/common/wallpaper_engine/assets",
+        ".steam/steam/steamapps/common/wallpaper_engine/assets",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
+        "snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
+    ];
+    if let Some(over) = std::env::var_os("KIRIE_WE_ASSETS") {
+        let p = std::path::PathBuf::from(over).join("shaders");
+        return p.is_dir().then_some(p);
+    }
+    let home = std::env::var_os("HOME")?;
+    let home = std::path::PathBuf::from(home);
+    ROOTS
+        .iter()
+        .map(|r| home.join(r).join("shaders"))
+        .find(|p| p.is_dir())
+}
+
 pub fn limit_malloc_arenas(n: i32) {
     // SAFETY: mallopt sets an allocator tuning knob; no pointers involved.
     unsafe {

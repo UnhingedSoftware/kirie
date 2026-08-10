@@ -172,7 +172,7 @@ pub(super) fn build_model(
         ) {
             Ok(b) => b,
             Err(e) => {
-                tracing::debug!(mesh = mi, shader = %raw_pass.shader, error = %e, "model mesh pipeline failed; skipped");
+                tracing::warn!(mesh = mi, shader = %raw_pass.shader, error = %e, "model mesh pipeline failed; skipped");
                 continue;
             }
         };

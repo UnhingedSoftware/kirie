@@ -24,15 +24,24 @@ pub struct BundleKey([u8; 32]);
 
 impl BundleKey {
     /// Compute the key for `source` — the raw `scene.pkg` / `project.json` bytes
-    /// that define the wallpaper — mixed with [`BAKE_FORMAT_VERSION`] and
-    /// [`kirie_shader::TRANSLATOR_VERSION`] (SPEC.md §V8).
+    /// that define the wallpaper — mixed with [`BAKE_FORMAT_VERSION`],
+    /// [`kirie_shader::TRANSLATOR_VERSION`] and the shared-assets fingerprint
+    /// (SPEC.md §V8).
+    ///
+    /// The fingerprint is load-bearing: a bundle bakes shaders assembled from
+    /// Wallpaper Engine's shared asset headers, and Steam updates those
+    /// underneath us. Without it, an asset update leaves every bundle
+    /// stale-but-hitting — rendering with the previous asset generation while
+    /// freshly-built wallpapers use the new one, a divergence that shows up as
+    /// wallpapers breaking or healing at random as caches turn over.
     #[must_use]
     pub fn compute(source: &[u8]) -> Self {
         let mut h = blake3::Hasher::new();
         h.update(source);
-        // Domain-separate the two versions so bumping either changes the key.
+        // Domain-separate the versions so bumping either changes the key.
         h.update(&BAKE_FORMAT_VERSION.to_le_bytes());
         h.update(&kirie_shader::TRANSLATOR_VERSION.to_le_bytes());
+        h.update(&assets_fingerprint());
         BundleKey(*h.finalize().as_bytes())
     }
 
@@ -51,6 +60,54 @@ impl BundleKey {
             let _ = write!(s, "{b:02x}");
         }
         s
+    }
+}
+
+/// A cheap fingerprint of the Wallpaper Engine shared shader assets: file
+/// name, size and mtime of everything under `assets/shaders`, hashed. Metadata
+/// only — hashing hundreds of megabytes of asset content per launch is not
+/// acceptable, and Steam always rewrites mtimes when it patches. Cached for
+/// the process lifetime; an empty fingerprint (no assets found) is itself a
+/// stable value.
+fn assets_fingerprint() -> [u8; 32] {
+    use std::sync::OnceLock;
+    static FP: OnceLock<[u8; 32]> = OnceLock::new();
+    *FP.get_or_init(|| {
+        let mut entries: Vec<String> = Vec::new();
+        if let Some(dir) = crate::we_assets_shaders_dir() {
+            collect_meta(&dir, &dir, &mut entries);
+        }
+        entries.sort();
+        let mut h = blake3::Hasher::new();
+        for e in &entries {
+            h.update(e.as_bytes());
+            h.update(&[0]);
+        }
+        *h.finalize().as_bytes()
+    })
+}
+
+/// Recursively record `relpath:len:mtime` for every file under `dir`.
+fn collect_meta(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_meta(root, &path, out);
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| d.as_secs());
+        let rel = path
+            .strip_prefix(root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .into_owned();
+        out.push(format!("{rel}:{}:{mtime}", meta.len()));
     }
 }
 
