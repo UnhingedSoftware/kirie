@@ -244,6 +244,35 @@ fn this_layer_write_records_scene_op() {
     );
 }
 
+// ---- input surface (docs §6.4) --------------------------------------------
+
+/// `input.cursorScreenPosition` is in pixels (reference d.ts), i.e. the same
+/// units as `engine.screenResolution` — scripts compute
+/// `screenResolution.y - cursorScreenPosition.y` for y-up deltas.
+#[test]
+fn cursor_screen_position_is_in_pixels() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "export function update(v){ return input.cursorScreenPosition.x + input.cursorScreenPosition.y; }",
+        Some(7),
+        ScriptValue::Float(0.0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        res_x: 1920.0,
+        res_y: 1080.0,
+        pointer_screen: [0.5, 0.25],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    match &out.property_results[0].1 {
+        ScriptValue::Float(f) => assert!((f - (960.0 + 270.0)).abs() < 1e-6, "got {f}"),
+        other => panic!("expected float, got {other:?}"),
+    }
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]

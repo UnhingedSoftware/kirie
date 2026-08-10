@@ -92,7 +92,11 @@ globalThis.__tickTimers = function () {
 // ---- input (docs §6.4) ----------------------------------------------------
 globalThis.input = {
   get cursorWorldPosition() { return new Vec3(__host.pointerWorld[0], __host.pointerWorld[1], __host.pointerWorld[2]); },
-  get cursorScreenPosition() { return new Vec2(__host.pointerScreen[0], __host.pointerScreen[1]); },
+  // Reference d.ts: "Position of the cursor on the screen in pixels" — the
+  // same units as engine.screenResolution (scripts compute
+  // `screenResolution.y - cursorScreenPosition.y`). The host feeds the
+  // surface-normalized [0,1] pointer, so scale by the resolution here.
+  get cursorScreenPosition() { return new Vec2(__host.pointerScreen[0] * __host.resX, __host.pointerScreen[1] * __host.resY); },
   get cursorLeftDown() { return __host.pointerLeftDown; },
 };
 
