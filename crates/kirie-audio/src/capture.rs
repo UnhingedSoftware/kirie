@@ -379,9 +379,12 @@ fn open_stream(
         let mut carry: Option<u8> = None;
         let mut scratch: Vec<i16> = Vec::new();
         let mut folded: Vec<u8> = Vec::new();
-        // Running peak for the auto-gain below, decayed per fragment (~10 ms
-        // each) so a track change re-converges in well under a second.
-        let mut running_peak: f32 = 0.0;
+        let boost: f32 = std::env::var("KIRIE_AUDIO_BOOST")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|b: &f32| b.is_finite() && *b >= 0.0)
+            .unwrap_or(4.0)
+            .min(64.0);
         stream
             .borrow_mut()
             .set_read_callback(Some(Box::new(move |_nbytes| {
@@ -401,40 +404,25 @@ fn open_stream(
                                 scratch.push(i16::from_le_bytes([low, high]));
                             }
 
-                            // S16 → the DSP's U8 domain, with auto-gain.
+                            // S16 → the DSP's U8 domain, at a fixed gain.
                             //
-                            // A monitor rarely carries a full-scale signal: the
-                            // player's stream volume, a mixer strip fader, or
-                            // the server's softvol all attenuate it, and only
-                            // the top 8 of the 16 bits survive the fold. Music
-                            // at a few percent then folds to ±2..6 — beneath
-                            // the reference's noise gate (`DEFAULT_GATE`), so
-                            // the spectrum reads as permanent silence even
-                            // though signal is flowing. Normalising against a
-                            // decayed running peak hands the DSP the same
-                            // full-scale waveform the reference gets from a
-                            // plain Windows loopback, at any playback volume.
+                            // Fixed, deliberately: the bars on screen must
+                            // follow the listening volume — quiet music, small
+                            // bars — which is what a Windows loopback gives the
+                            // reference. An adaptive gain was tried here and
+                            // erased exactly that relationship: it levelled
+                            // every track to the same on-screen amplitude, so
+                            // background-volume music produced full-height
+                            // spikes 24/7.
                             //
-                            // True silence must stay silence, so gain is only
-                            // applied once the peak clears a noise floor (~1%
-                            // of full scale) — an idle monitor's hiss is never
-                            // amplified into a phantom beat.
-                            let frag_peak = scratch
-                                .iter()
-                                .map(|s| f32::from(s.unsigned_abs() as u16))
-                                .fold(0.0, f32::max);
-                            // Slow leveler, not a compressor: the peak decays
-                            // over ~15 s (0.9995 per ~10 ms fragment), so gain
-                            // tracks the track's overall loudness while beats
-                            // keep their dynamics — a fast release here slams
-                            // every band to full scale and the visualiser
-                            // strobes at screen height on every frame.
-                            running_peak = frag_peak.max(running_peak * 0.9995);
-                            let gain = if running_peak > 327.0 {
-                                (8000.0 / running_peak).clamp(1.0, 30.0)
-                            } else {
-                                1.0
-                            };
+                            // The boost exists because only the top 8 of 16
+                            // bits survive the fold: a desktop listening at a
+                            // low software volume lands at a few percent of
+                            // full scale, which truncates to almost nothing.
+                            // A small constant multiplier keeps that visible
+                            // while staying linear in volume. Override with
+                            // KIRIE_AUDIO_BOOST (1.0 = faithful raw).
+                            let gain = boost;
                             folded.clear();
                             folded.reserve(scratch.len());
                             for &sample in &scratch {

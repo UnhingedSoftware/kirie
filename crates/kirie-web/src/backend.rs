@@ -275,20 +275,51 @@ pub enum WebError {
 /// GPU already is the default would flip rendering onto the wrong one.
 #[must_use]
 pub fn gpu_offload_env() -> Vec<(&'static str, String)> {
-    match std::env::var("KIRIE_GPU").as_deref() {
-        Ok("nvidia") => {
-            let mut env = vec![
-                ("__NV_PRIME_RENDER_OFFLOAD", "1".to_owned()),
-                ("__GLX_VENDOR_LIBRARY_NAME", "nvidia".to_owned()),
-            ];
-            // EGL picks its vendor through glvnd; point it at the NVIDIA
-            // manifest when present (WebKitGTK and CEF's Ozone path are EGL).
-            let egl = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
-            if std::path::Path::new(egl).is_file() {
-                env.push(("__EGL_VENDOR_LIBRARY_FILENAMES", egl.to_owned()));
-            }
-            env
+    let vendor_id = match std::env::var("KIRIE_GPU").as_deref() {
+        Ok("nvidia") => "0x10de",
+        Ok("amd") => "0x1002",
+        Ok("intel") => "0x8086",
+        _ => return Vec::new(),
+    };
+
+    let mut env: Vec<(&'static str, String)> = Vec::new();
+    if vendor_id == "0x10de" {
+        env.push(("__NV_PRIME_RENDER_OFFLOAD", "1".to_owned()));
+        env.push(("__GLX_VENDOR_LIBRARY_NAME", "nvidia".to_owned()));
+        // EGL picks its vendor through glvnd; point it at the NVIDIA
+        // manifest when present (WebKitGTK and CEF's Ozone path are EGL).
+        let egl = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json";
+        if std::path::Path::new(egl).is_file() {
+            env.push(("__EGL_VENDOR_LIBRARY_FILENAMES", egl.to_owned()));
         }
-        _ => Vec::new(),
     }
+
+    // WebKitGTK ignores the vendor variables — its DMA-BUF renderer opens a
+    // DRM render node it enumerates itself — but honours an explicit node via
+    // WEBKIT_WEB_RENDER_DEVICE_FILE. Resolve the selected vendor to its node
+    // so the webview host lands on the same GPU the engine renders on.
+    if let Some(node) = render_node_for_vendor(vendor_id) {
+        env.push(("WEBKIT_WEB_RENDER_DEVICE_FILE", node));
+    }
+    env
+}
+
+/// The `/dev/dri/renderD*` node whose device reports `vendor_id`, if any.
+fn render_node_for_vendor(vendor_id: &str) -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/drm").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with("renderD") {
+            continue;
+        }
+        let vendor = std::fs::read_to_string(entry.path().join("device/vendor")).ok();
+        if vendor.is_some_and(|v| v.trim().eq_ignore_ascii_case(vendor_id)) {
+            let node = format!("/dev/dri/{name}");
+            if std::path::Path::new(&node).exists() {
+                return Some(node);
+            }
+        }
+    }
+    None
 }
