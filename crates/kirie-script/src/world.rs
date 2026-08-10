@@ -85,6 +85,11 @@ pub struct World {
     next_layer_handle: u32,
     /// Cursor event edge state (docs: cursor events on solid layers).
     cursor: CursorState,
+    /// Previous tick's resolution, to edge-detect `resizeScreen` dispatch.
+    prev_res: Option<[f64; 2]>,
+    /// System language in the reference's lowercase `en-us` form, delivered
+    /// via `applyGeneralSettings` (the only setting the d.ts documents).
+    language: String,
 }
 
 impl World {
@@ -120,6 +125,8 @@ impl World {
             modules: BTreeMap::new(),
             next_layer_handle: 0,
             cursor: CursorState::default(),
+            prev_res: None,
+            language: system_language(),
         })
     }
 
@@ -217,6 +224,13 @@ impl World {
             .collect();
 
         let cursor = &mut self.cursor;
+        // `resizeScreen` fires on resolution *transitions* only — the initial
+        // size is init()'s job (d.ts: "call that function from both init()
+        // and resizeScreen()").
+        let res = [frame.res_x, frame.res_y];
+        let res_changed = self.prev_res.is_some_and(|r| r != res);
+        self.prev_res = Some(res);
+        let language = self.language.clone();
         let (results, mut out) = self.context.with(|ctx| {
             let mut out = TickOutput::default();
             if let Err(e) = apply_frame(&ctx, frame) {
@@ -239,12 +253,44 @@ impl World {
                         continue;
                     }
                 };
-                if !inited && let Err(msg) = call_export(&ctx, key, "init", arg.clone()) {
-                    out.errors.push(ScriptError::Runtime {
-                        key: key.clone(),
-                        phase: "init",
-                        message: msg,
-                    });
+                if !inited {
+                    if let Err(msg) = call_export(&ctx, key, "init", arg.clone()) {
+                        out.errors.push(ScriptError::Runtime {
+                            key: key.clone(),
+                            phase: "init",
+                            message: msg,
+                        });
+                    }
+                    // Load-time general settings: every setting counts as
+                    // changed on the initial call (scripts localize their text
+                    // from this delivery, so skipping it would leave them
+                    // untranslated forever).
+                    match general_settings(&ctx, &language) {
+                        Ok(payload) => {
+                            if let Err(msg) = call_export(&ctx, key, "applyGeneralSettings", payload) {
+                                out.errors.push(ScriptError::Runtime {
+                                    key: key.clone(),
+                                    phase: "applyGeneralSettings",
+                                    message: msg,
+                                });
+                            }
+                        }
+                        Err(e) => out.errors.push(ScriptError::Internal(e)),
+                    }
+                }
+                if res_changed {
+                    match call_ret2(&ctx, "__vec2", (frame.res_x, frame.res_y)) {
+                        Ok(size) => {
+                            if let Err(msg) = call_export(&ctx, key, "resizeScreen", size) {
+                                out.errors.push(ScriptError::Runtime {
+                                    key: key.clone(),
+                                    phase: "resizeScreen",
+                                    message: msg,
+                                });
+                            }
+                        }
+                        Err(e) => out.errors.push(e),
+                    }
                 }
                 // `update(value)` must receive the property's CURRENT value —
                 // including writes made by this module's own `init()` (e.g. the
@@ -556,6 +602,28 @@ fn dispatch_cursor(
     }
     if up_edge {
         st.down_on.clear();
+    }
+}
+
+/// The `applyGeneralSettings` payload: `{language}` is the only setting the
+/// d.ts documents.
+fn general_settings<'js>(ctx: &Ctx<'js>, language: &str) -> Result<Value<'js>, String> {
+    let obj = Object::new(ctx.clone()).map_err(|e| e.to_string())?;
+    obj.set("language", language).map_err(|e| e.to_string())?;
+    Ok(obj.into_value())
+}
+
+/// The system language in the reference's lowercase tag form (`en-us`), from
+/// `LC_ALL`/`LANG` (`en_US.UTF-8` → `en-us`). Defaults to `en-us`.
+fn system_language() -> String {
+    let raw = std::env::var("LC_ALL")
+        .or_else(|_| std::env::var("LANG"))
+        .unwrap_or_default();
+    let tag = raw.split('.').next().unwrap_or("").replace('_', "-").to_lowercase();
+    if tag.is_empty() || tag == "c" || tag == "posix" {
+        "en-us".to_owned()
+    } else {
+        tag
     }
 }
 

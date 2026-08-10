@@ -381,6 +381,61 @@ fn cursor_events_require_the_solid_flag() {
     assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
 }
 
+// ---- resizeScreen / applyGeneralSettings (d.ts ScriptModule) ---------------
+
+/// `resizeScreen(Vec2)` fires on resolution transitions only — the initial
+/// size is init()'s job.
+#[test]
+fn resize_screen_fires_on_resolution_change() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "var w = 0;
+         export function resizeScreen(size){ w = (size instanceof Vec2) ? size.x : -1; }
+         export function update(v){ return w; }",
+        Some(7),
+        ScriptValue::Float(0.0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    // First tick (1920×1080 default): baseline, no dispatch.
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
+    // Same resolution: still nothing.
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
+    // Resolution change: dispatched with a real Vec2.
+    let frame = HostFrame {
+        res_x: 2560.0,
+        res_y: 1440.0,
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Int(2560));
+}
+
+/// `applyGeneralSettings({language})` is delivered once at load, so scripts
+/// can localize their text (the changed-keys guard pattern from the d.ts).
+#[test]
+fn apply_general_settings_delivers_language_at_load() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "var lang = '';
+         export function applyGeneralSettings(s){ if (s.hasOwnProperty('language')) lang = s.language; }
+         export function update(v){ return lang; }",
+        Some(7),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    match &out.property_results[0].1 {
+        ScriptValue::Str(s) => assert!(!s.is_empty(), "language must be non-empty"),
+        other => panic!("expected string, got {other:?}"),
+    }
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]

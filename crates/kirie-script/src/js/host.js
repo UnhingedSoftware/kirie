@@ -109,6 +109,9 @@ globalThis.__cursorEvent = function (wx, wy, wz, lx, ly, lz) {
   return { worldPosition: new Vec3(wx, wy, wz), localPosition: new Vec3(lx, ly, lz) };
 };
 
+// Vec2 payload builder for host-dispatched events (resizeScreen's size).
+globalThis.__vec2 = function (x, y) { return new Vec2(x, y); };
+
 // ---- ILayer adapter (docs §8) ---------------------------------------------
 function __layerById(id) { var L = __host.layers; for (var i = 0; i < L.length; i++) if (L[i].id === id) return L[i]; return null; }
 function __recordProp(id, name, value) { __host.ops.push({ op: 'setProp', id: id, name: name, value: value }); }
