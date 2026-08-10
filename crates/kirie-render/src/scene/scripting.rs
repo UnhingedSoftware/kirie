@@ -199,6 +199,11 @@ pub struct ScriptHost {
     /// fallback (see [`Self::tick`]). Starts at host creation, mirroring the
     /// reference where the first frame's `frametime` is the startup elapsed.
     last_tick: std::time::Instant,
+    /// Local UTC offset in seconds, captured once at build for
+    /// `engine.timeOfDay` (reference reads the OS local clock). A DST flip
+    /// mid-run leaves it stale until the next scene build — acceptable for a
+    /// day-fraction that scripts use for day/night cycles.
+    tz_offset_secs: f64,
 }
 
 impl ScriptHost {
@@ -334,6 +339,7 @@ impl ScriptHost {
             frame: None,
             user_props_dirty: false,
             last_tick: std::time::Instant::now(),
+            tz_offset_secs: local_utc_offset_secs(),
         })
     }
 
@@ -370,7 +376,14 @@ impl ScriptHost {
     /// array (docs/scripting-api.md §6.1). Never blocks the render thread beyond
     /// the bounded channel round-trip (SPEC.md §V3/§V4) and never panics on a
     /// throwing script (§V9).
-    pub fn tick(&mut self, dt: f32, audio: Option<&AudioSpectrum>, pointer: [f32; 2]) -> Vec<PropUpdate> {
+    pub fn tick(
+        &mut self,
+        dt: f32,
+        audio: Option<&AudioSpectrum>,
+        pointer: [f32; 2],
+        pointer_scene: [f32; 2],
+        pointer_left: bool,
+    ) -> Vec<PropUpdate> {
         self.elapsed += f64::from(dt);
         // Recycle the retained frame (the common case) instead of marshalling a
         // fresh snapshot: only the parts that can actually change since last
@@ -406,6 +419,18 @@ impl ScriptHost {
         frame.res_y = f64::from(self.res[1]);
         // Platform-fed pointer (T26), surface-normalized [0,1] top-left.
         frame.pointer_screen = pointer;
+        // `input.cursorWorldPosition` — scene-space px (top-left origin), the
+        // same coordinate space object origins live in, so scripts can compare
+        // or assign it directly (`thisLayer.origin = input.cursorWorldPosition`).
+        frame.pointer_world = [pointer_scene[0], pointer_scene[1], 0.0];
+        frame.pointer_left_down = pointer_left;
+        // `engine.timeOfDay` — local wall-clock day fraction ∈ [0,1).
+        frame.time_of_day = day_fraction(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64()),
+            self.tz_offset_secs,
+        );
         // Audio bands land in the retained buffers (clear + extend, no allocs
         // once warm). Presence is stable per run, so the None arm's drop of the
         // warm buffers is a one-off transition, not churn.
@@ -864,9 +889,65 @@ pub fn as_rgb(v: &ScriptValue) -> Option<[f32; 3]> {
     }
 }
 
+/// Local-time day fraction ∈ [0,1) from a UTC unix timestamp and a fixed
+/// UTC offset. Pure so the wrap/negative-offset arithmetic is testable.
+fn day_fraction(unix_secs: f64, tz_offset_secs: f64) -> f64 {
+    ((unix_secs + tz_offset_secs) / 86_400.0).rem_euclid(1.0)
+}
+
+/// The system's UTC offset in seconds, via `date +%z` (one spawn per scene
+/// build — the crate is `forbid(unsafe_code)`, so `localtime_r` is out, and a
+/// timezone crate is a heavy dependency for one number). Falls back to UTC
+/// when the spawn or parse fails.
+fn local_utc_offset_secs() -> f64 {
+    std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| parse_utc_offset(s.trim()))
+        .unwrap_or(0.0)
+}
+
+/// Parse an RFC-822 style numeric offset (`+0200`, `-0530`, `+00`) to seconds.
+fn parse_utc_offset(s: &str) -> Option<f64> {
+    let (sign, digits) = match s.as_bytes().first()? {
+        b'+' => (1.0, &s[1..]),
+        b'-' => (-1.0, &s[1..]),
+        _ => return None,
+    };
+    if digits.len() < 2 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: f64 = digits[..2].parse().ok()?;
+    let minutes: f64 = if digits.len() >= 4 { digits[2..4].parse().ok()? } else { 0.0 };
+    Some(sign * (hours * 3600.0 + minutes * 60.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn utc_offset_parses_both_signs_and_short_forms() {
+        assert_eq!(parse_utc_offset("+0200"), Some(7200.0));
+        assert_eq!(parse_utc_offset("-0530"), Some(-19800.0));
+        assert_eq!(parse_utc_offset("+00"), Some(0.0));
+        assert_eq!(parse_utc_offset("0200"), None);
+        assert_eq!(parse_utc_offset("+2b00"), None);
+        assert_eq!(parse_utc_offset(""), None);
+    }
+
+    #[test]
+    fn day_fraction_wraps_and_handles_negative_offsets() {
+        // Midnight UTC at +02:00 is 02:00 local.
+        let f = day_fraction(86_400.0 * 3.0, 7200.0);
+        assert!((f - 2.0 / 24.0).abs() < 1e-9);
+        // 01:00 UTC at -05:30 wraps back into the previous local day (19:30).
+        let f = day_fraction(86_400.0 * 3.0 + 3600.0, -19800.0);
+        assert!((f - 19.5 / 24.0).abs() < 1e-9);
+        assert!((0.0..1.0).contains(&day_fraction(0.0, -1.0)));
+    }
 
     fn layer_list(ids: &[i64]) -> Vec<LayerState> {
         ids.iter()

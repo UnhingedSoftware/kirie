@@ -300,6 +300,9 @@ pub struct SceneRenderer {
     pointer: [f32; 2],
     /// Previous frame's pointer (`g_PointerPositionLast`).
     pointer_last: [f32; 2],
+    /// Left button held (platform-fed; drives SceneScript
+    /// `input.cursorLeftDown` and the P1 cursor event edges).
+    pointer_left: bool,
     /// Script-created runtime layers keyed by their synthetic (negative) id.
     runtime_layers: std::collections::HashMap<i64, RuntimeLayer>,
     /// Materials pre-built for the model paths scene scripts `createLayer`,
@@ -865,6 +868,7 @@ impl SceneRenderer {
                 .collect(),
             pointer: [0.5, 0.5],
             pointer_last: [0.5, 0.5],
+            pointer_left: false,
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
             runtime_templates,
@@ -1798,8 +1802,15 @@ impl Renderer for SceneRenderer {
         // to the live objects *before* drawing (SPEC.md §V3 — typed ops only,
         // JS never touches these buffers). Frame-callback driven, so an occluded
         // output that gets no callbacks never ticks (V6 groundwork).
+        // Scene-space pointer (top-left px), shared by the script tick's
+        // `input.cursorWorldPosition` and the pointer-locked particle mapping
+        // in the item loop below — computed once, before either consumer.
+        let pointer_scene = {
+            let (pw, ph) = self.projection_size();
+            [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
+        };
         let updates = match &mut self.script {
-            Some(script) => script.tick(dt, spectrum.as_deref(), self.pointer),
+            Some(script) => script.tick(dt, spectrum.as_deref(), self.pointer, pointer_scene, self.pointer_left),
             None => Vec::new(),
         };
         // Scene ops (createLayer/camera/…) first: a layer created this tick must
@@ -1909,13 +1920,6 @@ impl Renderer for SceneRenderer {
         let visible_by_id = &self.visible_by_id;
         // Reused UBO-pack buffer (disjoint field from `items` below), so no pass
         // allocates its `_WEGlobals` bytes each frame (SPEC §V5).
-        // Precomputed for the particle pointer mapping below: calling
-        // `self.projection_size()` inside the item loop would re-borrow
-        // `self` while `pack_scratch` is held.
-        let pointer_scene = {
-            let (pw, ph) = self.projection_size();
-            [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
-        };
         let pack_scratch = &mut self.pack_scratch;
         // Pointer + parallax snapshots for the draw loops (disjoint fields).
         let pointer = self.pointer;
@@ -2485,6 +2489,10 @@ impl Renderer for SceneRenderer {
     /// and SceneScript `pointer_screen` on the following frames.
     fn set_pointer(&mut self, x: f32, y: f32) {
         self.pointer = [x, y];
+    }
+
+    fn set_pointer_buttons(&mut self, left_down: bool) {
+        self.pointer_left = left_down;
     }
 }
 
