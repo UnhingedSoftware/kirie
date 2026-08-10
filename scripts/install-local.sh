@@ -7,7 +7,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release -p kirie -p kirie-web --features kirie/web-webview
+cargo build --release -p kirie -p kirie-web --features kirie/web-webview,kirie/vaapi
 
 if ! ./target/release/kirie check 2>/dev/null | grep -q "web backend (webview)"; then
     echo "refusing to install: built kirie has no web backend" >&2

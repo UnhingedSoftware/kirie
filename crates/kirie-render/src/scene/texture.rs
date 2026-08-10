@@ -58,9 +58,20 @@ type TextureCell = std::sync::Arc<std::sync::OnceLock<Option<std::sync::Arc<GpuT
 /// renderer streams the newest into `gpu.texture` each frame (the reference
 /// plays these; a frozen first frame was the 3445942378 divergence).
 pub struct VideoTexture {
+    /// The registry key this video was uploaded under — what a material pass's
+    /// texture slot names. The renderer matches it against each object's
+    /// bound texture names to know which objects display this video.
+    pub name: String,
     /// The playing decoder (silent, wall-clock paced, seamless loop). Dropping
     /// it stops the decode thread.
     pub player: kirie_video::VideoPlayer,
+    /// Pause/resume handle. The renderer pauses a video no visible object
+    /// displays — an X-ray variant or layer-switcher alternative is invisible
+    /// by default, and decoding a hidden 4K stream costs a full core for
+    /// pixels nobody sees.
+    pub control: kirie_video::VideoControl,
+    /// Whether the renderer currently holds this video paused (see `control`).
+    pub paused: std::cell::Cell<bool>,
     /// The sampled texture every pass bound — updated in place.
     pub gpu: std::sync::Arc<GpuTexture>,
     /// Frame dimensions at allocation (upload guard).
@@ -369,11 +380,11 @@ impl TextureRegistry {
             },
         );
         let (player, frame) = match opened {
-            Ok((player, _control)) => {
+            Ok((player, control)) => {
                 // The decode thread fills the bounded queue independently of the
                 // clock; frame 0 arrives promptly.
                 let frame = player.recv_frame_timeout(Duration::from_secs(5));
-                (Some(player), frame)
+                (Some((player, control)), frame)
             }
             Err(e) => {
                 tracing::debug!(texture = %name, error = %e, "video texture open failed; using white");
@@ -403,17 +414,32 @@ impl TextureRegistry {
         ));
         // Keep the player: the renderer streams later frames into this same
         // texture every tick (the reference PLAYS video .tex, docs §10).
-        if let Some(player) = player {
+        if let Some((player, control)) = player {
             self.videos
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(VideoTexture {
+                    name: name.to_owned(),
                     player,
+                    control,
+                    paused: std::cell::Cell::new(false),
                     gpu: gpu.clone(),
                     size: (frame.width, frame.height),
                 });
         }
         Some(gpu)
+    }
+
+    /// The registry keys of the live video textures, in insertion order —
+    /// index-aligned with what [`Self::take_videos`] returns. Read before the
+    /// take so the renderer can map videos to the items that display them.
+    pub fn peek_video_names(&self) -> Vec<String> {
+        self.videos
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .map(|v| v.name.clone())
+            .collect()
     }
 
     /// Hand the live video textures to the renderer (called once after build;

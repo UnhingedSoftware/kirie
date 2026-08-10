@@ -270,6 +270,11 @@ pub struct SceneRenderer {
     /// render tick (the reference plays these — a frozen first frame was the
     /// 3445942378 divergence).
     video_textures: Vec<super::texture::VideoTexture>,
+    /// For each entry of `video_textures`, the indices of `items` whose passes
+    /// bind that texture by name. Static per build (texture names never change
+    /// live); item visibility is the part that flips, so the render tick pauses
+    /// any video only invisible items display (see the streaming loop).
+    video_users: Vec<Vec<usize>>,
     /// Animated `.tex` atlases (docs/format-tex.md §8-§9): per render tick the
     /// current frame is selected by the reference's frametime walk
     /// (`CPass.cpp:348-378`) and, for multi-page (gif-style) textures, the
@@ -796,6 +801,31 @@ impl SceneRenderer {
             proj_h,
             clear_color,
             screen_mvp,
+            video_users: {
+                let videos = registry.peek_video_names();
+                videos
+                    .iter()
+                    .map(|name| {
+                        items
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, item)| match item {
+                                SceneItem::Image(o) => o.passes.iter().any(|p| {
+                                    p.material_pass
+                                        .textures
+                                        .iter()
+                                        .any(|t| t.as_deref() == Some(name.as_str()))
+                                }),
+                                // Non-image items never bind video `.tex`
+                                // materials today; leaving them unmapped keeps
+                                // such a video playing (the safe default).
+                                _ => false,
+                            })
+                            .map(|(i, _)| i)
+                            .collect()
+                    })
+                    .collect()
+            },
             items,
             sprite_scratch: Vec::new(),
             pack_scratch: Vec::new(),
@@ -1871,7 +1901,30 @@ impl Renderer for SceneRenderer {
         // has ready and upload only the NEWEST (no backlog), into the same
         // texture object every pass bound. The decoder paces itself to the
         // video clock and loops seamlessly; nothing ready ⇒ keep last frame.
-        for vt in &self.video_textures {
+        for (vi, vt) in self.video_textures.iter().enumerate() {
+            // Pause a video no visible object displays (an X-ray variant or
+            // layer-switcher alternative sits invisible by default): decoding
+            // a hidden 4K stream costs a full core for pixels nobody sees.
+            // An empty users list means the mapping failed — err on playing.
+            let users = self.video_users.get(vi);
+            let displayed = users.is_none_or(|u| u.is_empty())
+                || users.is_some_and(|u| {
+                    u.iter().any(|&i| match &self.items[i] {
+                        SceneItem::Image(o) => o.visible,
+                        _ => true,
+                    })
+                });
+            if !displayed {
+                if !vt.paused.get() {
+                    vt.control.set_pause(true);
+                    vt.paused.set(true);
+                }
+                continue;
+            }
+            if vt.paused.get() {
+                vt.control.set_pause(false);
+                vt.paused.set(false);
+            }
             let mut newest = None;
             while let Some(f) = vt.player.recv_frame_timeout(std::time::Duration::ZERO) {
                 newest = Some(f);
