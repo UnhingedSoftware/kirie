@@ -117,12 +117,29 @@ fn poll_once(conn: &zbus::blocking::Connection, art_cache: &mut ArtCache) -> Med
 
     MediaState {
         available: true,
+        player_pid: connection_pid(conn, &player),
         player: Some(player),
         playback,
         metadata,
         position_us,
         art,
     }
+}
+
+/// The PID behind a bus name, via `org.freedesktop.DBus`.
+///
+/// The audio capture uses this to find the player's own output stream. A bus
+/// that will not answer (or a player that vanished between calls) is not an
+/// error: the capture simply falls back to its other rules.
+fn connection_pid(conn: &zbus::blocking::Connection, bus_name: &str) -> Option<u32> {
+    let proxy = zbus::blocking::Proxy::new(
+        conn,
+        "org.freedesktop.DBus",
+        "/org/freedesktop/DBus",
+        "org.freedesktop.DBus",
+    )
+    .ok()?;
+    proxy.call("GetConnectionUnixProcessID", &(bus_name)).ok()
 }
 
 /// Build a blocking player proxy at the standard MPRIS object path.

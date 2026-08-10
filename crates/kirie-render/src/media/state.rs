@@ -100,6 +100,12 @@ pub struct MediaState {
     /// The bus name of the adopted player (e.g.
     /// `org.mpris.MediaPlayer2.spotify`), when one is present.
     pub player: Option<String>,
+    /// PID of the process behind that bus name, when the bus reports one.
+    ///
+    /// Used to find the player's own audio stream, and through it the device it
+    /// plays into — the only reliable way to know which monitor carries the
+    /// music on a machine where the default sink is not where audio goes.
+    pub player_pid: Option<u32>,
     /// Current playback status.
     pub playback: PlaybackState,
     /// Decoded track metadata.

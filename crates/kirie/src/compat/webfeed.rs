@@ -137,6 +137,19 @@ impl WebFeed for EngineWebFeed {
 
     fn media(&self) -> Option<MediaSnapshot> {
         let state = self.media.as_ref()?.latest();
+        // Hand the capture the player's PID so it can record the device that
+        // player is actually feeding. Done here because this is the one place
+        // holding both handles, and it re-runs as the adopted player changes —
+        // a hint set once at startup would go stale the moment the user
+        // switched apps.
+        if let Some(audio) = &self.audio {
+            audio.set_player(
+                state
+                    .player
+                    .as_deref()
+                    .map(|bus| kirie_audio::PlayerHint::from_bus_name(bus, state.player_pid)),
+            );
+        }
         let (thumbnail, palette) = self.thumbnail(&state);
         Some(MediaSnapshot {
             available: state.available,

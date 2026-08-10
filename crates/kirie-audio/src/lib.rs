@@ -169,6 +169,39 @@ impl AudioConfig {
     }
 }
 
+/// Who is playing, as far as choosing a capture device is concerned.
+///
+/// Both fields are hints, not guarantees: PipeWire does not always publish a
+/// stream's PID (Spotify's, for one, carries none), and a player's D-Bus name
+/// does not always equal the name on its audio stream. Carrying both lets the
+/// match succeed on whichever the session manager happened to fill in.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PlayerHint {
+    /// PID behind the player's D-Bus name, when the bus reported one.
+    pub pid: Option<u32>,
+    /// Short player identity, lowercased — the tail of an MPRIS bus name
+    /// (`org.mpris.MediaPlayer2.spotify` → `spotify`), which is what PipeWire
+    /// tends to use for `node.name`.
+    pub name: Option<String>,
+}
+
+impl PlayerHint {
+    /// Build from an MPRIS bus name, keeping the part that identifies the
+    /// application: `org.mpris.MediaPlayer2.brave.instance1234` → `brave`.
+    #[must_use]
+    pub fn from_bus_name(bus_name: &str, pid: Option<u32>) -> Self {
+        let name = bus_name
+            .strip_prefix("org.mpris.MediaPlayer2.")
+            .and_then(|rest| rest.split('.').next())
+            .filter(|s| !s.is_empty())
+            .map(str::to_lowercase);
+        Self { pid, name }
+    }
+}
+
+/// Shared slot the engine writes the current player into.
+pub(crate) type PlayerSlot = Arc<arc_swap::ArcSwapOption<PlayerHint>>;
+
 /// Live handle to the audio pipeline. Holds the latest published spectrum and
 /// owns the capture + FFT worker threads (joined on drop).
 pub struct AudioCapture {
@@ -176,6 +209,11 @@ pub struct AudioCapture {
     status: Arc<AtomicU8>,
     shutdown: Arc<AtomicBool>,
     device: Option<String>,
+    /// Which media player's output the capture should follow, or `None` when
+    /// no player is known. Written by the engine as MPRIS adopts a player, read
+    /// by the capture thread when it picks a monitor. See
+    /// [`Self::set_player`].
+    player: PlayerSlot,
     capture_thread: Option<JoinHandle<()>>,
     worker_thread: Option<JoinHandle<()>>,
 }
@@ -188,6 +226,7 @@ impl AudioCapture {
     pub fn start(config: AudioConfig) -> Self {
         let shared = Arc::new(ArcSwap::from_pointee(AudioSpectrum::silent()));
         let shutdown = Arc::new(AtomicBool::new(false));
+        let player = PlayerSlot::default();
 
         if !config.enabled {
             let status = Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8()));
@@ -196,6 +235,7 @@ impl AudioCapture {
                 status,
                 shutdown,
                 device: config.device.clone(),
+                player,
                 capture_thread: None,
                 worker_thread: None,
             };
@@ -226,11 +266,12 @@ impl AudioCapture {
             let status = status.clone();
             let shutdown = shutdown.clone();
             let device = device.clone();
+            let player_cap = player.clone();
             Some(
                 std::thread::Builder::new()
                     .name("kirie-audio-capture".into())
                     .spawn(move || {
-                        if let Err(e) = capture::run(device, prod, &status, &shutdown) {
+                        if let Err(e) = capture::run(device, prod, &status, &shutdown, &player_cap) {
                             status.store(CaptureStatus::Failed.as_u8(), Ordering::Relaxed);
                             tracing::warn!(error = %e, "audio capture unavailable; spectrum silent");
                         }
@@ -244,9 +285,26 @@ impl AudioCapture {
             status,
             shutdown,
             device,
+            player,
             capture_thread,
             worker_thread,
         }
+    }
+
+    /// Tell the capture which player is producing the audio worth reacting to.
+    ///
+    /// Without this the capture can only fall back to the server's *default
+    /// sink*, which is the right guess on a plain setup and the wrong one on any
+    /// machine with a virtual mixer: there the default sink is typically an
+    /// input strip nothing plays to directly, so its monitor stays silent while
+    /// music plays a few nodes away. The engine learns the player from MPRIS and
+    /// passes it here; the capture then follows that player's own output.
+    /// `None` clears the hint.
+    ///
+    /// Ignored entirely when `--audio-device` named a source: an explicit choice
+    /// is never second-guessed.
+    pub fn set_player(&self, hint: Option<PlayerHint>) {
+        self.player.store(hint.map(Arc::new));
     }
 
     /// A disabled handle (always-silent) — convenience for the
