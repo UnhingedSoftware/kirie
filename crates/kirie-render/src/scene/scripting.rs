@@ -782,11 +782,15 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
         visible: Some(base.visible.value),
         ..LayerState::default()
     };
+    // `solid` opts the layer into cursor events (d.ts ILayer.solid); it is a
+    // kind-agnostic editor flag preserved verbatim in `extra` (§7.5).
+    ls.solid = object.extra.get("solid").and_then(serde_json::Value::as_bool);
     match &object.kind {
         ObjectKind::Image(img) => {
             ls.color = Some([img.color.value[0], img.color.value[1], img.color.value[2]]);
             ls.alpha = Some(img.alpha.value);
             ls.visible = Some(img.visible.value && base.visible.value);
+            ls.size = Some(img.size);
         }
         ObjectKind::Text(txt) => {
             ls.color = Some([txt.color.value[0], txt.color.value[1], txt.color.value[2]]);
@@ -794,6 +798,7 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
             ls.visible = Some(txt.visible.value && base.visible.value);
             ls.point_size = Some(txt.pointsize.value);
             ls.text = Some(txt.text.value.clone());
+            ls.size = Some(txt.size);
         }
         _ => {}
     }

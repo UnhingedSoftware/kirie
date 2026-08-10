@@ -273,6 +273,93 @@ fn cursor_screen_position_is_in_pixels() {
     }
 }
 
+// ---- cursor events (d.ts ScriptModule / ILayer.solid) ---------------------
+
+const CURSOR_LOG_SCRIPT: &str = "var log = [];
+export function cursorEnter(ev){ log.push('enter:' + ev.localPosition.x); }
+export function cursorLeave(ev){ log.push('leave'); }
+export function cursorDown(ev){ log.push('down'); }
+export function cursorUp(ev){ log.push('up'); }
+export function cursorClick(ev){ log.push('click:' + ev.worldPosition.x); }
+export function update(v){ return log.join(','); }";
+
+fn cursor_layer(solid: Option<bool>) -> LayerState {
+    LayerState {
+        id: 42,
+        name: "L".into(),
+        origin: Some([100.0, 100.0, 0.0]),
+        scale: Some([1.0; 3]),
+        size: Some([50.0, 50.0]),
+        solid,
+        ..Default::default()
+    }
+}
+
+fn cursor_frame(solid: Option<bool>, px: f32, py: f32, left: bool) -> HostFrame {
+    HostFrame {
+        layers: vec![cursor_layer(solid)],
+        pointer_world: [px, py, 0.0],
+        pointer_left_down: left,
+        ..Default::default()
+    }
+}
+
+/// enter → down → up+click over a solid layer, with the documented payloads.
+#[test]
+fn cursor_events_fire_on_solid_layer_edges() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_42",
+        CURSOR_LOG_SCRIPT,
+        Some(42),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let solid = Some(true);
+    // Tick 1: baseline (outside bounds, button up) — transitions only, so
+    // nothing may fire yet.
+    let out = e.tick(cursor_frame(solid, 0.0, 0.0, false), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
+    // Tick 2: move inside the 50×50 box at (100,100) → enter, local x = 10.
+    let out = e.tick(cursor_frame(solid, 110.0, 95.0, false), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("enter:10".into()));
+    // Tick 3: press while inside → down.
+    let out = e.tick(cursor_frame(solid, 110.0, 95.0, true), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("enter:10,down".into()));
+    // Tick 4: release while inside → up, then click (same object as the press).
+    let out = e.tick(cursor_frame(solid, 110.0, 95.0, false), vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("enter:10,down,up,click:110".into())
+    );
+    // Tick 5: move back out → leave.
+    let out = e.tick(cursor_frame(solid, 0.0, 0.0, false), vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("enter:10,down,up,click:110,leave".into())
+    );
+}
+
+/// A layer without the solid flag never triggers cursor events (d.ts:
+/// "If set to true, the layer will trigger cursor events").
+#[test]
+fn cursor_events_require_the_solid_flag() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_42",
+        CURSOR_LOG_SCRIPT,
+        Some(42),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    e.tick(cursor_frame(None, 0.0, 0.0, false), vec![]).unwrap();
+    e.tick(cursor_frame(None, 110.0, 95.0, true), vec![]).unwrap();
+    let out = e.tick(cursor_frame(None, 110.0, 95.0, false), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]

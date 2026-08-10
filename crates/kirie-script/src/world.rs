@@ -12,7 +12,7 @@ use rquickjs::loader::{BuiltinLoader, BuiltinResolver};
 use rquickjs::{Array, CatchResultExt, Context, Ctx, Function, Module, Object, Runtime, Value};
 
 use crate::error::ScriptError;
-use crate::frame::{HostFrame, LogLine, SceneOp, TickOutput};
+use crate::frame::{HostFrame, LayerState, LogLine, SceneOp, TickOutput};
 use crate::value::{ScriptValue, json_to_js};
 
 const BUILTINS_JS: &str = include_str!("js/builtins.js");
@@ -23,7 +23,39 @@ const WE_VECTOR_JS: &str = include_str!("js/we_vector.js");
 
 /// Snapshot of one module's tick inputs `(key, owner_id, inited, current value,
 /// workshop id)`, cloned out of [`World::modules`] before entering `ctx.with`.
-type ModuleTickState = (String, Option<i64>, bool, ScriptValue, Option<String>);
+type ModuleTickState = (String, Option<i64>, bool, ScriptValue, Option<String>, u8);
+
+/// Cursor-export presence bits (detected once at module load, so the per-tick
+/// dispatch never round-trips into JS for a handler that does not exist).
+const F_CURSOR_MOVE: u8 = 1;
+const F_CURSOR_ENTER: u8 = 2;
+const F_CURSOR_LEAVE: u8 = 4;
+const F_CURSOR_DOWN: u8 = 8;
+const F_CURSOR_UP: u8 = 16;
+const F_CURSOR_CLICK: u8 = 32;
+
+const CURSOR_EXPORTS: [(u8, &str); 6] = [
+    (F_CURSOR_MOVE, "cursorMove"),
+    (F_CURSOR_ENTER, "cursorEnter"),
+    (F_CURSOR_LEAVE, "cursorLeave"),
+    (F_CURSOR_DOWN, "cursorDown"),
+    (F_CURSOR_UP, "cursorUp"),
+    (F_CURSOR_CLICK, "cursorClick"),
+];
+
+/// Edge-detection state for cursor event dispatch, persisted across ticks.
+#[derive(Default)]
+struct CursorState {
+    /// Previous tick's (world position, left-button) — `None` before the first
+    /// tick, which only records a baseline (a cursor that *starts* inside a
+    /// layer's bounds must not fire `cursorEnter`).
+    prev: Option<([f32; 3], bool)>,
+    /// Per-layer hit state from the previous tick (solid layers only).
+    hit: std::collections::HashMap<i64, bool>,
+    /// Layers the current press started on, for `cursorClick` ("pressed and
+    /// released on the same object", d.ts).
+    down_on: std::collections::HashSet<i64>,
+}
 
 /// Per-module bookkeeping (docs §4.2/§5.1).
 struct ModuleMeta {
@@ -37,6 +69,8 @@ struct ModuleMeta {
     current: ScriptValue,
     /// `__workshopId` export, for `createLayer` path resolution (docs §2).
     workshop_id: Option<String>,
+    /// Which `cursor*` handlers the module exports (`F_CURSOR_*` bits).
+    cursor_exports: u8,
 }
 
 /// The owned script world. Not `Send` (QuickJS `Runtime` is `!Send`); created and
@@ -49,6 +83,8 @@ pub struct World {
     modules: BTreeMap<String, ModuleMeta>,
     /// Next text-layer handle (docs §7; positive ints, 0 = invalid).
     next_layer_handle: u32,
+    /// Cursor event edge state (docs: cursor events on solid layers).
+    cursor: CursorState,
 }
 
 impl World {
@@ -83,6 +119,7 @@ impl World {
             context,
             modules: BTreeMap::new(),
             next_layer_handle: 0,
+            cursor: CursorState::default(),
         })
     }
 
@@ -106,7 +143,7 @@ impl World {
             return Ok(());
         }
         let key_owned = key.to_owned();
-        let workshop_id = self.context.with(|ctx| -> Result<Option<String>, ScriptError> {
+        let (workshop_id, cursor_exports) = self.context.with(|ctx| -> Result<(Option<String>, u8), ScriptError> {
             // docs §5.5: expose this module's scriptproperties before its body
             // runs, so top-level createScriptProperties().finish() reads them.
             let host: Object = global(&ctx, "__host")?;
@@ -131,7 +168,14 @@ impl World {
                 .call::<_, ()>((key_owned.clone(), namespace.clone()))
                 .internal()?;
             let workshop_id: Option<String> = namespace.get("__workshopId").ok();
-            Ok(workshop_id)
+            let mut cursor_exports = 0u8;
+            for (bit, name) in CURSOR_EXPORTS {
+                let f: Option<Function> = namespace.get(name).ok();
+                if f.is_some() {
+                    cursor_exports |= bit;
+                }
+            }
+            Ok((workshop_id, cursor_exports))
         })?;
 
         self.modules.insert(
@@ -141,6 +185,7 @@ impl World {
                 inited: false,
                 current: initial,
                 workshop_id,
+                cursor_exports,
             },
         );
         Ok(())
@@ -166,10 +211,12 @@ impl World {
                     m.inited,
                     m.current.clone(),
                     m.workshop_id.clone(),
+                    m.cursor_exports,
                 )
             })
             .collect();
 
+        let cursor = &mut self.cursor;
         let (results, mut out) = self.context.with(|ctx| {
             let mut out = TickOutput::default();
             if let Err(e) = apply_frame(&ctx, frame) {
@@ -177,9 +224,12 @@ impl World {
             }
             // docs §3.2.a: fire due engine timers (self-catching in JS).
             let _ = call_void(&ctx, "__tickTimers", ());
+            // Cursor events fire before the frame's update() calls, mirroring
+            // the reference's input-then-update frame order.
+            dispatch_cursor(&ctx, &metas, frame, cursor, &mut out);
 
             let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
-            for (key, owner, inited, current, workshop) in &metas {
+            for (key, owner, inited, current, workshop, _) in &metas {
                 bind_this_layer(&ctx, *owner);
                 set_workshop_id(&ctx, workshop.as_deref());
                 let arg = match current.to_js(&ctx) {
@@ -407,6 +457,141 @@ fn set_workshop_id(ctx: &Ctx<'_>, id: Option<&str>) {
             None => Ok(host.set("workshopId", Value::new_null(ctx.clone()))),
         };
     }
+}
+
+/// Dispatch the frame's cursor events (d.ts ScriptModule): edge-detect motion,
+/// per-solid-layer hits and left-button presses against the previous tick, and
+/// call the matching exported handlers with a `CursorEvent`. Only layers whose
+/// `solid` flag is set trigger cursor events (d.ts ILayer.solid), and only
+/// modules that actually export a handler are called (load-time bits).
+fn dispatch_cursor(
+    ctx: &Ctx<'_>,
+    metas: &[ModuleTickState],
+    frame: &HostFrame,
+    st: &mut CursorState,
+    out: &mut TickOutput,
+) {
+    let world = frame.pointer_world;
+    let left = frame.pointer_left_down;
+    let Some((prev_world, prev_left)) = st.prev else {
+        // First tick: baseline only. A cursor that starts inside a layer's
+        // bounds must not fire `cursorEnter` (events are transitions).
+        st.prev = Some((world, left));
+        for l in &frame.layers {
+            if l.solid == Some(true) {
+                st.hit.insert(l.id, hit_test(l, world));
+            }
+        }
+        return;
+    };
+    let moved = world != prev_world;
+    let down_edge = left && !prev_left;
+    let up_edge = !left && prev_left;
+    st.prev = Some((world, left));
+    if !moved && !down_edge && !up_edge {
+        return;
+    }
+
+    // New hit states computed up front so every module dispatches against the
+    // same previous-tick snapshot (two modules on one layer must both see the
+    // same enter edge).
+    let mut new_hit: Vec<(i64, bool)> = Vec::new();
+    for (key, owner, _, _, _, flags) in metas {
+        if *flags == 0 {
+            continue;
+        }
+        let Some(id) = owner else { continue };
+        let Some(layer) = frame.layers.iter().find(|l| l.id == *id) else {
+            continue;
+        };
+        if layer.solid != Some(true) {
+            continue;
+        }
+        let hit = hit_test(layer, world);
+        let was_hit = st.hit.get(id).copied().unwrap_or(false);
+        new_hit.push((*id, hit));
+
+        bind_this_layer(ctx, *owner);
+        let mut fire = |name: &'static str, bit: u8| {
+            if flags & bit == 0 {
+                return;
+            }
+            let ev = match cursor_event(ctx, world, layer) {
+                Ok(ev) => ev,
+                Err(e) => {
+                    out.errors.push(ScriptError::Internal(e));
+                    return;
+                }
+            };
+            if let Err(msg) = call_export(ctx, key, name, ev) {
+                out.errors.push(ScriptError::Runtime {
+                    key: key.clone(),
+                    phase: name,
+                    message: msg,
+                });
+            }
+        };
+        if moved {
+            fire("cursorMove", F_CURSOR_MOVE);
+        }
+        if hit && !was_hit {
+            fire("cursorEnter", F_CURSOR_ENTER);
+        }
+        if !hit && was_hit {
+            fire("cursorLeave", F_CURSOR_LEAVE);
+        }
+        if down_edge && hit {
+            fire("cursorDown", F_CURSOR_DOWN);
+            st.down_on.insert(*id);
+        }
+        if up_edge && hit {
+            fire("cursorUp", F_CURSOR_UP);
+            if st.down_on.contains(id) {
+                fire("cursorClick", F_CURSOR_CLICK);
+            }
+        }
+    }
+    for (id, hit) in new_hit {
+        st.hit.insert(id, hit);
+    }
+    if up_edge {
+        st.down_on.clear();
+    }
+}
+
+/// Axis-aligned bounds test in scene space: `origin` is the layer center,
+/// extent is `size × scale` (rotation is ignored — the reference hit-tests the
+/// unrotated quad for flat layers).
+fn hit_test(l: &LayerState, world: [f32; 3]) -> bool {
+    let (Some(origin), Some(size)) = (l.origin, l.size) else {
+        return false;
+    };
+    let scale = l.scale.unwrap_or([1.0; 3]);
+    let hw = (size[0] * scale[0]).abs() * 0.5;
+    let hh = (size[1] * scale[1]).abs() * 0.5;
+    (world[0] - origin[0]).abs() <= hw && (world[1] - origin[1]).abs() <= hh
+}
+
+/// Build the `CursorEvent` payload (worldPosition/localPosition as real `Vec3`
+/// instances, built JS-side by `__cursorEvent`). `localPosition` is the world
+/// position relative to the layer's origin.
+fn cursor_event<'js>(
+    ctx: &Ctx<'js>,
+    world: [f32; 3],
+    layer: &LayerState,
+) -> Result<Value<'js>, String> {
+    let origin = layer.origin.unwrap_or([0.0; 3]);
+    let f: Function = ctx.globals().get("__cursorEvent").map_err(|e| e.to_string())?;
+    f.call((
+        world[0],
+        world[1],
+        world[2],
+        world[0] - origin[0],
+        world[1] - origin[1],
+        world[2] - origin[2],
+    ))
+    .catch(ctx)
+    .map_err(|e| e.to_string())
 }
 
 /// Call `module.export(arg)` ignoring any return; a missing export is not an

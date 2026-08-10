@@ -58,6 +58,12 @@ pub struct LayerState {
     /// `text` (text objects).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
+    /// `size` vec2 (image/text bounding box), for cursor hit tests.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<[f32; 2]>,
+    /// `solid` — the editor flag that opts a layer into cursor events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solid: Option<bool>,
 }
 
 impl Clone for LayerState {
@@ -75,6 +81,8 @@ impl Clone for LayerState {
             parallax_depth: self.parallax_depth,
             point_size: self.point_size,
             text: self.text.clone(),
+            size: self.size,
+            solid: self.solid,
         }
     }
 
@@ -94,6 +102,8 @@ impl Clone for LayerState {
             parallax_depth,
             point_size,
             text,
+            size,
+            solid,
         } = source;
         self.id = *id;
         // `String::clone_from` (and `Option`'s Some→Some forwarding) reuse the
@@ -109,6 +119,8 @@ impl Clone for LayerState {
         self.parallax_depth = *parallax_depth;
         self.point_size = *point_size;
         self.text.clone_from(text);
+        self.size = *size;
+        self.solid = *solid;
     }
 }
 
