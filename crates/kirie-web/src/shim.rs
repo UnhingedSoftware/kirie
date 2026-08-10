@@ -85,13 +85,43 @@ pub const BRIDGE_INIT: &str = r#"(function(){
   window.wallpaperRequestRandomFileForProperty = function (name, cb) {
     if (typeof cb === 'function') { try { cb(name, ''); } catch (e) {} }
   };
+  // `wallpaperPropertyListener` is assigned, not registered, so it needs the
+  // same late-arrival care as the listeners above but through a property
+  // setter: the engine sends the initial property batch as soon as the
+  // document commits, which is before the page's own scripts have assigned
+  // the listener. Without replay the batch lands on nothing and the page runs
+  // on its JS defaults forever — ION, for one, defaults its particle count to
+  // 0, so the wallpaper visibly loses a whole feature.
+  var propListener = undefined;
+  var lastUser;
+  var lastGeneral;
+  Object.defineProperty(window, 'wallpaperPropertyListener', {
+    configurable: true,
+    get: function () { return propListener; },
+    set: function (l) {
+      propListener = l;
+      if (!l) { return; }
+      if (lastUser !== undefined && typeof l.applyUserProperties === 'function') {
+        try { l.applyUserProperties(lastUser); } catch (e) { /* page's problem, not the bridge's */ }
+      }
+      if (lastGeneral !== undefined && typeof l.applyGeneralProperties === 'function') {
+        try { l.applyGeneralProperties(lastGeneral); } catch (e) {}
+      }
+    }
+  });
   window.__wpApplyProps = function (p) {
-    var l = window.wallpaperPropertyListener;
-    if (l && typeof l.applyUserProperties === 'function') { l.applyUserProperties(p); }
+    lastUser = p;
+    var l = propListener;
+    if (l && typeof l.applyUserProperties === 'function') {
+      try { l.applyUserProperties(p); } catch (e) {}
+    }
   };
   window.__wpApplyGeneral = function (p) {
-    var l = window.wallpaperPropertyListener;
-    if (l && typeof l.applyGeneralProperties === 'function') { l.applyGeneralProperties(p); }
+    lastGeneral = p;
+    var l = propListener;
+    if (l && typeof l.applyGeneralProperties === 'function') {
+      try { l.applyGeneralProperties(p); } catch (e) {}
+    }
   };
 })();"#;
 
