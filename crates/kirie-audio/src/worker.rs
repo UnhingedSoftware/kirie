@@ -51,6 +51,8 @@ impl FrameAssembler {
 
 /// Parameters handed to the worker loop.
 pub(crate) struct WorkerParams {
+    /// Linear multiplier applied to every band target (`KIRIE_AUDIO_BOOST`).
+    pub level: f32,
     pub gate: f32,
     pub tick: Duration,
 }
@@ -86,7 +88,23 @@ pub(crate) fn run(
         }
 
         if let Some(frame) = latest {
-            let targets: BandTargets = crate::dsp::analyze_frame(fft.as_ref(), &frame, params.gate);
+            let mut targets: BandTargets = crate::dsp::analyze_frame(fft.as_ref(), &frame, params.gate);
+            // On-screen level control. The bands are logarithmic in sample
+            // amplitude (0.35·log10(mag²), dsp.rs), so pre-scaling the
+            // samples barely moves them — any audible signal lands near 1.0.
+            // Scaling here is linear in what a page actually draws: 0.5 means
+            // half-height bars. KIRIE_AUDIO_BOOST, default 1.0 (reference
+            // behaviour).
+            if (params.level - 1.0).abs() > f32::EPSILON {
+                for v in targets
+                    .b64
+                    .iter_mut()
+                    .chain(targets.b32.iter_mut())
+                    .chain(targets.b16.iter_mut())
+                {
+                    *v *= params.level;
+                }
+            }
             smoother.set_targets(targets);
         }
 

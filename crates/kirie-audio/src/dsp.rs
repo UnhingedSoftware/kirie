@@ -21,10 +21,13 @@ pub const FFT_BINS: usize = WAVE_BUFFER_SIZE / 2 + 1;
 /// asymmetry.
 pub const SMOOTH_RATE: f32 = 0.3;
 
-/// Default noise-gate RMS threshold (`gate = 10.0`, cpp:248). Overridable via
-/// `WPE_AUDIO_GATE` (`0` disables). This gate is a fork addition kept for
-/// behavioral parity.
-pub const DEFAULT_GATE: f32 = 10.0;
+/// Default noise-gate RMS threshold. The fork uses 10.0 (cpp:248), tuned for
+/// a full-scale Windows loopback; PipeWire's pulse tap delivers far less
+/// level, and with the capture pre-gain applied real music sits at RMS ~6-12
+/// while true digital silence reads under ~0.5 — thresholds of 3+ park quiet music on the
+/// gate and the spectrum flips between silence and full frames. Overridable
+/// via `WPE_AUDIO_GATE` (`0` disables).
+pub const DEFAULT_GATE: f32 = 1.0;
 
 /// Band counts produced, low→high resolution (`audio16/32/64`).
 pub const BANDS_16: usize = 16;
@@ -32,6 +35,17 @@ pub const BANDS_16: usize = 16;
 pub const BANDS_32: usize = 32;
 /// See [`BANDS_16`].
 pub const BANDS_64: usize = 64;
+
+/// Default linear scale applied to the band targets (`KIRIE_AUDIO_BOOST`).
+///
+/// The fork's band formula (`0.35·log10(mag²)`, [`bands_from_spectrum`])
+/// yields ~0.7–1.0 for ordinary music, but workshop pages are visually tuned
+/// for the much smaller values real Wallpaper Engine produces — they clamp
+/// bands around 0.6 and ship height multipliers up to ×15, which only makes
+/// sense when a typical band reads ~0.05–0.2. Emitting the raw formula makes
+/// every audio-driven visual sit at full amplitude no matter how the page is
+/// configured. 0.12 lands ordinary music in the range those pages expect.
+pub const DEFAULT_LEVEL: f32 = 0.12;
 
 /// `movetowards(c, t, d) = t if |t-c| <= d else c + sign(t-c)*d`
 /// (cpp:9-15). Slews `current` toward `target` by at most `delta` per call.

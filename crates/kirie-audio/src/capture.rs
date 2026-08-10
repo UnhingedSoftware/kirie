@@ -36,21 +36,6 @@ const STREAM_NAME: &str = "output monitor";
 /// cheap introspection round-trips.
 const RESELECT_INTERVAL: Duration = Duration::from_secs(2);
 
-/// The level scale applied to captured samples (`KIRIE_AUDIO_BOOST`).
-///
-/// Read in one place because two consumers must agree on it: the fold scales
-/// the samples, and the noise gate's threshold has to scale with them —
-/// otherwise a boost below 1 parks the signal *at* the gate and playback
-/// flips between all-zero and full frames instead of moving smoothly.
-pub(crate) fn resolved_boost() -> f32 {
-    std::env::var("KIRIE_AUDIO_BOOST")
-        .ok()
-        .and_then(|v| v.trim().parse().ok())
-        .filter(|b: &f32| b.is_finite() && *b >= 0.0)
-        .unwrap_or(0.15)
-        .min(64.0)
-}
-
 /// Drive one `iterate` step, mapping quit/err to a typed error.
 fn pump(mainloop: &mut Mainloop) -> Result<(), AudioError> {
     match mainloop.iterate(false) {
@@ -394,7 +379,12 @@ fn open_stream(
         let mut carry: Option<u8> = None;
         let mut scratch: Vec<i16> = Vec::new();
         let mut folded: Vec<u8> = Vec::new();
-        let boost = resolved_boost();
+        let pregain: f32 = std::env::var("KIRIE_AUDIO_PREGAIN")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|g: &f32| g.is_finite() && *g > 0.0)
+            .unwrap_or(1.0)
+            .min(64.0);
         stream
             .borrow_mut()
             .set_read_callback(Some(Box::new(move |_nbytes| {
@@ -414,29 +404,16 @@ fn open_stream(
                                 scratch.push(i16::from_le_bytes([low, high]));
                             }
 
-                            // S16 → the DSP's U8 domain, at a fixed gain.
-                            //
-                            // Fixed, deliberately: the bars on screen must
-                            // follow the listening volume — quiet music, small
-                            // bars — which is what a Windows loopback gives the
-                            // reference. An adaptive gain was tried here and
-                            // erased exactly that relationship: it levelled
-                            // every track to the same on-screen amplitude, so
-                            // background-volume music produced full-height
-                            // spikes 24/7.
-                            //
-                            // The tap is forced to 100%, so what arrives is
-                            // the stream's full digital level — most desktops
-                            // attenuate in hardware after that point, so raw
-                            // full scale reads far louder than what the user
-                            // hears. Scale down to a calm default; override
-                            // with KIRIE_AUDIO_BOOST (1.0 = faithful raw,
-                            // higher amplifies a genuinely quiet stream).
-                            let gain = boost;
+                            // S16 → the DSP's U8 domain, faithful by default
+                            // (KIRIE_AUDIO_PREGAIN=1). A pre-gain above 1 is
+                            // an escape hatch for a genuinely quiet source,
+                            // not a calibration: gaining a healthy signal
+                            // clips it at the fold, and clipping harmonics
+                            // read as full-spectrum spikes on every beat.
                             folded.clear();
                             folded.reserve(scratch.len());
                             for &sample in &scratch {
-                                let scaled = (f32::from(sample) * gain).clamp(-32768.0, 32767.0) as i32;
+                                let scaled = (f32::from(sample) * pregain).clamp(-32768.0, 32767.0) as i32;
                                 folded.push(((scaled >> 8) + 128) as u8);
                             }
                             producer_cb.borrow_mut().push_slice(&folded);

@@ -43,7 +43,9 @@ use ringbuf::HeapRb;
 use ringbuf::traits::Split;
 
 pub use automute::AutoMute;
-pub use dsp::{BANDS_16, BANDS_32, BANDS_64, DEFAULT_GATE, SAMPLE_RATE, SMOOTH_RATE, WAVE_BUFFER_SIZE};
+pub use dsp::{
+    BANDS_16, BANDS_32, BANDS_64, DEFAULT_GATE, DEFAULT_LEVEL, SAMPLE_RATE, SMOOTH_RATE, WAVE_BUFFER_SIZE,
+};
 pub use spectrum::AudioSpectrum;
 
 /// Ring capacity: ~0.25 s of U8/44100/mono audio. Comfortably absorbs the
@@ -243,11 +245,17 @@ impl AudioCapture {
 
         let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
         let device = config.device.clone();
-        // The gate threshold tracks the boost: samples are scaled before the
-        // DSP sees them, so an unscaled gate would sit proportionally higher
-        // the quieter the boost — at low boosts the music parks exactly at the
-        // threshold and the spectrum flips between silence and full frames.
-        let gate = config.resolved_gate() * capture::resolved_boost().min(1.0);
+        let gate = config.resolved_gate();
+        // Linear on-screen level (KIRIE_AUDIO_BOOST): applied to the band
+        // values after the FFT, where scaling actually moves the bars — the
+        // bands are logarithmic in sample amplitude, so scaling samples
+        // instead compresses to nearly nothing (and clips if raised).
+        let level: f32 = std::env::var("KIRIE_AUDIO_BOOST")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|b: &f32| b.is_finite() && *b >= 0.0)
+            .unwrap_or(dsp::DEFAULT_LEVEL)
+            .min(64.0);
         let tick = config.tick;
 
         // SPSC ring: producer → capture thread, consumer → worker thread (V3).
@@ -260,7 +268,7 @@ impl AudioCapture {
                 std::thread::Builder::new()
                     .name("kirie-audio-fft".into())
                     .spawn(move || {
-                        worker::run(cons, shared, shutdown, worker::WorkerParams { gate, tick });
+                        worker::run(cons, shared, shutdown, worker::WorkerParams { level, gate, tick });
                     })
                     .expect("spawn fft worker"),
             )
