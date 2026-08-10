@@ -2147,6 +2147,15 @@ impl Renderer for SceneRenderer {
                         parallax,
                     );
                 }
+                // A script hid the system (or an ancestor group): no sim, no
+                // draw — matching the reference's invisible-object skip.
+                SceneItem::Particle(pg)
+                    if !pg.visible
+                        || !ancestors_visible(
+                            parent_by_id,
+                            visible_by_id,
+                            parent_by_id.get(&pg.id).copied().flatten(),
+                        ) => {}
                 SceneItem::Particle(pg) => {
                     // Advance the CPU sim, refill the shared scratch (no realloc
                     // once warm — SPEC.md §V5), upload + draw instanced sprites.
@@ -2167,13 +2176,27 @@ impl Renderer for SceneRenderer {
                         .upload(&self.queue, &pg.view_projection, &self.sprite_scratch);
                     pg.renderer.draw(&mut encoder, scene_view, n);
                 }
+                SceneItem::Text(tg)
+                    if !tg.visible
+                        || !ancestors_visible(
+                            parent_by_id,
+                            visible_by_id,
+                            parent_by_id.get(&tg.id).copied().flatten(),
+                        ) => {}
                 SceneItem::Text(tg) => {
                     if let Some(tp) = &self.text_pipeline {
                         extras::draw_text(&mut encoder, tp, tg, scene_view);
                     }
                 }
-                // A script may hide the model this frame (V6: skip entirely).
-                SceneItem::Model(mg) if !mg.visible => {}
+                // A script may hide the model this frame (V6: skip entirely) —
+                // directly, or by hiding an ancestor group.
+                SceneItem::Model(mg)
+                    if !mg.visible
+                        || !ancestors_visible(
+                            parent_by_id,
+                            visible_by_id,
+                            parent_by_id.get(&mg.id).copied().flatten(),
+                        ) => {}
                 SceneItem::Model(mg) => {
                     // REFLECTION meshes sample `_rt_FullFrameBuffer`: snapshot the
                     // composite-so-far first so the read never aliases the write
@@ -2789,14 +2812,41 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
 fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
     for u in updates {
         for item in items.iter_mut() {
-            // Particle targets live on particle items; everything else on
-            // image objects.
+            // Rate lands on particle items; visibility on every kind; the
+            // rest on image objects.
             if let SceneItem::Particle(pg) = item {
-                if pg.id == u.object_id
-                    && matches!(u.target, PropTarget::ParticleRate)
-                    && let Some(rate) = as_f32(&u.value)
+                if pg.id == u.object_id {
+                    match u.target {
+                        PropTarget::ParticleRate => {
+                            if let Some(rate) = as_f32(&u.value) {
+                                pg.sim.set_rate_override(rate);
+                            }
+                        }
+                        PropTarget::Visible => {
+                            if let kirie_script::ScriptValue::Bool(v) = &u.value {
+                                pg.visible = *v;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
+            if let SceneItem::Text(tg) = item {
+                if tg.id == u.object_id
+                    && u.target == PropTarget::Visible
+                    && let kirie_script::ScriptValue::Bool(v) = &u.value
                 {
-                    pg.sim.set_rate_override(rate);
+                    tg.visible = *v;
+                }
+                continue;
+            }
+            if let SceneItem::Model(mg) = item {
+                if mg.id == u.object_id
+                    && u.target == PropTarget::Visible
+                    && let kirie_script::ScriptValue::Bool(v) = &u.value
+                {
+                    mg.visible = *v;
                 }
                 continue;
             }

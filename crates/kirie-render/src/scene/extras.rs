@@ -48,6 +48,8 @@ use super::texture::{GpuTexture, TextureRegistry};
 pub struct ParticleGpu {
     /// The owning scene-object id (script `sortLayer` targeting).
     pub id: i64,
+    /// Live visibility (script `thisLayer.visible`; false ⇒ sim + draw skipped).
+    pub visible: bool,
     /// The object's authored origin in scene coordinates (top-left, y-down):
     /// what converts the surface pointer into this system's local space for
     /// `locktopointer` control points.
@@ -68,6 +70,8 @@ pub struct ParticleGpu {
 pub struct TextGpu {
     /// The owning scene-object id (script `sortLayer` targeting).
     pub id: i64,
+    /// Live visibility (script `thisLayer.visible`; false ⇒ draw skipped).
+    pub visible: bool,
     /// The per-object bind group (uniform + coverage texture + sampler).
     pub bind: wgpu::BindGroup,
     /// The scene-space quad vertices (4-vertex triangle strip, pos + uv).
@@ -252,6 +256,7 @@ pub fn build_particle(
 
     Some(ParticleGpu {
         id: object.base.id,
+        visible: true,
         origin: object.base.origin.value,
         sim,
         renderer,
@@ -524,6 +529,7 @@ pub fn build_text(
     });
     Some(TextGpu {
         id: object.base.id,
+        visible: true,
         bind,
         vertex_buffer,
         _texture: texture,
