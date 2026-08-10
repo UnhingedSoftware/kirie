@@ -82,6 +82,25 @@ struct MeshGpu {
     tex_resolution: [[f32; 4]; 8],
 }
 
+impl ModelGpu {
+    /// Live script transform writes (`thisLayer.origin` / `scale` / `angles`):
+    /// the model matrix is rebuilt from these fields every draw, so a write is
+    /// live on the next frame. Angles pass through in the same unit the layer
+    /// snapshot serves (the authored radians, format doc §7.2) — a script that
+    /// writes back what it read must round-trip exactly.
+    pub(super) fn set_origin(&mut self, v: [f32; 3]) {
+        self.origin = v;
+    }
+
+    pub(super) fn set_scale(&mut self, v: [f32; 3]) {
+        self.scale = v;
+    }
+
+    pub(super) fn set_angles(&mut self, v: [f32; 3]) {
+        self.angles = v;
+    }
+}
+
 /// One renderable 3D model object: its sub-meshes plus the object transform the
 /// per-frame model matrix is built from (`CModel::computeModelMatrix`).
 pub(super) struct ModelGpu {

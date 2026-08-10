@@ -40,7 +40,7 @@ use super::fbo::{FBO_FORMAT, Fbo};
 use super::matrix::{self, Mat4};
 use super::pipeline::{self, BindKind, BuiltPass, ModuleBinding};
 use super::plan::{self, Geometry, PassOutput};
-use super::scripting::{PropTarget, PropUpdate, ScriptHost, as_f32, as_rgb};
+use super::scripting::{PropTarget, PropUpdate, ScriptHost, as_f32, as_rgb, as_vec3};
 use super::text::TextFonts;
 use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
@@ -2861,11 +2861,32 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                 continue;
             }
             if let SceneItem::Model(mg) = item {
-                if mg.id == u.object_id
-                    && u.target == PropTarget::Visible
-                    && let kirie_script::ScriptValue::Bool(v) = &u.value
-                {
-                    mg.visible = *v;
+                if mg.id == u.object_id {
+                    match u.target {
+                        PropTarget::Visible => {
+                            if let kirie_script::ScriptValue::Bool(v) = &u.value {
+                                mg.visible = *v;
+                            }
+                        }
+                        // The model matrix is rebuilt from these fields every
+                        // draw, so writes are live next frame.
+                        PropTarget::Origin => {
+                            if let Some(v) = as_vec3(&u.value) {
+                                mg.set_origin(v);
+                            }
+                        }
+                        PropTarget::Scale => {
+                            if let Some(v) = as_vec3(&u.value) {
+                                mg.set_scale(v);
+                            }
+                        }
+                        PropTarget::Angles => {
+                            if let Some(v) = as_vec3(&u.value) {
+                                mg.set_angles(v);
+                            }
+                        }
+                        _ => {}
+                    }
                 }
                 continue;
             }
