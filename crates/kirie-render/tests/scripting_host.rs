@@ -213,6 +213,36 @@ fn parallax_depth_write_reaches_updates() {
     );
 }
 
+/// A script bound to the base `origin` leaf loads and drives Origin updates
+/// (the cursor-follow pattern), even though it is not a kind-level leaf.
+#[test]
+fn base_origin_leaf_script_is_collected() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 5,
+                "name": "chaser",
+                "image": "models/x.json",
+                "origin": {
+                    "value": "10 20 0",
+                    "script": "export function update(v) { return new Vec3(input.cursorWorldPosition.x, input.cursorWorldPosition.y, 0); }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("origin script spawns the host");
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 48.0], false);
+    assert!(
+        updates.iter().any(|u| u.object_id == 5
+            && u.target == PropTarget::Origin
+            && kirie_render::scene::scripting::as_vec3(&u.value).is_some_and(|v| v[0] == 64.0 && v[1] == 48.0)),
+        "no Origin update from the base-leaf script: {updates:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

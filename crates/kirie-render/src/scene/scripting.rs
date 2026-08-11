@@ -242,6 +242,26 @@ impl ScriptHost {
             let object = &model.scene.objects[oi];
             let id = object.base.id;
             layers.push(layer_state(object));
+            // Base transform leaves exist on every kind (docs §7.1) — a
+            // cursor-follow script on `origin` or a spin script on `angles`
+            // must load regardless of the object's kind.
+            let base = &object.base;
+            collect(&mut pending, id, "origin", &base.origin.script, || {
+                ScriptValue::Vec3(base.origin.value)
+            });
+            collect(&mut pending, id, "scale", &base.scale.script, || {
+                ScriptValue::Vec3(base.scale.value)
+            });
+            collect(&mut pending, id, "angles", &base.angles.script, || {
+                ScriptValue::Vec3(base.angles.value)
+            });
+            // Kinds below register their own `visible` leaf; for the rest
+            // (models, groups, lights) the base-level script is the only one.
+            if !matches!(&object.kind, ObjectKind::Image(_) | ObjectKind::Text(_)) {
+                collect(&mut pending, id, "visible", &base.visible.script, || {
+                    ScriptValue::Bool(base.visible.value)
+                });
+            }
             match &object.kind {
                 ObjectKind::Image(img) => {
                     collect(&mut pending, id, "alpha", &img.alpha.script, || {
