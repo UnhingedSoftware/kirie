@@ -2716,6 +2716,12 @@ impl Renderer for SceneRenderer {
         }
         // Camera fov (model perspective, rebuilt each frame from camera.fov).
         self.camera.reresolve(&self.bag);
+        // Keep the script snapshot's fov current: camera scripts echo
+        // `getCameraTransforms().fov` back every tick, and a stale snapshot
+        // would overwrite this property change on the next frame.
+        if let Some(host) = self.script.as_mut() {
+            host.set_scene_fov(self.camera.fov.value);
+        }
         // General: ambient / skylight / clearcolor + bloom, all read per-frame.
         self.general.resolve(&self.bag);
         self.ambient = [

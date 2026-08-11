@@ -363,6 +363,81 @@ fn video_control_calls_drain_as_ops() {
     );
 }
 
+/// A camera script echoing `setCameraTransforms(getCameraTransforms())` must
+/// not clobber a live fov change: after `set_scene_fov`, the echoed camera op
+/// carries the CURRENT fov (the reference's getFov semantics).
+#[test]
+fn camera_echo_carries_the_synced_fov() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0", "fov": 50.0 },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 35,
+                "name": "cam",
+                "image": "models/x.json",
+                "visible": {
+                    "value": true,
+                    "script": "export function update(v) { thisScene.setCameraTransforms(thisScene.getCameraTransforms()); return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    // Baseline echo: authored fov.
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    assert_eq!(host.take_camera().and_then(|c| c.fov), Some(50.0));
+    // Live property change syncs the snapshot; the next echo carries it.
+    host.set_scene_fov(36.9);
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    assert_eq!(host.take_camera().and_then(|c| c.fov), Some(36.9));
+}
+
+/// A script bound to an effect override's constantshadervalues entry (the
+/// rainbow-coloring pattern) loads and its per-tick return routes through the
+/// material seam with the right effect index and constant name.
+#[test]
+fn effect_constant_script_routes_to_material_ops() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 45,
+                "name": "Effects/Coloring",
+                "image": "models/x.json",
+                "effects": [
+                    {
+                        "file": "effects/coloring.json",
+                        "passes": [
+                            {
+                                "constantshadervalues": {
+                                    "color": {
+                                        "value": "1 0 0",
+                                        "script": "export function update(v) { return new Vec3(0, engine.runtime > 0 ? 1 : 0, 0); }"
+                                    }
+                                }
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("effect constant script spawns host");
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    let ops = host.take_material_ops();
+    assert!(
+        ops.iter().any(|(id, ei, name, v)| *id == 45
+            && *ei == 0
+            && name == "color"
+            && kirie_render::scene::scripting::as_vec3(v).is_some_and(|c| c == [0.0, 1.0, 0.0])),
+        "constant result not routed: {ops:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

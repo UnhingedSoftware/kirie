@@ -93,6 +93,10 @@ struct ScriptedProp {
     object_id: i64,
     /// The live value it drives.
     target: PropTarget,
+    /// `Some((effect idx, constant name))` when this script drives an effect
+    /// pass's `constantshadervalues` entry (the rainbow-coloring pattern) —
+    /// results then route through the material-op seam, not a PropUpdate.
+    effect_constant: Option<(usize, String)>,
 }
 
 /// A typed property update the render loop applies to its live objects
@@ -296,6 +300,29 @@ impl ScriptHost {
                     collect(&mut pending, id, "visible", &img.visible.script, || {
                         ScriptValue::Bool(img.visible.value)
                     });
+                    // Effect-pass constant scripts (the rainbow-coloring
+                    // pattern: a binding on an effect override's
+                    // constantshadervalues entry drives that shader constant
+                    // per tick). Routed through the live setMaterialProperty
+                    // seam by effect index + constant name.
+                    for (ei, eff) in img.effects.iter().enumerate() {
+                        for ov in &eff.passes {
+                            for (cname, us) in &ov.constantshadervalues {
+                                let Some(b) = &us.script else { continue };
+                                pending.push(Pending {
+                                    prop: ScriptedProp {
+                                        key: format!("fx{ei}{cname}_{id}"),
+                                        object_id: id,
+                                        target: PropTarget::Color,
+                                        effect_constant: Some((ei, cname.clone())),
+                                    },
+                                    source: b.source.clone(),
+                                    initial: dynamic_to_script(&us.value),
+                                    script_props: flatten_props(&b.properties),
+                                });
+                            }
+                        }
+                    }
                 }
                 ObjectKind::Particle(pobj) => {
                     collect(
@@ -606,19 +633,22 @@ impl ScriptHost {
         let mut updates = Vec::new();
         // Property-script results (docs §5.1: update()'s return drives the prop).
         for (key, value) in output.property_results {
-            if let Some((object_id, target)) = self
-                .props
-                .iter()
-                .find(|p| p.key == key)
-                .map(|p| (p.object_id, p.target))
-            {
-                self.record_layer(object_id, target, &value);
-                updates.push(PropUpdate {
-                    object_id,
-                    target,
-                    value,
-                });
+            let Some(prop) = self.props.iter().find(|p| p.key == key) else {
+                continue;
+            };
+            if let Some((ei, cname)) = &prop.effect_constant {
+                // Effect-constant scripts route through the material seam —
+                // the same live path getEffect().setMaterialProperty takes.
+                self.material_ops.push((prop.object_id, *ei, cname.clone(), value));
+                continue;
             }
+            let (object_id, target) = (prop.object_id, prop.target);
+            self.record_layer(object_id, target, &value);
+            updates.push(PropUpdate {
+                object_id,
+                target,
+                value,
+            });
         }
         // Imperative scene ops (docs §6.2/§8): leaf writes, runtime layers,
         // camera overrides.
@@ -728,6 +758,19 @@ impl ScriptHost {
         std::mem::take(&mut self.particle_ops)
     }
 
+    /// Sync the scene snapshot's camera fov after a live property change.
+    /// The reference's `getCameraTransforms` reports the CURRENT fov
+    /// (`getFov`, SceneObject.cpp:257) — camera scripts echo it back through
+    /// `setCameraTransforms` every tick, so a stale snapshot value would
+    /// clobber a user's fov slider on the very next frame.
+    pub fn set_scene_fov(&mut self, fov: f32) {
+        if (self.scene.camera.fov - fov).abs() > f32::EPSILON {
+            self.scene.camera.fov = fov;
+            self.scene.fov = fov;
+            self.scene_dirty = true;
+        }
+    }
+
     /// Drain the tick's video playback commands.
     pub fn take_video_ops(&mut self) -> Vec<(i64, String, f64)> {
         std::mem::take(&mut self.video_ops)
@@ -826,6 +869,25 @@ impl ScriptHost {
             // and a particle rate has no layer mirror either.
             PropTarget::Brightness | PropTarget::ParticleRate => {}
         }
+    }
+}
+
+/// A `constantshadervalues` literal as the script's initial value.
+fn dynamic_to_script(v: &kirie_scene::value::DynamicValue) -> ScriptValue {
+    use kirie_scene::value::DynamicValue as D;
+    match v {
+        D::Bool(b) => ScriptValue::Bool(*b),
+        D::Int(i) => ScriptValue::Int(*i),
+        D::Float(f) => ScriptValue::Float(*f),
+        D::Str(s) => ScriptValue::Str(s.clone()),
+        D::Vec(c) => match c.len() {
+            2 => ScriptValue::Vec2([c[0], c[1]]),
+            3 => ScriptValue::Vec3([c[0], c[1], c[2]]),
+            4 => ScriptValue::Vec4([c[0], c[1], c[2], c[3]]),
+            _ => ScriptValue::Null,
+        },
+        D::Color(c) => ScriptValue::Vec4(*c),
+        D::Null => ScriptValue::Null,
     }
 }
 
@@ -1029,6 +1091,7 @@ fn collect(
             key: format!("{field}_{id}"),
             object_id: id,
             target,
+            effect_constant: None,
         },
         source: b.source.clone(),
         initial: initial(),
