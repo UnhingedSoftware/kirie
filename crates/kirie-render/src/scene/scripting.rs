@@ -175,6 +175,9 @@ pub struct ScriptHost {
     /// Layer ids destroyed by scripts (`thisScene.destroyLayer`), drained via
     /// [`Self::take_destroyed`].
     destroyed: Vec<i64>,
+    /// Particle playback/instance ops, drained via
+    /// [`Self::take_particle_ops`].
+    particle_ops: Vec<ParticleOp>,
     /// Pending runtime camera override (`thisScene.setCameraTransforms`),
     /// merged across the tick's ops, drained via [`Self::take_camera`].
     camera_op: Option<CameraOp>,
@@ -359,6 +362,7 @@ impl ScriptHost {
             elapsed: 0.0,
             created: Vec::new(),
             destroyed: Vec::new(),
+            particle_ops: Vec::new(),
             camera_op: None,
             order_dirty: false,
             parent_updates: Vec::new(),
@@ -632,6 +636,15 @@ impl ScriptHost {
                         self.parent_updates.push(u);
                     }
                 }
+                SceneOp::ParticleCommand { layer_id, cmd } => {
+                    self.particle_ops.push(ParticleOp::Command { id: layer_id, cmd });
+                }
+                SceneOp::EmitParticles { layer_id, count } => {
+                    self.particle_ops.push(ParticleOp::Emit { id: layer_id, count });
+                }
+                SceneOp::SetInstance { layer_id, name, value } => {
+                    self.particle_ops.push(ParticleOp::Instance { id: layer_id, name, value });
+                }
                 SceneOp::DestroyLayer { layer_id } => {
                     // Drop the snapshot record — next tick's marshal no longer
                     // carries it, so every proxy read returns null from here on
@@ -649,6 +662,12 @@ impl ScriptHost {
     /// (`thisScene.destroyLayer`).
     pub fn take_destroyed(&mut self) -> Vec<i64> {
         std::mem::take(&mut self.destroyed)
+    }
+
+    /// Drain the tick's particle ops (`play`/`pause`/`stop`/`emitParticles`/
+    /// `instance.*` writes), for the renderer to route into each system's sim.
+    pub fn take_particle_ops(&mut self) -> Vec<ParticleOp> {
+        std::mem::take(&mut self.particle_ops)
     }
 
     /// Drain the tick's merged runtime camera override, if any
@@ -733,6 +752,33 @@ impl ScriptHost {
             PropTarget::Brightness | PropTarget::ParticleRate => {}
         }
     }
+}
+
+/// One drained particle op (see [`ScriptHost::take_particle_ops`]).
+pub enum ParticleOp {
+    /// `play`/`pause`/`stop`.
+    Command {
+        /// Target object id.
+        id: i64,
+        /// The command name.
+        cmd: String,
+    },
+    /// `emitParticles(count)`.
+    Emit {
+        /// Target object id.
+        id: i64,
+        /// Particles to spawn immediately.
+        count: u32,
+    },
+    /// `instance.<name> = value`.
+    Instance {
+        /// Target object id.
+        id: i64,
+        /// Instance property (scalar name, `colorn`, or `controlpointN`).
+        name: String,
+        /// The written value.
+        value: kirie_script::ScriptValue,
+    },
 }
 
 /// The render-side effect of one `setParent` op. The reference applies only a

@@ -243,6 +243,52 @@ fn base_origin_leaf_script_is_collected() {
     );
 }
 
+/// Particle playback and instance writes drain as typed particle ops
+/// (d.ts: ILayer extends IParticleSystem).
+#[test]
+fn particle_ops_drain_with_payloads() {
+    use kirie_render::scene::scripting::ParticleOp;
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 3,
+                "name": "sys",
+                "particle": "particles/x.json",
+                "instanceoverride": {
+                    "rate": {
+                        "value": 1.0,
+                        "script": "export function update(v) { thisLayer.pause(); thisLayer.emitParticles(5); thisLayer.instance.size = 2.5; thisLayer.instance.controlpoint1 = new Vec3(10, 20, 0); if (thisLayer.isPlaying()) { console.error('should be paused'); } return v; }"
+                    }
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    let ops = host.take_particle_ops();
+    assert!(
+        ops.iter().any(|o| matches!(o, ParticleOp::Command { id: 3, cmd } if cmd == "pause")),
+        "pause missing"
+    );
+    assert!(
+        ops.iter().any(|o| matches!(o, ParticleOp::Emit { id: 3, count: 5 })),
+        "emit missing"
+    );
+    assert!(
+        ops.iter().any(|o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "size"
+            && kirie_render::scene::scripting::as_f32(value) == Some(2.5))),
+        "size missing"
+    );
+    assert!(
+        ops.iter().any(|o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "controlpoint1"
+            && kirie_render::scene::scripting::as_vec3(value).is_some_and(|v| v[0] == 10.0 && v[1] == 20.0))),
+        "controlpoint1 missing"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

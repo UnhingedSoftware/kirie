@@ -40,7 +40,7 @@ use super::fbo::{FBO_FORMAT, Fbo};
 use super::matrix::{self, Mat4};
 use super::pipeline::{self, BindKind, BuiltPass, ModuleBinding};
 use super::plan::{self, Geometry, PassOutput};
-use super::scripting::{PropTarget, PropUpdate, ScriptHost, as_f32, as_rgb, as_vec3};
+use super::scripting::{ParticleOp, PropTarget, PropUpdate, ScriptHost, as_f32, as_rgb, as_vec3};
 use super::text::TextFonts;
 use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
@@ -1097,6 +1097,44 @@ impl SceneRenderer {
                 ..RuntimeLayer::default()
             });
             self.runtime_seq += 1;
+        }
+        for op in script.take_particle_ops() {
+            let target = match &op {
+                ParticleOp::Command { id, .. }
+                | ParticleOp::Emit { id, .. }
+                | ParticleOp::Instance { id, .. } => *id,
+            };
+            for item in &mut self.items {
+                let SceneItem::Particle(pg) = item else { continue };
+                if pg.id != target {
+                    continue;
+                }
+                match &op {
+                    ParticleOp::Command { cmd, .. } => match cmd.as_str() {
+                        "play" => pg.sim.play(),
+                        "pause" => pg.sim.pause(),
+                        "stop" => pg.sim.stop(),
+                        _ => {}
+                    },
+                    ParticleOp::Emit { count, .. } => pg.sim.emit_burst(*count),
+                    ParticleOp::Instance { name, value, .. } => {
+                        if let Some(rest) = name.strip_prefix("controlpoint") {
+                            if let (Ok(idx), Some(v)) = (rest.parse::<usize>(), as_vec3(value)) {
+                                // Script CPs arrive in the authored JSON space
+                                // (y-down); the sim runs local y-up, the same
+                                // flip the authored offsets get at build.
+                                pg.sim.set_control_point(idx, [v[0], -v[1], v[2]]);
+                            }
+                        } else if name == "colorn" {
+                            if let Some(v) = as_vec3(value) {
+                                pg.sim.set_instance_colorn(v);
+                            }
+                        } else if let Some(v) = as_f32(value) {
+                            pg.sim.set_instance_scalar(name, v);
+                        }
+                    }
+                }
+            }
         }
         for id in script.take_destroyed() {
             // `thisScene.destroyLayer`: a script-created layer is really

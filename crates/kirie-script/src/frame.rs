@@ -337,6 +337,30 @@ pub enum SceneOp {
         /// Target layer id.
         layer_id: i64,
     },
+    /// `thisLayer.play()/pause()/stop()` — particle playback control.
+    ParticleCommand {
+        /// Target layer id.
+        layer_id: i64,
+        /// `"play"`, `"pause"` or `"stop"`.
+        cmd: String,
+    },
+    /// `thisLayer.emitParticles(count)` — immediate burst.
+    EmitParticles {
+        /// Target layer id.
+        layer_id: i64,
+        /// Number of particles to spawn now.
+        count: u32,
+    },
+    /// `thisLayer.instance.<name> = v` — live instance-override write
+    /// (scalar multipliers, `colorn`, `controlpointN`).
+    SetInstance {
+        /// Target layer id.
+        layer_id: i64,
+        /// Instance property name.
+        name: String,
+        /// New value.
+        value: ScriptValue,
+    },
 }
 
 /// A single console line drained from a tick.

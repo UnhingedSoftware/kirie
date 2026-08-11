@@ -167,6 +167,15 @@ function __makeLayer(id) {
       l.angles = [0, yaw, a[2]];
       __recordProp(id, 'angles', l.angles.slice());
     },
+    // ---- IParticleSystem (d.ts: ILayer extends it; the ops no-op on layers
+    // that are not particle systems). Playback state and instance values are
+    // cached on __host side-tables that survive the per-tick frame marshal.
+    play: function () { __playCache()[id] = true; __host.ops.push({ op: 'particleCmd', id: id, cmd: 'play' }); },
+    pause: function () { __playCache()[id] = false; __host.ops.push({ op: 'particleCmd', id: id, cmd: 'pause' }); },
+    stop: function () { __playCache()[id] = false; __host.ops.push({ op: 'particleCmd', id: id, cmd: 'stop' }); },
+    isPlaying: function () { var c = __playCache(); return c[id] !== false; },
+    emitParticles: function (count) { __host.ops.push({ op: 'emitParticles', id: id, count: (typeof count === 'number' && count > 0) ? Math.floor(count) : 1 }); },
+    get instance() { return __makeInstance(id); },
     setParent: function (p) {
       var pid = null;
       if (p == null) pid = null;
@@ -290,6 +299,42 @@ var __scene = {
     return out;
   },
 };
+
+// Playback + instance caches: plain objects hung off __host under keys the
+// frame marshal never writes, so they survive apply_frame.
+function __playCache() { if (!__host.playState) __host.playState = {}; return __host.playState; }
+function __instCache(id) {
+  if (!__host.instState) __host.instState = {};
+  if (!__host.instState[id]) __host.instState[id] = {};
+  return __host.instState[id];
+}
+
+// IParticleSystemInstance proxy (d.ts): scalar multipliers, the colorn spawn
+// multiplier and eight control points. Reads serve the last written value
+// (defaults: 1 for scalars/colorn, 0 for control points).
+function __makeInstance(id) {
+  var inst = {};
+  ['alpha', 'size', 'count', 'speed', 'lifetime', 'rate'].forEach(function (n) {
+    Object.defineProperty(inst, n, {
+      enumerable: true,
+      get: function () { var c = __instCache(id); return (typeof c[n] === 'number') ? c[n] : 1; },
+      set: function (v) { __instCache(id)[n] = +v; __host.ops.push({ op: 'setInstance', id: id, name: n, value: +v }); },
+    });
+  });
+  Object.defineProperty(inst, 'colorn', {
+    enumerable: true,
+    get: function () { var c = __instCache(id).colorn; return c ? new Vec3(c[0], c[1], c[2]) : new Vec3(1, 1, 1); },
+    set: function (v) { var a = (typeof v === 'number') ? [v, v, v] : [v.x || 0, v.y || 0, v.z || 0]; __instCache(id).colorn = a; __host.ops.push({ op: 'setInstance', id: id, name: 'colorn', value: a.slice() }); },
+  });
+  for (var i = 0; i < 8; i++) (function (n) {
+    Object.defineProperty(inst, 'controlpoint' + n, {
+      enumerable: true,
+      get: function () { var c = __instCache(id)['cp' + n]; return c ? new Vec3(c[0], c[1], c[2]) : new Vec3(0, 0, 0); },
+      set: function (v) { var a = [v.x || 0, v.y || 0, v.z || 0]; __instCache(id)['cp' + n] = a; __host.ops.push({ op: 'setInstance', id: id, name: 'controlpoint' + n, value: a.slice() }); },
+    });
+  })(i);
+  return inst;
+}
 
 // Resolve a layer argument (name, scriptable index, or proxy) to its id.
 function __resolveLayerId(arg) {

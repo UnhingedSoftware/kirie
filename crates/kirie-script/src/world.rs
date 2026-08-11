@@ -789,6 +789,19 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
         "destroyLayer" => Some(SceneOp::DestroyLayer {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
         }),
+        "particleCmd" => Some(SceneOp::ParticleCommand {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            cmd: obj.get("cmd").ok()?,
+        }),
+        "emitParticles" => Some(SceneOp::EmitParticles {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            count: obj.get::<_, f64>("count").ok()?.max(0.0) as u32,
+        }),
+        "setInstance" => Some(SceneOp::SetInstance {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            name: obj.get("name").ok()?,
+            value: op_value(&obj.get::<_, Value>("value").ok()?),
+        }),
         _ => None,
     }
 }
