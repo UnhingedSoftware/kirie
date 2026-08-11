@@ -475,6 +475,8 @@ fn flush_pending_on_commit(
         // webkit, and holding the `RefCell` borrow across that would turn any
         // future re-entrant `evaluate` into a panic.
         let queued = pending.borrow_mut().take();
+        let n = queued.as_ref().map_or(0, Vec::len);
+        tracing::debug!(scripts = n, "load finished; flushing queued scripts");
         for js in queued.unwrap_or_default() {
             webkit.eval(&view, &js);
         }
