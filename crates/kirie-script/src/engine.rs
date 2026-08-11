@@ -236,14 +236,14 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Evaluate an arbitrary global script, returning its value stringified
-    /// (diagnostic / test helper).
     /// Point `localStorage` at a per-wallpaper JSON file: existing contents
     /// seed the buckets, later writes persist (debounced) to the same file.
     pub fn set_storage_path(&self, path: std::path::PathBuf) -> Result<(), ScriptError> {
         self.send(Command::SetStoragePath { path })
     }
 
+    /// Evaluate an arbitrary global script, returning its value stringified
+    /// (diagnostic / test helper).
     pub fn eval(&self, source: impl Into<String>) -> Result<String, ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::Eval {
