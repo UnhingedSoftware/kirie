@@ -40,6 +40,10 @@ pub struct WebRenderer {
     /// and every forward carries the full state.
     pointer: (f32, f32),
     pointer_left: bool,
+    /// Engine power-save flag + the last value forwarded to the backend, so
+    /// the backend hears only transitions.
+    power_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    power_on: bool,
 }
 
 struct Uploaded {
@@ -152,6 +156,8 @@ impl WebRenderer {
             pump: FeedPump::new(),
             pointer: (0.5, 0.5),
             pointer_left: false,
+            power_flag: None,
+            power_on: false,
         }
     }
 
@@ -180,7 +186,19 @@ impl WebRenderer {
     /// Wire the engine's on-battery flag into the feed pump (halves the
     /// audio/media push cadence while set).
     pub fn set_power_save(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
-        self.pump.set_power_save(flag);
+        self.pump.set_power_save(flag.clone());
+        self.power_flag = Some(flag);
+    }
+
+    /// Forward a power-save transition to the backend (CEF drops its paint
+    /// rate; native-surface backends ignore it).
+    fn sync_power_save(&mut self) {
+        let Some(flag) = &self.power_flag else { return };
+        let on = flag.load(std::sync::atomic::Ordering::Relaxed);
+        if on != self.power_on {
+            self.power_on = on;
+            self.backend.set_power_save(on);
+        }
     }
 
     /// Deliver whatever the feed has that the page has not been told yet.
@@ -188,6 +206,7 @@ impl WebRenderer {
     /// Called from both drive paths; the pump itself decides what is due, so
     /// calling it more often than necessary costs two `Instant` comparisons.
     fn pump_feed(&mut self) {
+        self.sync_power_save();
         if let Some(feed) = &self.feed {
             self.pump.pump(feed.as_ref(), self.backend.as_mut());
         }

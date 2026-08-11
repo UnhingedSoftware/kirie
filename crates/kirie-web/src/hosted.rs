@@ -290,6 +290,10 @@ impl WebBackend for HostedBackend {
         self.send_line(&format!("mute {}", u8::from(muted)));
     }
 
+    fn set_power_save(&mut self, on: bool) {
+        self.send_line(&format!("powersave {}", u8::from(on)));
+    }
+
     fn apply_properties(&mut self, json: &str) {
         // The batch is single-line JSON by construction (serde output).
         if !json.contains('\n') {

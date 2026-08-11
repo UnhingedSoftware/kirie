@@ -97,7 +97,9 @@ fn main() {
 
     let mut seq: u64 = 0;
     let mut last_pub: (*const u8, u32, u32) = (std::ptr::null(), 0, 0);
-    let frame_dt = Duration::from_millis(8);
+    // 16 ms matches the browser's 60 fps windowless paint rate exactly —
+    // the old 8 ms tick woke twice per possible frame.
+    let frame_dt = Duration::from_millis(16);
     let mut last = Instant::now();
     'run: loop {
         let tick_start = Instant::now();
@@ -119,6 +121,7 @@ fn main() {
                             backend.send_pointer(PointerState { x, y, left, right });
                         }
                         Some("mute") => backend.set_muted(p.next() == Some("1")),
+                        Some("powersave") => backend.set_power_save(p.next() == Some("1")),
                         Some("props") => {
                             if let Some(rest) = line.strip_prefix("props ") {
                                 backend.apply_properties(rest);

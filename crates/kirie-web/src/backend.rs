@@ -183,6 +183,11 @@ pub trait WebBackend: Send {
     /// Mute or unmute the page's audio.
     fn set_muted(&mut self, muted: bool);
 
+    /// On-battery hint: a composited backend may drop its internal paint
+    /// rate (CEF's windowless frame rate); a native-surface backend has
+    /// nothing to throttle (the compositor paces the page) and ignores it.
+    fn set_power_save(&mut self, _on: bool) {}
+
     /// Deliver a user-properties batch to the page as a `__wpApplyProps({...})`
     /// call (the shim forwards to `wallpaperPropertyListener.applyUserProperties`,
     /// docs §3.5; reference `CWeb.cpp` sends the full set once on the first

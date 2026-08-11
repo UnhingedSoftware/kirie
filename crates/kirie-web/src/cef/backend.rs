@@ -63,6 +63,8 @@ enum Command {
     Pointer(BrowserId, PointerState),
     /// (Un)mute one browser's audio.
     Mute(BrowserId, bool),
+    /// Drop/restore the windowless paint rate (battery profile).
+    PowerSave(BrowserId, bool),
     /// Deliver a `__wpApplyProps` JSON batch to one browser's page (queued in
     /// its registry entry until that browser's first published paint, then
     /// executed in order).
@@ -284,6 +286,10 @@ impl WebBackend for CefBackend {
         self.send(Command::Mute(self.id, muted));
     }
 
+    fn set_power_save(&mut self, on: bool) {
+        self.send(Command::PowerSave(self.id, on));
+    }
+
     fn apply_properties(&mut self, json: &str) {
         self.send(Command::ApplyProps(self.id, json.to_owned()));
     }
@@ -439,6 +445,15 @@ fn cef_thread_main(config: ThreadConfig) {
                         && let Some(host) = entry.browser.host()
                     {
                         host.set_audio_muted(i32::from(m));
+                    }
+                }
+                Ok(Command::PowerSave(id, on)) => {
+                    if let Some(entry) = registry.get_mut(id)
+                        && let Some(host) = entry.browser.host()
+                    {
+                        // Battery profile: a wallpaper at 10 fps reads fine;
+                        // 60 fps of off-screen Chromium paints does not.
+                        host.set_windowless_frame_rate(if on { 10 } else { FRAME_RATE });
                     }
                 }
                 Ok(Command::ApplyProps(id, json)) => {
