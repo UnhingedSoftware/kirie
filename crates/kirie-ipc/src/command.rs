@@ -157,6 +157,9 @@ pub enum SetOption {
     /// `audiodevice <string>` → PulseAudio source name, rest-of-line; the
     /// literal `default` maps to the empty string (doc §4.6).
     AudioDevice(String),
+    /// `batteryfps <int>` — kirie extension: the on-battery frame cap the
+    /// power watcher applies (`0` disables the battery profile).
+    BatteryFps(u32),
 }
 
 /// `scaling` mode strings (doc §4.10 table).
@@ -246,6 +249,7 @@ impl Command {
             Self::Mute(m) => format!("mute {}", i32::from(*m)).into_bytes(),
             Self::Set(opt) => match opt {
                 SetOption::Fps(n) => format!("set fps {n}"),
+                SetOption::BatteryFps(n) => format!("set batteryfps {n}"),
                 SetOption::NoAutomute(b) => format!("set noautomute {}", bool_str(*b)),
                 SetOption::DisableMouse(b) => format!("set disablemouse {}", bool_str(*b)),
                 SetOption::DisableParallax(b) => format!("set disableparallax {}", bool_str(*b)),
@@ -461,6 +465,7 @@ fn parse_set(cur: &mut Cursor<'_>) -> Request {
         b"disableparallax" => SetOption::DisableParallax(set_bool(cur.rest())),
         b"nofullscreenpause" => SetOption::NoFullscreenPause(set_bool(cur.rest())),
         b"renderscale" => SetOption::RenderScale(atof(cur.rest()).clamp(0.5, 2.0)),
+        b"batteryfps" => SetOption::BatteryFps(u32::try_from(atoi(cur.rest())).unwrap_or(0)),
         b"audiodevice" => {
             let v = rest_string(cur);
             SetOption::AudioDevice(if v == "default" { String::new() } else { v })
@@ -877,6 +882,8 @@ mod tests {
             Command::Set(SetOption::DisableParallax(false)),
             Command::Set(SetOption::NoFullscreenPause(true)),
             Command::Set(SetOption::RenderScale(1.06)),
+            Command::Set(SetOption::BatteryFps(10)),
+            Command::Set(SetOption::BatteryFps(0)),
             Command::Set(SetOption::AudioDevice(String::new())),
             Command::Set(SetOption::AudioDevice("alsa_output.pci 0000_00.analog".into())),
             Command::Bg {

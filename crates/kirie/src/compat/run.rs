@@ -190,6 +190,15 @@ pub(crate) fn power_save_flag() -> Arc<std::sync::atomic::AtomicBool> {
         .clone()
 }
 
+/// The on-battery frame cap (`--battery-fps`, retunable via `set batteryfps`).
+/// `0` disables the battery profile.
+pub(crate) fn battery_fps_target() -> Arc<std::sync::atomic::AtomicU32> {
+    static TARGET: std::sync::OnceLock<Arc<std::sync::atomic::AtomicU32>> = std::sync::OnceLock::new();
+    TARGET
+        .get_or_init(|| Arc::new(std::sync::atomic::AtomicU32::new(10)))
+        .clone()
+}
+
 /// The system-audio capture and the MPRIS now-playing source, each started the
 /// first time a wallpaper actually asks for it.
 ///
@@ -663,7 +672,8 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // `set batteryfps` socket key can retune it live.
     let power_save = power_save_flag();
     let normal_fps = u32::try_from(args.fps).ok().filter(|f| *f > 0);
-    let battery_fps = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(10));
+    let battery_fps = battery_fps_target();
+    battery_fps.store(args.battery_fps, std::sync::atomic::Ordering::Relaxed);
     let power_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut power_handle: Option<std::thread::JoinHandle<()>> = None;
 

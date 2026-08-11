@@ -217,6 +217,10 @@ pub struct CompatArgs {
     /// been hidden behind a fullscreen app this long, rebuilding it when it
     /// becomes visible again. `None` (the default) keeps it resident.
     pub release_hidden_after: Option<u64>,
+    /// `--battery-fps <n>`: the frame cap the power watcher applies while the
+    /// machine runs on battery (kirie extension). `0` disables the battery
+    /// profile entirely. Default 10.
+    pub battery_fps: u32,
     /// `--fit-render-to-output`: cap scene render targets at the output size
     /// instead of the scene's authored projection (trades the reference's
     /// implicit supersampling AA for ~20% fewer fragments when the projection
@@ -277,6 +281,7 @@ impl Default for CompatArgs {
             fullscreen_pause_only_active: false,
             fullscreen_pause_ignore_appid: Vec::new(),
             release_hidden_after: None,
+            battery_fps: 10,
             fit_render_to_output: false,
             volume: 15,
             silent: false,
@@ -508,6 +513,7 @@ fn flag_takes_value(canonical: &str) -> bool {
             | "--render-debug"
             | "--gpu"
             | "--release-hidden-after"
+            | "--battery-fps"
     )
 }
 
@@ -759,6 +765,10 @@ fn parse_with(
             "--release-hidden-after" => {
                 let n = scan_int("--release-hidden-after", &value()?)?;
                 out.release_hidden_after = (n > 0).then_some(n as u64);
+            }
+            "--battery-fps" => {
+                let n = scan_int("--battery-fps", &value()?)?;
+                out.battery_fps = u32::try_from(n).unwrap_or(0);
             }
             "--disable-particles" => out.disable_particles = true,
             "--disable-mouse" => out.disable_mouse = true,

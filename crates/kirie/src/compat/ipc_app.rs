@@ -311,6 +311,11 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                         rebuild_current(state);
                     }
                 }
+                SetOption::BatteryFps(n) => {
+                    // The watcher reads this on its next poll; if the profile
+                    // is active it re-applies with the new cap then.
+                    super::run::battery_fps_target().store(n, std::sync::atomic::Ordering::Relaxed);
+                }
                 SetOption::DisableParallax(on) if on != super::run::disable_parallax() => {
                     super::run::set_disable_parallax(on);
                     rebuild_current(state);
