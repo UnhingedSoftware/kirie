@@ -15,6 +15,18 @@ use wayland_client::{Connection, Proxy};
 
 use crate::error::PlatformError;
 
+/// Adapter power preference: `LowPower` by default (an idle wallpaper does
+/// not need the discrete GPU spun up), but neutral when the user pinned a
+/// GPU (`--gpu`/`KIRIE_GPU` re-exec forces one ICD; a preference could only
+/// fight the pin on multi-adapter ICDs).
+pub(crate) fn power_preference() -> wgpu::PowerPreference {
+    if std::env::var_os("KIRIE_GPU").is_some() || std::env::var_os("KIRIE_GPU_PINNED").is_some() {
+        wgpu::PowerPreference::None
+    } else {
+        wgpu::PowerPreference::LowPower
+    }
+}
+
 /// Shared GPU context: one instance/adapter/device/queue for every output
 /// surface (docs/render-architecture.md §2.3 "wgpu:" note — the portable
 /// model is one shared device with one present pass per monitor surface;
@@ -146,6 +158,7 @@ impl Gpu {
 
             match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
+                power_preference: power_preference(),
                 ..wgpu::RequestAdapterOptions::default()
             })) {
                 Ok(adapter) => {

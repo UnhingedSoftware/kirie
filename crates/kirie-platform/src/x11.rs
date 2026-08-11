@@ -561,6 +561,7 @@ fn bring_up_gpu(
 
         match pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             compatible_surface: Some(&surface),
+            power_preference: crate::gpu::power_preference(),
             ..wgpu::RequestAdapterOptions::default()
         })) {
             Ok(adapter) => {
