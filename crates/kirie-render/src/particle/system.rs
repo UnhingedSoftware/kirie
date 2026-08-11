@@ -78,6 +78,10 @@ pub struct ParticleSim {
     /// the cursor (`locktopointer`), applied on top of the pointer position.
     cp_pointer_offset: Vec<Option<Vec3>>,
     overrides: Overrides,
+    /// Script `pause()` — simulation frozen, particles retained.
+    paused: bool,
+    /// Script `stop()` — emission halted, particles cleared.
+    stopped: bool,
     perspective: bool,
     sequence_multiplier: f32,
     sheet: Option<SpriteSheet>,
@@ -136,6 +140,8 @@ impl ParticleSim {
             control_points,
             cp_pointer_offset,
             overrides: ov,
+            paused: false,
+            stopped: false,
             perspective,
             sequence_multiplier: system.sequencemultiplier,
             sheet: config.sheet,
@@ -148,7 +154,7 @@ impl ParticleSim {
 
     /// Advance the simulation by `dt` seconds (capped at [`MAX_DT`]).
     pub fn update(&mut self, dt: f32) {
-        if !self.overrides.enabled {
+        if !self.overrides.enabled || self.paused || self.stopped {
             return;
         }
         let dt = dt.clamp(0.0, MAX_DT);
@@ -161,28 +167,109 @@ impl ParticleSim {
         self.compact();
     }
 
+    /// `IParticleSystem.play()` — restart a paused or stopped system.
+    pub fn play(&mut self) {
+        self.paused = false;
+        self.stopped = false;
+    }
+
+    /// `IParticleSystem.pause()` — freeze the simulation (particles keep
+    /// their state; `play` resumes).
+    pub fn pause(&mut self) {
+        self.paused = true;
+    }
+
+    /// `IParticleSystem.stop()` — halt emission and clear the live particles.
+    pub fn stop(&mut self) {
+        self.stopped = true;
+        self.particles.clear();
+    }
+
+    /// `IParticleSystem.isPlaying()`.
+    #[must_use]
+    pub fn is_playing(&self) -> bool {
+        self.overrides.enabled && !self.paused && !self.stopped
+    }
+
+    /// `IParticleSystem.emitParticles(count)` — spawn `count` particles
+    /// immediately (round-robin over emitters), independent of the paused
+    /// state, exactly like the reference's immediate emission.
+    pub fn emit_burst(&mut self, count: u32) {
+        if self.emitters.is_empty() {
+            return;
+        }
+        for i in 0..count as usize {
+            if !self.spawn_one(i % self.emitters.len()) {
+                break;
+            }
+        }
+    }
+
+    /// `IParticleSystemInstance` scalar setters. Returns false for a name
+    /// that is not a live scalar override.
+    pub fn set_instance_scalar(&mut self, name: &str, v: f32) -> bool {
+        match name {
+            "alpha" => self.overrides.alpha = v,
+            "size" => self.overrides.size = v,
+            "count" => self.overrides.count = v,
+            "speed" => self.overrides.speed = v,
+            "lifetime" => self.overrides.lifetime = v,
+            "rate" => self.overrides.rate = v,
+            _ => return false,
+        }
+        true
+    }
+
+    /// `IParticleSystemInstance.colorn` — spawn-color multiplier.
+    pub fn set_instance_colorn(&mut self, v: Vec3) {
+        self.overrides.colorn = v;
+    }
+
+    /// `IParticleSystemInstance.controlpointN` — reposition a control point
+    /// (local y-up space, same convention as the authored offsets). Indexes
+    /// past the authored list grow it, so a script can drive points the
+    /// author never placed.
+    pub fn set_control_point(&mut self, idx: usize, pos: Vec3) {
+        if idx >= 8 {
+            return;
+        }
+        if idx >= self.control_points.len() {
+            self.control_points.resize(idx + 1, [0.0, 0.0, 0.0]);
+            self.cp_pointer_offset.resize(idx + 1, None);
+        }
+        self.control_points[idx] = pos;
+    }
+
     fn run_emitters(&mut self, dt: f32) {
         for e_idx in 0..self.emitters.len() {
             let n = self.emitters[e_idx].tick(dt, self.time, self.overrides.rate, 1.0, &mut self.rng);
             for _ in 0..n {
-                if self.particles.len() >= self.capacity {
+                if !self.spawn_one(e_idx) {
                     break;
                 }
-                let (position, velocity) =
-                    self.emitters[e_idx].spawn(&self.control_points, self.perspective, &mut self.rng);
-                let mut pt = self.new_particle(position, velocity);
-                let spawn_ctx = SpawnCtx {
-                    overrides: &self.overrides,
-                    perspective: self.perspective,
-                    control_points: &self.control_points,
-                };
-                for init in &mut self.initializers {
-                    init.apply(&mut pt, &spawn_ctx, &mut self.rng);
-                }
-                self.particles.push(pt);
-                self.total_spawned += 1;
             }
         }
+    }
+
+    /// Spawn one particle from emitter `e_idx`; false when the pool is full.
+    fn spawn_one(&mut self, e_idx: usize) -> bool {
+        if self.particles.len() >= self.capacity {
+            return false;
+        }
+        let (position, velocity) =
+            self.emitters[e_idx].spawn(&self.control_points, self.perspective, &mut self.rng);
+        let mut pt = self.new_particle(position, velocity);
+        let spawn_ctx = SpawnCtx {
+            overrides: &self.overrides,
+            perspective: self.perspective,
+            control_points: &self.control_points,
+        };
+        for init in &mut self.initializers {
+            init.apply(&mut pt, &spawn_ctx, &mut self.rng);
+        }
+        self.particles.push(pt);
+        self.total_spawned += 1;
+        true
     }
 
     /// A fresh particle before initializers run (docs §7.3: color = colorn
