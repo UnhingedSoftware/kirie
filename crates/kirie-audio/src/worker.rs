@@ -76,6 +76,7 @@ pub(crate) fn run(
     let mut drain = [0u8; 8192];
 
     let mut ref_db: f32 = crate::dsp::REF_DB_MAX;
+    let mut published_silence = false;
     while !shutdown.load(Ordering::Relaxed) {
         // Drain everything currently available, assembling frames; keep the
         // newest completed window.
@@ -119,7 +120,16 @@ pub(crate) fn run(
         }
 
         smoother.tick();
-        shared.store(Arc::new(AudioSpectrum::from(&smoother)));
+        // Silence gating: once the smoother has fully decayed AND no new
+        // frame arrived, publish ONE final zeroed snapshot and then stop
+        // allocating/storing until sound returns — readers keep seeing
+        // stable zeros (same contract as audio-off). ~62 Arc allocations/s
+        // saved on an idle desktop.
+        let settled = latest.is_none() && smoother.is_settled_silent();
+        if !(settled && published_silence) {
+            shared.store(Arc::new(AudioSpectrum::from(&smoother)));
+        }
+        published_silence = settled;
 
         // Power save (on battery): half the publish rate, double the sleep.
         let tick = if params

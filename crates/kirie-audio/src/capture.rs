@@ -326,7 +326,10 @@ pub(crate) fn run(
             }
         }
 
-        std::thread::sleep(Duration::from_millis(5));
+        // 20 ms: a quarter of the wakes of the old 5 ms pump. PulseAudio
+        // buffers fragments between pumps and the FFT worker smooths at a
+        // 16-32 ms tick, so the added jitter is invisible on a visualizer.
+        std::thread::sleep(Duration::from_millis(20));
     }
 
     close_stream(&stream);

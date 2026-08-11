@@ -276,6 +276,17 @@ impl Smoother {
         self.targets = targets;
     }
 
+    /// Whether every band (and its target) has decayed to effectively zero —
+    /// the worker skips publishing identical silent snapshots once settled.
+    #[must_use]
+    pub fn is_settled_silent(&self) -> bool {
+        const EPS: f32 = 1e-3;
+        self.b64.iter().all(|v| *v < EPS)
+            && self.targets.b64.iter().all(|v| *v < EPS)
+            && self.b32.iter().all(|v| *v < EPS)
+            && self.b16.iter().all(|v| *v < EPS)
+    }
+
     /// Advance one frame: move every displayed band a fixed *fraction* of the
     /// remaining distance toward its target — [`SMOOTH_ATTACK`] rising,
     /// [`SMOOTH_RELEASE`] falling. Runs whether or not a new FFT frame exists,
