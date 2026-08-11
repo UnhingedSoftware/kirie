@@ -217,6 +217,9 @@ impl Drop for MediaSource {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
         if let Some(h) = self.worker.take() {
+            // The worker parks between polls; unpark cuts the wait short so
+            // drop joins promptly without 50 ms polling slices.
+            h.thread().unpark();
             let _ = h.join();
         }
     }

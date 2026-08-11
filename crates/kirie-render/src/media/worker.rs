@@ -82,10 +82,22 @@ pub(super) fn run(
 
     let mut art_cache = ArtCache::new();
 
+    // With no player on the bus the full detect walk can discover nothing new
+    // frame-to-frame; back off to a slow scan and return to the configured
+    // tick the moment a player appears. Idle desktop: 0.2 polls/s, not 1/s.
+    const IDLE_TICK: Duration = Duration::from_secs(5);
     while !shutdown.load(Ordering::Relaxed) {
         let state = poll_once(&conn, &mut art_cache);
+        let idle = !state.available;
         shared.store(Arc::new(state));
-        sleep_interruptible(&shutdown, params.tick);
+        sleep_interruptible(
+            &shutdown,
+            if idle {
+                IDLE_TICK.max(params.tick)
+            } else {
+                params.tick
+            },
+        );
     }
 }
 
@@ -176,19 +188,14 @@ fn detect_player(conn: &zbus::blocking::Connection) -> Option<String> {
     first_paused
 }
 
-/// Sleep for `dur`, waking early (in ≤50 ms slices) if shutdown is requested,
-/// so `Drop` joins promptly.
+/// Park for `dur`; `Drop` sets the shutdown flag and unparks, so the wait
+/// ends immediately without periodic wake slices (this thread used to wake
+/// 20×/s just to check the flag). A spurious unpark only polls a bit early.
 fn sleep_interruptible(shutdown: &AtomicBool, dur: Duration) {
-    let slice = Duration::from_millis(50);
-    let mut remaining = dur;
-    while remaining > Duration::ZERO {
-        if shutdown.load(Ordering::Relaxed) {
-            return;
-        }
-        let step = remaining.min(slice);
-        std::thread::sleep(step);
-        remaining = remaining.saturating_sub(step);
+    if shutdown.load(Ordering::Relaxed) {
+        return;
     }
+    std::thread::park_timeout(dur);
 }
 
 #[cfg(test)]
