@@ -155,7 +155,9 @@ fn iterate_until<T>(
         if let Some(res) = check() {
             return res;
         }
-        std::thread::sleep(Duration::from_millis(2));
+        // Operation waits are connect/scan one-shots, not steady state; a
+        // coarser poll costs at most ~20 ms latency per operation.
+        std::thread::sleep(Duration::from_millis(20));
     }
 }
 
