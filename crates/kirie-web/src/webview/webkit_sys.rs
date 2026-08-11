@@ -111,6 +111,10 @@ type WebContextSetCacheModel = unsafe extern "C" fn(*mut c_void, c_int);
 /// `void webkit_settings_set_enable_page_cache (WebKitSettings *, gboolean)`
 type SettingsSetEnablePageCache = unsafe extern "C" fn(*mut c_void, c_int);
 
+/// `void webkit_settings_set_allow_file_access_from_file_urls
+/// (WebKitSettings *, gboolean)` — webkit 2.10+.
+type SettingsSetAllowFileAccess = unsafe extern "C" fn(*mut c_void, c_int);
+
 /// `WEBKIT_CACHE_MODEL_DOCUMENT_VIEWER` — the smallest of the three cache
 /// models: webkit keeps no back/forward page cache and only a minimal resource
 /// cache. The default is `WEB_BROWSER`, which trades memory for revisit speed —
@@ -192,6 +196,10 @@ pub struct WebKit {
     web_context_get_default: Option<WebContextGetDefault>,
     web_context_set_cache_model: Option<WebContextSetCacheModel>,
     settings_set_enable_page_cache: Option<SettingsSetEnablePageCache>,
+    /// `file://` pages XHR/fetching sibling `file://` resources (data.json,
+    /// packaged media) — denied by webkit's default same-origin rule, allowed
+    /// by the reference engine (CEF `allow-file-access-from-files`).
+    settings_set_allow_file_access: Option<SettingsSetAllowFileAccess>,
 }
 
 impl WebKit {
@@ -358,6 +366,21 @@ impl WebKit {
             // plain gboolean.
             unsafe { set_page_cache(settings, 0) };
         }
+
+        // Workshop pages are file:// documents that fetch their own packaged
+        // resources (data.json, music, subtitles) over XHR — same-origin for
+        // a wallpaper, but webkit's default treats every file:// URL as a
+        // distinct origin and silently denies it, leaving pages that load
+        // their content dynamically stuck on an empty shell. The reference
+        // engine runs CEF with `allow-file-access-from-files`.
+        if let Some(set_file_access) = self.settings_set_allow_file_access {
+            // SAFETY: same live `WebKitSettings`; plain gboolean.
+            unsafe { set_file_access(settings, 1) };
+        } else {
+            tracing::warn!(
+                "webkit lacks allow-file-access-from-file-urls; pages that XHR their own files will stay empty"
+            );
+        }
     }
 
     /// Run `js` in `view`'s main frame, discarding the result.
@@ -487,6 +510,11 @@ fn bind(lib: libloading::Library, soname: &'static str) -> Result<WebKit, String
             web_context_get_default: symbol(&lib, b"webkit_web_context_get_default\0").ok(),
             web_context_set_cache_model: symbol(&lib, b"webkit_web_context_set_cache_model\0").ok(),
             settings_set_enable_page_cache: symbol(&lib, b"webkit_settings_set_enable_page_cache\0").ok(),
+            settings_set_allow_file_access: symbol(
+                &lib,
+                b"webkit_settings_set_allow_file_access_from_file_urls\0",
+            )
+            .ok(),
             _lib: lib,
         }
     };
