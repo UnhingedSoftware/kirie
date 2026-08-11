@@ -183,6 +183,36 @@ fn destroy_layer_drains_and_forgets_the_record() {
     );
 }
 
+/// `thisLayer.parallaxDepth = Vec2` surfaces as a ParallaxDepth update
+/// (d.ts IImageLayer types it Vec2).
+#[test]
+fn parallax_depth_write_reaches_updates() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 7,
+                "name": "layer",
+                "image": "models/x.json",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "export function update(v) { thisLayer.parallaxDepth = new Vec2(2, 3); return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    assert!(
+        updates.iter().any(|u| u.object_id == 7
+            && u.target == PropTarget::ParallaxDepth
+            && kirie_render::scene::scripting::as_vec3(&u.value).is_some_and(|v| v[0] == 2.0 && v[1] == 3.0)),
+        "no ParallaxDepth update: {updates:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

@@ -120,8 +120,8 @@ function __layerById(id) { var L = __host.layers; for (var i = 0; i < L.length; 
 function __recordProp(id, name, value) { __host.ops.push({ op: 'setProp', id: id, name: name, value: value }); }
 
 var __VEC3_PROPS = { origin: 1, scale: 1, angles: 1, color: 1 };
-var __VEC2_PROPS = {};
-var __NUM_PROPS = { alpha: 1, parallaxDepth: 1, pointSize: 1 };
+var __VEC2_PROPS = { parallaxDepth: 1 };
+var __NUM_PROPS = { alpha: 1, pointSize: 1 };
 var __BOOL_PROPS = { visible: 1 };
 var __STR_PROPS = { text: 1 };
 
@@ -186,7 +186,9 @@ function __makeLayer(id) {
         var l = __layerById(id); if (!l || !(name in l)) return undefined;
         var v = l[name];
         if (__VEC3_PROPS[name]) return new Vec3(v[0], v[1], v[2]);
-        if (__VEC2_PROPS[name]) return new Vec2(v[0], v[1]);
+        // The snapshot may serve a Vec2 prop as a plain number (parallaxDepth
+        // is stored single-axis host-side); normalize to the d.ts Vec2.
+        if (__VEC2_PROPS[name]) { if (typeof v === 'number') return new Vec2(v, v); return new Vec2(v[0], v[1]); }
         return v;
       },
       set: function (val) {

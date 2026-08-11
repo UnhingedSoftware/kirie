@@ -3015,8 +3015,13 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                         object.visible = *v;
                     }
                 }
-                // Text handled by the text pipeline; transforms only drive
-                // runtime layers (applied in `apply_runtime_updates`).
+                PropTarget::ParallaxDepth => {
+                    if let Some(v) = as_vec3(&u.value) {
+                        object.parallax_depth = [v[0], v[1]];
+                    }
+                }
+                // Text handled by the text pipeline; transforms handled by
+                // `apply_image_transforms` and `apply_runtime_updates`.
                 PropTarget::Text
                 | PropTarget::Origin
                 | PropTarget::Scale
@@ -3078,7 +3083,10 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
                     l.visible = *v;
                 }
             }
-            PropTarget::Brightness | PropTarget::Text | PropTarget::ParticleRate => {}
+            PropTarget::Brightness
+            | PropTarget::Text
+            | PropTarget::ParticleRate
+            | PropTarget::ParallaxDepth => {}
         }
     }
 }

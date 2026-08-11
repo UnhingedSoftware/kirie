@@ -62,6 +62,8 @@ pub enum PropTarget {
     Scale,
     /// `angles` — layer rotation, degrees.
     Angles,
+    /// `parallaxDepth` — per-layer parallax factor (d.ts IImageLayer, Vec2).
+    ParallaxDepth,
 }
 
 impl PropTarget {
@@ -77,6 +79,7 @@ impl PropTarget {
             "origin" => Self::Origin,
             "scale" => Self::Scale,
             "angles" => Self::Angles,
+            "parallaxDepth" => Self::ParallaxDepth,
             _ => return None,
         })
     }
@@ -700,6 +703,11 @@ impl ScriptHost {
                     layer.angles = Some(v);
                 }
             }
+            PropTarget::ParallaxDepth => {
+                if let Some(v) = as_vec3(value) {
+                    layer.parallax_depth = Some(v[0]);
+                }
+            }
             // Brightness is not a registered `thisLayer` property (docs §4.1),
             // and a particle rate has no layer mirror either.
             PropTarget::Brightness | PropTarget::ParticleRate => {}
@@ -896,6 +904,8 @@ pub fn as_f32(v: &ScriptValue) -> Option<f32> {
 pub fn as_vec3(v: &ScriptValue) -> Option<[f32; 3]> {
     match v {
         ScriptValue::Vec3(a) => Some(*a),
+        // Vec2-typed writes (parallaxDepth) extend with a zero Z.
+        ScriptValue::Vec2(a) => Some([a[0], a[1], 0.0]),
         ScriptValue::Float(f) => Some([*f as f32; 3]),
         _ => None,
     }
