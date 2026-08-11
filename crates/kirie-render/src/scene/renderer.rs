@@ -829,10 +829,11 @@ impl SceneRenderer {
 
         // MPRIS media integration: started only when a script listens for the
         // media*Changed events — no D-Bus worker for the common scene.
-        let media = script
-            .as_ref()
-            .filter(|h| h.wants_media())
-            .map(|_| Arc::new(crate::media::MediaSource::start(crate::media::MediaConfig::default())));
+        let media = script.as_ref().filter(|h| h.wants_media()).map(|_| {
+            Arc::new(crate::media::MediaSource::start(
+                crate::media::MediaConfig::default(),
+            ))
+        });
 
         // Allocate the models' shared depth buffer once, only when the scene has
         // a model object (SPEC.md §V5: no per-frame alloc; §7.2).
@@ -1144,19 +1145,11 @@ impl SceneRenderer {
             // effect's passes and re-resolve their shader params — the same
             // live path a `setProperty` material tweak takes.
             let dynv = match &value {
-                kirie_script::ScriptValue::Float(f) => {
-                    kirie_scene::value::DynamicValue::Float(*f)
-                }
+                kirie_script::ScriptValue::Float(f) => kirie_scene::value::DynamicValue::Float(*f),
                 kirie_script::ScriptValue::Int(i) => kirie_scene::value::DynamicValue::Int(*i),
-                kirie_script::ScriptValue::Vec2(v) => {
-                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
-                }
-                kirie_script::ScriptValue::Vec3(v) => {
-                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
-                }
-                kirie_script::ScriptValue::Vec4(v) => {
-                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
-                }
+                kirie_script::ScriptValue::Vec2(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
+                kirie_script::ScriptValue::Vec3(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
+                kirie_script::ScriptValue::Vec4(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
                 _ => continue,
             };
             for item in &mut self.items {

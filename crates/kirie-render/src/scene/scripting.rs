@@ -639,7 +639,8 @@ impl ScriptHost {
             if let Some((ei, cname)) = &prop.effect_constant {
                 // Effect-constant scripts route through the material seam —
                 // the same live path getEffect().setMaterialProperty takes.
-                self.material_ops.push((prop.object_id, *ei, cname.clone(), value));
+                self.material_ops
+                    .push((prop.object_id, *ei, cname.clone(), value));
                 continue;
             }
             let (object_id, target) = (prop.object_id, prop.target);
@@ -687,7 +688,13 @@ impl ScriptHost {
                     });
                     self.created.push((layer_id, path));
                 }
-                SceneOp::SetCameraTransforms { eye, center, up, fov, zoom } => {
+                SceneOp::SetCameraTransforms {
+                    eye,
+                    center,
+                    up,
+                    fov,
+                    zoom,
+                } => {
                     merge_camera(&mut self.camera_op, eye, center, up, fov, zoom);
                     // `getCameraTransforms` reports the BASE eye/center/up but
                     // the *overridden* fov (`getBaseEye`/`getFov`,
@@ -721,7 +728,12 @@ impl ScriptHost {
                 SceneOp::VideoCommand { layer_id, cmd, value } => {
                     self.video_ops.push((layer_id, cmd, value));
                 }
-                SceneOp::SetMaterialProperty { layer_id, effect, name, value } => {
+                SceneOp::SetMaterialProperty {
+                    layer_id,
+                    effect,
+                    name,
+                    value,
+                } => {
                     self.material_ops.push((layer_id, effect as usize, name, value));
                 }
                 SceneOp::ParticleCommand { layer_id, cmd } => {
@@ -730,8 +742,16 @@ impl ScriptHost {
                 SceneOp::EmitParticles { layer_id, count } => {
                     self.particle_ops.push(ParticleOp::Emit { id: layer_id, count });
                 }
-                SceneOp::SetInstance { layer_id, name, value } => {
-                    self.particle_ops.push(ParticleOp::Instance { id: layer_id, name, value });
+                SceneOp::SetInstance {
+                    layer_id,
+                    name,
+                    value,
+                } => {
+                    self.particle_ops.push(ParticleOp::Instance {
+                        id: layer_id,
+                        name,
+                        value,
+                    });
                 }
                 SceneOp::DestroyLayer { layer_id } => {
                     // Drop the snapshot record — next tick's marshal no longer
@@ -924,7 +944,10 @@ fn media_frame(
     prev: &mut Option<MediaPrev>,
 ) -> Option<kirie_script::MediaFrame> {
     let ev = crate::media::MediaPlaybackEvent::from_state(state);
-    let art_key = state.art.as_ref().map_or(0, |a| std::sync::Arc::as_ptr(a) as usize);
+    let art_key = state
+        .art
+        .as_ref()
+        .map_or(0, |a| std::sync::Arc::as_ptr(a) as usize);
     let (status, playback, properties, thumbnail, timeline) = match prev.as_ref() {
         None => (true, true, true, true, true),
         Some(p) => (
@@ -950,13 +973,16 @@ fn media_frame(
     // Palette: primary/secondary/text/high-contrast come derived; the d.ts
     // also wants a tertiary — serve the secondary again (closest derived
     // swatch; the reference's third swatch is another luminance step).
-    let colors = match (&ev.primary_color, &ev.secondary_color, &ev.text_color, &ev.high_contrast_color) {
-        (Some(p), Some(s), Some(t), Some(h)) => {
-            match (hex_rgb(p), hex_rgb(s), hex_rgb(t), hex_rgb(h)) {
-                (Some(p), Some(s), Some(t), Some(h)) => Some([p, s, s, t, h]),
-                _ => None,
-            }
-        }
+    let colors = match (
+        &ev.primary_color,
+        &ev.secondary_color,
+        &ev.text_color,
+        &ev.high_contrast_color,
+    ) {
+        (Some(p), Some(s), Some(t), Some(h)) => match (hex_rgb(p), hex_rgb(s), hex_rgb(t), hex_rgb(h)) {
+            (Some(p), Some(s), Some(t), Some(h)) => Some([p, s, s, t, h]),
+            _ => None,
+        },
         _ => None,
     };
     Some(kirie_script::MediaFrame {
@@ -1272,7 +1298,11 @@ fn parse_utc_offset(s: &str) -> Option<f64> {
         return None;
     }
     let hours: f64 = digits[..2].parse().ok()?;
-    let minutes: f64 = if digits.len() >= 4 { digits[2..4].parse().ok()? } else { 0.0 };
+    let minutes: f64 = if digits.len() >= 4 {
+        digits[2..4].parse().ok()?
+    } else {
+        0.0
+    };
     Some(sign * (hours * 3600.0 + minutes * 60.0))
 }
 
@@ -1383,7 +1413,14 @@ mod tests {
     fn camera_ops_merge_last_wins_per_field() {
         let mut slot = None;
         merge_camera(&mut slot, Some([1.0, 2.0, 3.0]), None, None, Some(60.0), None);
-        merge_camera(&mut slot, None, Some([4.0, 5.0, 6.0]), None, Some(45.0), Some(2.0));
+        merge_camera(
+            &mut slot,
+            None,
+            Some([4.0, 5.0, 6.0]),
+            None,
+            Some(45.0),
+            Some(2.0),
+        );
         assert_eq!(
             slot,
             Some(CameraOp {

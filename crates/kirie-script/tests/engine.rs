@@ -1,9 +1,7 @@
 //! End-to-end tests: real JS through the embedded QuickJS runtime.
 //! docs/scripting-api.md is the behavior oracle.
 
-use kirie_script::{
-    AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue,
-};
+use kirie_script::{AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue};
 
 fn num(v: &ScriptValue) -> f64 {
     match v {
@@ -349,7 +347,10 @@ fn cursor_events_fire_on_solid_layer_edges() {
     assert_eq!(out.property_results[0].1, ScriptValue::Str("enter:10".into()));
     // Tick 3: press while inside → down.
     let out = e.tick(cursor_frame(solid, 110.0, 95.0, true), vec![]).unwrap();
-    assert_eq!(out.property_results[0].1, ScriptValue::Str("enter:10,down".into()));
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("enter:10,down".into())
+    );
     // Tick 4: release while inside → up, then click (same object as the press).
     let out = e.tick(cursor_frame(solid, 110.0, 95.0, false), vec![]).unwrap();
     assert_eq!(

@@ -167,47 +167,49 @@ impl World {
             return Ok(());
         }
         let key_owned = key.to_owned();
-        let loaded = self.context.with(|ctx| -> Result<(Option<String>, u8, u8), ScriptError> {
-            // docs §5.5: expose this module's scriptproperties before its body
-            // runs, so top-level createScriptProperties().finish() reads them.
-            let host: Object = global(&ctx, "__host")?;
-            host.set("scriptProps", json_to_js(&ctx, script_properties).internal()?)
-                .internal()?;
+        let loaded = self
+            .context
+            .with(|ctx| -> Result<(Option<String>, u8, u8), ScriptError> {
+                // docs §5.5: expose this module's scriptproperties before its body
+                // runs, so top-level createScriptProperties().finish() reads them.
+                let host: Object = global(&ctx, "__host")?;
+                host.set("scriptProps", json_to_js(&ctx, script_properties).internal()?)
+                    .internal()?;
 
-            let module = Module::declare(ctx.clone(), key_owned.clone(), source)
-                .catch(&ctx)
-                .map_err(|e| ScriptError::Load {
+                let module = Module::declare(ctx.clone(), key_owned.clone(), source)
+                    .catch(&ctx)
+                    .map_err(|e| ScriptError::Load {
+                        key: key_owned.clone(),
+                        message: e.to_string(),
+                    })?;
+                let (module, _promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
                     key: key_owned.clone(),
                     message: e.to_string(),
                 })?;
-            let (module, _promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
-                key: key_owned.clone(),
-                message: e.to_string(),
+                drain_jobs(&ctx);
+                let namespace = module.namespace().internal()?;
+                // Register the namespace in the JS heap so exports outlive this call.
+                let register: Function = global(&ctx, "__registerModule")?;
+                register
+                    .call::<_, ()>((key_owned.clone(), namespace.clone()))
+                    .internal()?;
+                let workshop_id: Option<String> = namespace.get("__workshopId").ok();
+                let mut cursor_exports = 0u8;
+                for (bit, name) in CURSOR_EXPORTS {
+                    let f: Option<Function> = namespace.get(name).ok();
+                    if f.is_some() {
+                        cursor_exports |= bit;
+                    }
+                }
+                let mut media_exports = 0u8;
+                for (bit, name) in MEDIA_EXPORTS {
+                    let f: Option<Function> = namespace.get(name).ok();
+                    if f.is_some() {
+                        media_exports |= bit;
+                    }
+                }
+                Ok((workshop_id, cursor_exports, media_exports))
             })?;
-            drain_jobs(&ctx);
-            let namespace = module.namespace().internal()?;
-            // Register the namespace in the JS heap so exports outlive this call.
-            let register: Function = global(&ctx, "__registerModule")?;
-            register
-                .call::<_, ()>((key_owned.clone(), namespace.clone()))
-                .internal()?;
-            let workshop_id: Option<String> = namespace.get("__workshopId").ok();
-            let mut cursor_exports = 0u8;
-            for (bit, name) in CURSOR_EXPORTS {
-                let f: Option<Function> = namespace.get(name).ok();
-                if f.is_some() {
-                    cursor_exports |= bit;
-                }
-            }
-            let mut media_exports = 0u8;
-            for (bit, name) in MEDIA_EXPORTS {
-                let f: Option<Function> = namespace.get(name).ok();
-                if f.is_some() {
-                    media_exports |= bit;
-                }
-            }
-            Ok((workshop_id, cursor_exports, media_exports))
-        })?;
         let (workshop_id, cursor_exports, media_exports) = loaded;
 
         self.modules.insert(
@@ -668,12 +670,7 @@ fn dispatch_cursor(
 /// Dispatch the tick's media events (d.ts media*Changed) to every module that
 /// exports the matching handler. Payloads are built from the integrator's
 /// snapshot; `__mediaEvent` upgrades color arrays to real `Vec3`s JS-side.
-fn dispatch_media(
-    ctx: &Ctx<'_>,
-    metas: &[ModuleTickState],
-    frame: &HostFrame,
-    out: &mut TickOutput,
-) {
+fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, out: &mut TickOutput) {
     let Some(m) = &frame.media else { return };
     if metas.iter().all(|t| t.6 == 0) {
         return;
@@ -772,7 +769,12 @@ fn system_language() -> String {
     let raw = std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LANG"))
         .unwrap_or_default();
-    let tag = raw.split('.').next().unwrap_or("").replace('_', "-").to_lowercase();
+    let tag = raw
+        .split('.')
+        .next()
+        .unwrap_or("")
+        .replace('_', "-")
+        .to_lowercase();
     if tag.is_empty() || tag == "c" || tag == "posix" {
         "en-us".to_owned()
     } else {
@@ -796,11 +798,7 @@ fn hit_test(l: &LayerState, world: [f32; 3]) -> bool {
 /// Build the `CursorEvent` payload (worldPosition/localPosition as real `Vec3`
 /// instances, built JS-side by `__cursorEvent`). `localPosition` is the world
 /// position relative to the layer's origin.
-fn cursor_event<'js>(
-    ctx: &Ctx<'js>,
-    world: [f32; 3],
-    layer: &LayerState,
-) -> Result<Value<'js>, String> {
+fn cursor_event<'js>(ctx: &Ctx<'js>, world: [f32; 3], layer: &LayerState) -> Result<Value<'js>, String> {
     let origin = layer.origin.unwrap_or([0.0; 3]);
     let f: Function = ctx.globals().get("__cursorEvent").map_err(|e| e.to_string())?;
     f.call((

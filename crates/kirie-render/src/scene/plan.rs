@@ -426,7 +426,12 @@ pub fn plan_image(
         // A single visible pass composites straight into the scene from the
         // layer texture (copy-space geometry keeps the correct MVP path).
         let geometry = if n == 1 { Geometry::Scene } else { geometry };
-        let SrcPass { pass, target, binds, effect_index } = src;
+        let SrcPass {
+            pass,
+            target,
+            binds,
+            effect_index,
+        } = src;
         wired.push(PlanPass {
             effect_index,
             shader: pass.shader.clone(),

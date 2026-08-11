@@ -238,7 +238,8 @@ fn base_origin_leaf_script_is_collected() {
     assert!(
         updates.iter().any(|u| u.object_id == 5
             && u.target == PropTarget::Origin
-            && kirie_render::scene::scripting::as_vec3(&u.value).is_some_and(|v| v[0] == 64.0 && v[1] == 48.0)),
+            && kirie_render::scene::scripting::as_vec3(&u.value)
+                .is_some_and(|v| v[0] == 64.0 && v[1] == 48.0)),
         "no Origin update from the base-leaf script: {updates:?}"
     );
 }
@@ -270,21 +271,27 @@ fn particle_ops_drain_with_payloads() {
     host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     let ops = host.take_particle_ops();
     assert!(
-        ops.iter().any(|o| matches!(o, ParticleOp::Command { id: 3, cmd } if cmd == "pause")),
+        ops.iter()
+            .any(|o| matches!(o, ParticleOp::Command { id: 3, cmd } if cmd == "pause")),
         "pause missing"
     );
     assert!(
-        ops.iter().any(|o| matches!(o, ParticleOp::Emit { id: 3, count: 5 })),
+        ops.iter()
+            .any(|o| matches!(o, ParticleOp::Emit { id: 3, count: 5 })),
         "emit missing"
     );
     assert!(
-        ops.iter().any(|o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "size"
-            && kirie_render::scene::scripting::as_f32(value) == Some(2.5))),
+        ops.iter().any(
+            |o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "size"
+            && kirie_render::scene::scripting::as_f32(value) == Some(2.5))
+        ),
         "size missing"
     );
     assert!(
-        ops.iter().any(|o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "controlpoint1"
-            && kirie_render::scene::scripting::as_vec3(value).is_some_and(|v| v[0] == 10.0 && v[1] == 20.0))),
+        ops.iter().any(
+            |o| matches!(o, ParticleOp::Instance { id: 3, name, value } if name == "controlpoint1"
+            && kirie_render::scene::scripting::as_vec3(value).is_some_and(|v| v[0] == 10.0 && v[1] == 20.0))
+        ),
         "controlpoint1 missing"
     );
 }
@@ -358,7 +365,8 @@ fn video_control_calls_drain_as_ops() {
         "pause missing: {ops:?}"
     );
     assert!(
-        ops.iter().any(|(id, cmd, v)| *id == 8 && cmd == "rate" && (*v - 0.5).abs() < 1e-9),
+        ops.iter()
+            .any(|(id, cmd, v)| *id == 8 && cmd == "rate" && (*v - 0.5).abs() < 1e-9),
         "rate missing: {ops:?}"
     );
 }
