@@ -412,6 +412,15 @@ pub enum SceneOp {
         /// New value.
         value: ScriptValue,
     },
+    /// `thisLayer.getVideoTexture().<cmd>` — video playback control.
+    VideoCommand {
+        /// Target layer id.
+        layer_id: i64,
+        /// `"play"`, `"pause"`, `"stop"` or `"rate"`.
+        cmd: String,
+        /// Command payload (`rate` speed; unused otherwise).
+        value: f64,
+    },
     /// `thisLayer.instance.<name> = v` — live instance-override write
     /// (scalar multipliers, `colorn`, `controlpointN`).
     SetInstance {

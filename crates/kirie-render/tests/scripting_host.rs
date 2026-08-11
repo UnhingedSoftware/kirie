@@ -331,6 +331,38 @@ fn effect_material_writes_drain_as_ops() {
     );
 }
 
+/// Video playback calls drain as typed video ops with the layer id.
+#[test]
+fn video_control_calls_drain_as_ops() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 8,
+                "name": "vid",
+                "image": "models/x.json",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "export function update(v) { var t = thisLayer.getVideoTexture(); t.pause(); t.rate = 0.5; if (t.isPlaying()) { console.error('should be paused'); } return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    let ops = host.take_video_ops();
+    assert!(
+        ops.iter().any(|(id, cmd, _)| *id == 8 && cmd == "pause"),
+        "pause missing: {ops:?}"
+    );
+    assert!(
+        ops.iter().any(|(id, cmd, v)| *id == 8 && cmd == "rate" && (*v - 0.5).abs() < 1e-9),
+        "rate missing: {ops:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{

@@ -181,6 +181,9 @@ pub struct ScriptHost {
     /// Live material-constant writes `(layer, effect idx, name, value)`,
     /// drained via [`Self::take_material_ops`].
     material_ops: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
+    /// Video playback commands `(layer, cmd, value)`, drained via
+    /// [`Self::take_video_ops`].
+    video_ops: Vec<(i64, String, f64)>,
     /// True when any loaded script mentions a media event export — the
     /// renderer only starts the MPRIS worker for scenes that listen.
     wants_media: bool,
@@ -386,6 +389,7 @@ impl ScriptHost {
             destroyed: Vec::new(),
             particle_ops: Vec::new(),
             material_ops: Vec::new(),
+            video_ops: Vec::new(),
             wants_media,
             media_prev: None,
             camera_op: None,
@@ -664,6 +668,9 @@ impl ScriptHost {
                         self.parent_updates.push(u);
                     }
                 }
+                SceneOp::VideoCommand { layer_id, cmd, value } => {
+                    self.video_ops.push((layer_id, cmd, value));
+                }
                 SceneOp::SetMaterialProperty { layer_id, effect, name, value } => {
                     self.material_ops.push((layer_id, effect as usize, name, value));
                 }
@@ -699,6 +706,11 @@ impl ScriptHost {
     /// `instance.*` writes), for the renderer to route into each system's sim.
     pub fn take_particle_ops(&mut self) -> Vec<ParticleOp> {
         std::mem::take(&mut self.particle_ops)
+    }
+
+    /// Drain the tick's video playback commands.
+    pub fn take_video_ops(&mut self) -> Vec<(i64, String, f64)> {
+        std::mem::take(&mut self.video_ops)
     }
 
     /// Drain the tick's `setMaterialProperty` writes.

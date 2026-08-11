@@ -1112,6 +1112,29 @@ impl SceneRenderer {
             });
             self.runtime_seq += 1;
         }
+        for (layer_id, cmd, value) in script.take_video_ops() {
+            // `getVideoTexture()` ops: route to every video texture the layer's
+            // passes bind (via the static name→users map). `stop` maps to
+            // pause — the decode pipeline has no seek (documented deviation).
+            let Some(item_idx) = self.items.iter().position(|it| match it {
+                SceneItem::Image(o) => o.id == layer_id,
+                _ => false,
+            }) else {
+                continue;
+            };
+            for (vi, vt) in self.video_textures.iter().enumerate() {
+                let uses = self.video_users.get(vi).is_some_and(|u| u.contains(&item_idx));
+                if !uses {
+                    continue;
+                }
+                match cmd.as_str() {
+                    "play" => vt.script_paused.set(false),
+                    "pause" | "stop" => vt.script_paused.set(true),
+                    "rate" => vt.control.set_speed(value.max(0.0)),
+                    _ => {}
+                }
+            }
+        }
         for (layer_id, effect_idx, name, value) in script.take_material_ops() {
             // `getEffect(i).setMaterialProperty`: write the constant into the
             // effect's passes and re-resolve their shader params — the same
@@ -2212,7 +2235,10 @@ impl Renderer for SceneRenderer {
                         _ => true,
                     })
                 });
-            if !displayed {
+            // Scripted pause (`getVideoTexture().pause()`) composes with the
+            // visibility gate: both must allow playback.
+            let play = displayed && !vt.script_paused.get();
+            if !play {
                 if !vt.paused.get() {
                     vt.control.set_pause(true);
                     vt.paused.set(true);

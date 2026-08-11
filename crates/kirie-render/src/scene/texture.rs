@@ -351,6 +351,9 @@ pub struct VideoTexture {
     pub control: kirie_video::VideoControl,
     /// Whether the renderer currently holds this video paused (see `control`).
     pub paused: std::cell::Cell<bool>,
+    /// Script-requested pause (`getVideoTexture().pause()/stop()`); ANDed with
+    /// the visibility gate — `play()` only resumes what is displayed.
+    pub script_paused: std::cell::Cell<bool>,
     /// The sampled texture every pass bound — updated in place.
     pub gpu: std::sync::Arc<GpuTexture>,
     /// GPU-side NV12 conversion, present when the decoder delivers NV12
@@ -724,6 +727,7 @@ impl TextureRegistry {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(VideoTexture {
+                    script_paused: std::cell::Cell::new(false),
                     name: name.to_owned(),
                     player,
                     control,

@@ -926,6 +926,11 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             name: obj.get("name").ok()?,
             value: op_value(&obj.get::<_, Value>("value").ok()?),
         }),
+        "videoCtl" => Some(SceneOp::VideoCommand {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            cmd: obj.get("cmd").ok()?,
+            value: obj.get::<_, f64>("value").unwrap_or(0.0),
+        }),
         "setInstance" => Some(SceneOp::SetInstance {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
             name: obj.get("name").ok()?,

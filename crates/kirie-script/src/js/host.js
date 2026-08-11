@@ -185,6 +185,13 @@ function __makeLayer(id) {
     isPlaying: function () { var c = __playCache(); return c[id] !== false; },
     emitParticles: function (count) { __host.ops.push({ op: 'emitParticles', id: id, count: (typeof count === 'number' && count > 0) ? Math.floor(count) : 1 }); },
     get instance() { return __makeInstance(id); },
+    // ---- IVideoTexture (d.ts): playback flows as ops; position/duration
+    // queries are not plumbed from the decoder (inert zeros, documented).
+    getVideoTexture: function () { return __makeVideoTexture(id); },
+    // ---- ITextureAnimation (d.ts): presence-correct inert handle — atlas
+    // frames advance on the render clock; scripted frame control is not
+    // implemented (documented limitation).
+    getTextureAnimation: function () { return __makeTextureAnimation(id); },
     // ---- IEffectLayer (d.ts): effect handles by authored index or name.
     getEffectCount: function () { var l = __layerById(id); return (l && l.effects) ? l.effects.length : 0; },
     getEffect: function (arg) {
@@ -340,6 +347,46 @@ function __makeEffect(layerId, idx) {
     set visible(v) { if (!__host.__warnedEffectVis) { __host.__warnedEffectVis = true; __host.console.push('Eeffect.visible is not applied live (pass chain planned at build)'); } },
   };
   return eff;
+}
+
+function __videoCache(id) {
+  if (!__host.videoState) __host.videoState = {};
+  if (!__host.videoState[id]) __host.videoState[id] = { playing: true, rate: 1, loop: true };
+  return __host.videoState[id];
+}
+
+function __makeVideoTexture(id) {
+  var t = {
+    play: function () { __videoCache(id).playing = true; __host.ops.push({ op: 'videoCtl', id: id, cmd: 'play', value: 0 }); },
+    pause: function () { __videoCache(id).playing = false; __host.ops.push({ op: 'videoCtl', id: id, cmd: 'pause', value: 0 }); },
+    stop: function () { __videoCache(id).playing = false; __host.ops.push({ op: 'videoCtl', id: id, cmd: 'stop', value: 0 }); },
+    isPlaying: function () { return __videoCache(id).playing; },
+    getCurrentTime: function () { return 0; },
+    setCurrentTime: function () { if (!__host.__warnedVideoSeek) { __host.__warnedVideoSeek = true; __host.console.push('EsetCurrentTime is not supported (no seek plumbing)'); } },
+    addEndedCallback: function () { },
+    get duration() { return 0; },
+    get rate() { return __videoCache(id).rate; },
+    set rate(v) { __videoCache(id).rate = +v; __host.ops.push({ op: 'videoCtl', id: id, cmd: 'rate', value: +v }); },
+    get loop() { return __videoCache(id).loop; },
+    set loop(v) { __videoCache(id).loop = !!v; },
+  };
+  return t;
+}
+
+function __makeTextureAnimation(id) {
+  var frame = 0, playing = true;
+  return {
+    get frameCount() { return 0; },
+    get duration() { return 0; },
+    rate: 1,
+    play: function () { playing = true; },
+    pause: function () { playing = false; },
+    stop: function () { playing = false; frame = 0; },
+    isPlaying: function () { return playing; },
+    getFrame: function () { return frame; },
+    setFrame: function (f) { frame = +f || 0; },
+    join: function () { },
+  };
 }
 
 // Playback + instance caches: plain objects hung off __host under keys the
