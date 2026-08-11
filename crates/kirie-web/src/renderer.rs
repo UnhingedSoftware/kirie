@@ -35,6 +35,11 @@ pub struct WebRenderer {
     /// backend) so both drive paths — `render` for a composited backend,
     /// `poll` for a passive one — share one cadence and one diff.
     pump: FeedPump,
+    /// Last platform pointer, surface-normalized, with the held button state —
+    /// buttons arrive on a separate trait call, so both halves are retained
+    /// and every forward carries the full state.
+    pointer: (f32, f32),
+    pointer_left: bool,
 }
 
 struct Uploaded {
@@ -46,6 +51,18 @@ struct Uploaded {
 }
 
 impl WebRenderer {
+    /// Push the retained pointer + button state to the page in browser pixels.
+    fn forward_pointer(&mut self) {
+        let px = (self.pointer.0 * self.surface_size.width as f32) as i32;
+        let py = (self.pointer.1 * self.surface_size.height as f32) as i32;
+        self.backend.send_pointer(crate::backend::PointerState {
+            x: px,
+            y: py,
+            left: self.pointer_left,
+            right: false,
+        });
+    }
+
     /// Build the fullscreen-blit pipeline for `target`, presenting `backend`.
     ///
     /// The pipeline targets the swapchain `format`; the browser texture is
@@ -133,6 +150,8 @@ impl WebRenderer {
             surface_size: SurfaceSize { width: 1, height: 1 },
             feed: None,
             pump: FeedPump::new(),
+            pointer: (0.5, 0.5),
+            pointer_left: false,
         }
     }
 
@@ -324,14 +343,17 @@ impl Renderer for WebRenderer {
     /// Platform-fed pointer (T26): forward to the page in browser pixels (the
     /// reference drives CEF mouse events the same way).
     fn set_pointer(&mut self, x: f32, y: f32) {
-        let px = (x * self.surface_size.width as f32) as i32;
-        let py = (y * self.surface_size.height as f32) as i32;
-        self.backend.send_pointer(crate::backend::PointerState {
-            x: px,
-            y: py,
-            left: false,
-            right: false,
-        });
+        self.pointer = (x, y);
+        self.forward_pointer();
+    }
+
+    /// Platform-fed button state: pages receive real mousedown/up (the
+    /// backend edge-detects, so unchanged state costs one no-op line).
+    fn set_pointer_buttons(&mut self, left_down: bool) {
+        if self.pointer_left != left_down {
+            self.pointer_left = left_down;
+            self.forward_pointer();
+        }
     }
 
     /// Hand the platform a still of the live page so it can leave it on the
