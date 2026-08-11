@@ -75,6 +75,9 @@ enum Command {
         source: String,
         reply: Sender<Result<String, ScriptError>>,
     },
+    SetStoragePath {
+        path: std::path::PathBuf,
+    },
 }
 
 /// A handle to one scene's SceneScript world. `Send` and cheap to move; all work
@@ -235,6 +238,12 @@ impl ScriptEngine {
 
     /// Evaluate an arbitrary global script, returning its value stringified
     /// (diagnostic / test helper).
+    /// Point `localStorage` at a per-wallpaper JSON file: existing contents
+    /// seed the buckets, later writes persist (debounced) to the same file.
+    pub fn set_storage_path(&self, path: std::path::PathBuf) -> Result<(), ScriptError> {
+        self.send(Command::SetStoragePath { path })
+    }
+
     pub fn eval(&self, source: impl Into<String>) -> Result<String, ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::Eval {
@@ -310,6 +319,9 @@ fn serve(world: &mut World, cmd: Command) {
         }
         Command::Eval { source, reply } => {
             let _ = reply.send(world.eval_to_string(&source));
+        }
+        Command::SetStoragePath { path } => {
+            world.set_storage_path(path);
         }
     }
 }

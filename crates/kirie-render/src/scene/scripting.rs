@@ -356,6 +356,9 @@ impl ScriptHost {
         let wants_media = pending
             .iter()
             .any(|p| MEDIA_EXPORT_NAMES.iter().any(|n| p.source.contains(n)));
+        // localStorage identity: the wallpaper's workshop id (from the editor's
+        // `__workshopId` header). Scenes without one keep memory-only storage.
+        let storage_id = pending.iter().find_map(|p| extract_workshop_id(&p.source));
 
         let mut props = Vec::with_capacity(pending.len());
         for p in pending {
@@ -379,6 +382,17 @@ impl ScriptHost {
         // One-shot per scene load (not per frame): INFO like the audio-capture
         // startup line, so a live run shows the script surface came up.
         tracing::info!(scripts = props.len(), "scene script host started");
+
+        // Persistent localStorage (docs: settings survive restarts), keyed by
+        // workshop id under the user cache.
+        if let Some(id) = &storage_id
+            && let Some(home) = std::env::var_os("HOME")
+        {
+            let path = std::path::PathBuf::from(home)
+                .join(".cache/kirie/storage")
+                .join(format!("{id}.json"));
+            let _ = engine.set_storage_path(path);
+        }
 
         Some(ScriptHost {
             engine,
@@ -813,6 +827,18 @@ impl ScriptHost {
             PropTarget::Brightness | PropTarget::ParticleRate => {}
         }
     }
+}
+
+/// Extract the editor-stamped `__workshopId = '123'` literal from a script
+/// source (the same convention the runtime-template collector matches).
+fn extract_workshop_id(source: &str) -> Option<String> {
+    let i = source.find("__workshopId")?;
+    let rest = &source[i..];
+    let open = rest.find(['\'', '"'])?;
+    let quote = rest.as_bytes()[open] as char;
+    let close = rest[open + 1..].find(quote)?;
+    let id = &rest[open + 1..open + 1 + close];
+    (!id.is_empty() && id.chars().all(|c| c.is_ascii_digit())).then(|| id.to_owned())
 }
 
 /// Digest of the previous tick's media snapshot, for change detection.

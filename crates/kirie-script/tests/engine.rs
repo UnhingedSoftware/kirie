@@ -596,6 +596,50 @@ fn math_surface_matches_hand_computed_values() {
     );
 }
 
+// ---- persistent localStorage (docs §10.3 + persistence) --------------------
+
+/// Writes survive across engine instances via the storage file; delete
+/// returns whether the key existed (d.ts Boolean).
+#[test]
+fn local_storage_persists_across_engines() {
+    let dir = std::env::temp_dir().join(format!("kirie-storage-test-{}", std::process::id()));
+    let path = dir.join("test.json");
+    let _ = std::fs::remove_file(&path);
+
+    let e = ScriptEngine::new().unwrap();
+    e.set_storage_path(path.clone()).unwrap();
+    e.load_property_script(
+        "alpha_1",
+        "export function update(v){
+            localStorage.set('mode', 'night');
+            return localStorage.delete('missing') ? 'bad' : localStorage.get('mode');
+        }",
+        Some(1),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("night".into()));
+    drop(e);
+    assert!(path.exists(), "storage file written");
+
+    // A fresh engine seeded from the same path sees the value.
+    let e2 = ScriptEngine::new().unwrap();
+    e2.set_storage_path(path.clone()).unwrap();
+    e2.load_property_script(
+        "alpha_1",
+        "export function update(v){ return localStorage.get('mode') || 'empty'; }",
+        Some(1),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e2.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("night".into()));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]

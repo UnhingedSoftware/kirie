@@ -268,6 +268,8 @@ impl World {
             let _ = call_void(&ctx, "__snapshotInitialLayers", ());
             // docs §3.2.a: fire due engine timers (self-catching in JS).
             let _ = call_void(&ctx, "__tickTimers", ());
+            // Trailing edge of the localStorage write debounce.
+            let _ = call_void(&ctx, "__flushStorage", ());
             // Cursor events fire before the frame's update() calls, mirroring
             // the reference's input-then-update frame order.
             dispatch_cursor(&ctx, &metas, frame, cursor, &mut out);
@@ -403,6 +405,31 @@ impl World {
             drain_side_effects(&ctx, &mut out);
             out
         })
+    }
+
+    /// Wire `localStorage` persistence: seed the buckets from `path` (if it
+    /// exists) and register the native write hook the JS debouncer calls.
+    pub fn set_storage_path(&mut self, path: std::path::PathBuf) {
+        self.context.with(|ctx| {
+            if let Ok(existing) = std::fs::read_to_string(&path)
+                && let Ok(seed) = ctx.globals().get::<_, Function>("__seedStorage")
+            {
+                let _ = seed.call::<_, ()>((existing,));
+            }
+            let write_path = path.clone();
+            let persist = Function::new(ctx.clone(), move |json: String| {
+                if let Some(dir) = write_path.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                // 100 KB cap: localStorage is settings, not a database.
+                if json.len() <= 100 * 1024 {
+                    let _ = std::fs::write(&write_path, json);
+                }
+            });
+            if let Ok(f) = persist {
+                let _ = ctx.globals().set("__persistStorage", f);
+            }
+        });
     }
 
     /// Create a text-layer script (docs §7): returns a positive handle, or 0 on

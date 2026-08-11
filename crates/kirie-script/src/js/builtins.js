@@ -385,13 +385,28 @@ globalThis.MediaPlaybackEvent = { PLAYBACK_STOPPED: 0, PLAYBACK_PLAYING: 1, PLAY
 (function () {
   var buckets = Object.create(null);
   function bucket(loc) { loc = loc || 'global'; if (!buckets[loc]) buckets[loc] = Object.create(null); return buckets[loc]; }
+  // Debounced disk write through the host-registered native hook (absent in
+  // tests / scenes without a storage identity — memory-only then).
+  var lastPersist = -1e9;
+  function persist() {
+    if (typeof globalThis.__persistStorage !== 'function') return;
+    if (__host.now - lastPersist < 1000) { __host.__storageDirty = true; return; }
+    lastPersist = __host.now; __host.__storageDirty = false;
+    try { globalThis.__persistStorage(JSON.stringify(buckets)); } catch (e) { }
+  }
+  // Trailing-edge flush for the debounce, driven from the timer tick.
+  globalThis.__flushStorage = function () { if (__host.__storageDirty) persist(); };
+  // Host-side seed at scene load (before any script runs).
+  globalThis.__seedStorage = function (json) {
+    try { var d = JSON.parse(json); if (d && typeof d === 'object') buckets = d; } catch (e) { }
+  };
   globalThis.localStorage = {
     LOCATION_GLOBAL: 'global',
     LOCATION_SCREEN: 'screen',
-    set: function (k, v, loc) { bucket(loc)[String(k)] = String(v); },
+    set: function (k, v, loc) { bucket(loc)[String(k)] = String(v); persist(); },
     get: function (k, loc) { var b = bucket(loc); var key = String(k); return (key in b) ? b[key] : null; },
-    delete: function (k, loc) { delete bucket(loc)[String(k)]; },
-    remove: function (k, loc) { delete bucket(loc)[String(k)]; },
-    clear: function (loc) { if (loc === undefined) { buckets = Object.create(null); } else { buckets[loc] = Object.create(null); } },
+    delete: function (k, loc) { var b = bucket(loc); var key = String(k); var had = key in b; delete b[key]; if (had) persist(); return had; },
+    remove: function (k, loc) { var b = bucket(loc); delete b[String(k)]; persist(); },
+    clear: function (loc) { if (loc === undefined) { buckets = Object.create(null); } else { buckets[loc] = Object.create(null); } persist(); },
   };
 })();
