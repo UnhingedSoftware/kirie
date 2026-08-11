@@ -274,6 +274,7 @@ var __scene = {
       if (t.center) op.center = [t.center.x || 0, t.center.y || 0, t.center.z || 0];
       if (t.up) op.up = [t.up.x || 0, t.up.y || 0, t.up.z || 0];
       if (typeof t.fov === 'number') op.fov = t.fov;
+      if (typeof t.zoom === 'number') op.zoom = t.zoom;
     }
     __host.ops.push(op);
   },

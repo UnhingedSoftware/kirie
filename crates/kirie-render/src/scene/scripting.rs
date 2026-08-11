@@ -124,6 +124,8 @@ pub struct CameraOp {
     pub up: Option<[f32; 3]>,
     /// New vertical fov (degrees), if overridden.
     pub fov: Option<f32>,
+    /// New 2D zoom multiplier, if overridden (CameraTransforms.zoom).
+    pub zoom: Option<f32>,
 }
 
 /// Merge one `SetCameraTransforms` op into the pending override (last-wins per
@@ -135,6 +137,7 @@ fn merge_camera(
     center: Option<[f32; 3]>,
     up: Option<[f32; 3]>,
     fov: Option<f32>,
+    zoom: Option<f32>,
 ) {
     let dst = slot.get_or_insert_with(CameraOp::default);
     if eye.is_some() {
@@ -148,6 +151,9 @@ fn merge_camera(
     }
     if fov.is_some() {
         dst.fov = fov;
+    }
+    if zoom.is_some() {
+        dst.zoom = zoom;
     }
 }
 
@@ -637,8 +643,8 @@ impl ScriptHost {
                     });
                     self.created.push((layer_id, path));
                 }
-                SceneOp::SetCameraTransforms { eye, center, up, fov } => {
-                    merge_camera(&mut self.camera_op, eye, center, up, fov);
+                SceneOp::SetCameraTransforms { eye, center, up, fov, zoom } => {
+                    merge_camera(&mut self.camera_op, eye, center, up, fov, zoom);
                     // `getCameraTransforms` reports the BASE eye/center/up but
                     // the *overridden* fov (`getBaseEye`/`getFov`,
                     // `SceneObject.cpp:252-257`) — mirror only fov into the
@@ -1287,8 +1293,8 @@ mod tests {
     #[test]
     fn camera_ops_merge_last_wins_per_field() {
         let mut slot = None;
-        merge_camera(&mut slot, Some([1.0, 2.0, 3.0]), None, None, Some(60.0));
-        merge_camera(&mut slot, None, Some([4.0, 5.0, 6.0]), None, Some(45.0));
+        merge_camera(&mut slot, Some([1.0, 2.0, 3.0]), None, None, Some(60.0), None);
+        merge_camera(&mut slot, None, Some([4.0, 5.0, 6.0]), None, Some(45.0), Some(2.0));
         assert_eq!(
             slot,
             Some(CameraOp {
@@ -1296,6 +1302,7 @@ mod tests {
                 center: Some([4.0, 5.0, 6.0]),
                 up: None,
                 fov: Some(45.0),
+                zoom: Some(2.0),
             })
         );
     }

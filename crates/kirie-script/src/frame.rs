@@ -362,6 +362,8 @@ pub enum SceneOp {
         up: Option<[f32; 3]>,
         /// New fov, if provided.
         fov: Option<f32>,
+        /// New 2D zoom multiplier, if provided.
+        zoom: Option<f32>,
     },
     /// `thisScene.createLayer(path|{file})` — instantiate a runtime image layer.
     CreateLayer {

@@ -386,6 +386,9 @@ pub struct SceneRenderer {
     /// MPRIS now-playing source, started only when a scene script exports a
     /// media event handler (docs: media*Changed).
     media: Option<Arc<crate::media::MediaSource>>,
+    /// Script 2D zoom multiplier (CameraTransforms.zoom), applied at the
+    /// final blit window. 1.0 = identity.
+    zoom: f32,
     /// `object id → live visibility` over every object (incl. non-drawn groups),
     /// kept current by script visibility updates (docs §7.1 ancestor gating).
     visible_by_id: HashMap<i64, bool>,
@@ -894,6 +897,7 @@ impl SceneRenderer {
             pointer_left: false,
             locals: local_xf,
             media,
+            zoom: 1.0,
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
             runtime_templates,
@@ -1255,6 +1259,16 @@ impl SceneRenderer {
             }
             if let Some(f) = cam.fov {
                 self.camera.fov.value = f;
+            }
+            // 2D zoom (CameraTransforms.zoom): applied at the final blit by
+            // shrinking the sampled UV window about its center — uniform over
+            // the whole composite, exactly a camera zoom-in.
+            if let Some(z) = cam.zoom
+                && z > 0.0
+                && (z - self.zoom).abs() > f32::EPSILON
+            {
+                self.zoom = z;
+                self.window_for = None; // force the blit window recompute
             }
         }
         for (id, parent) in script.take_parent_updates() {
@@ -2118,10 +2132,22 @@ impl Renderer for SceneRenderer {
         // Recompute the blit UV window on resize (docs §4; cached like the
         // reference WallpaperState).
         if self.window_for != Some(size) {
-            let window = self
+            let mut window = self
                 .options
                 .scaling
                 .uv_window((self.proj_w, self.proj_h), (size.width, size.height));
+            if self.zoom != 1.0 {
+                // Script 2D zoom: shrink the window about its center.
+                let (cx, cy) = ((window.u0 + window.u1) * 0.5, (window.v0 + window.v1) * 0.5);
+                let (hw, hh) = (
+                    (window.u1 - window.u0) * 0.5 / self.zoom,
+                    (window.v1 - window.v0) * 0.5 / self.zoom,
+                );
+                window.u0 = cx - hw;
+                window.u1 = cx + hw;
+                window.v0 = cy - hh;
+                window.v1 = cy + hh;
+            }
             let clamp_mode = match self.options.clamp {
                 ClampMode::Clamp => 0u32,
                 ClampMode::Border => 1u32,

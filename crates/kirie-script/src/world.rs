@@ -899,6 +899,7 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             center: get_vec3(obj, "center"),
             up: get_vec3(obj, "up"),
             fov: obj.get::<_, f64>("fov").ok().map(|f| f as f32),
+            zoom: obj.get::<_, f64>("zoom").ok().map(|f| f as f32),
         }),
         "createLayer" => Some(SceneOp::CreateLayer {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
