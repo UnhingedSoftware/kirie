@@ -920,6 +920,12 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
             count: obj.get::<_, f64>("count").ok()?.max(0.0) as u32,
         }),
+        "setMatProp" => Some(SceneOp::SetMaterialProperty {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            effect: obj.get::<_, f64>("effect").ok()?.max(0.0) as u32,
+            name: obj.get("name").ok()?,
+            value: op_value(&obj.get::<_, Value>("value").ok()?),
+        }),
         "setInstance" => Some(SceneOp::SetInstance {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,
             name: obj.get("name").ok()?,

@@ -185,6 +185,17 @@ function __makeLayer(id) {
     isPlaying: function () { var c = __playCache(); return c[id] !== false; },
     emitParticles: function (count) { __host.ops.push({ op: 'emitParticles', id: id, count: (typeof count === 'number' && count > 0) ? Math.floor(count) : 1 }); },
     get instance() { return __makeInstance(id); },
+    // ---- IEffectLayer (d.ts): effect handles by authored index or name.
+    getEffectCount: function () { var l = __layerById(id); return (l && l.effects) ? l.effects.length : 0; },
+    getEffect: function (arg) {
+      var l = __layerById(id);
+      var list = (l && l.effects) || [];
+      var idx = -1;
+      if (typeof arg === 'number') idx = arg;
+      else if (typeof arg === 'string') { for (var i = 0; i < list.length; i++) if (list[i][0] === arg) { idx = i; break; } }
+      if (idx < 0 || idx >= list.length) return undefined;
+      return __makeEffect(id, idx);
+    },
     setParent: function (p) {
       var pid = null;
       if (p == null) pid = null;
@@ -308,6 +319,28 @@ var __scene = {
     return out;
   },
 };
+
+// IEffect proxy (d.ts): setMaterialProperty flows as a typed op; visibility
+// toggles are not applied live (the pass chain is planned at build — a
+// documented limitation), so the setter records a one-time console warning.
+function __makeEffect(layerId, idx) {
+  var eff = {
+    setMaterialProperty: function (name, v) {
+      var val;
+      if (typeof v === 'number') val = v;
+      else if (v && typeof v.x === 'number') { val = [v.x, v.y || 0]; if (typeof v.z === 'number') val.push(v.z); if (typeof v.w === 'number') val.push(v.w); }
+      else return;
+      __host.ops.push({ op: 'setMatProp', id: layerId, effect: idx, name: String(name), value: val });
+    },
+    executeMaterialFunction: function () { /* material functions are editor-side; inert */ },
+    getMaterialCount: function () { var l = __layerById(layerId); var e = l && l.effects && l.effects[idx]; return e ? e[1] : 0; },
+    getMaterial: function () { return { setMaterialProperty: eff.setMaterialProperty }; },
+    get name() { var l = __layerById(layerId); var e = l && l.effects && l.effects[idx]; return e ? e[0] : ''; },
+    get visible() { return true; },
+    set visible(v) { if (!__host.__warnedEffectVis) { __host.__warnedEffectVis = true; __host.console.push('Eeffect.visible is not applied live (pass chain planned at build)'); } },
+  };
+  return eff;
+}
 
 // Playback + instance caches: plain objects hung off __host under keys the
 // frame marshal never writes, so they survive apply_frame.

@@ -117,6 +117,9 @@ struct PassGpu {
     /// The UV crop baked into this pass's quad (atlas sub-rect), reapplied
     /// when a script transform rewrites the vertices.
     uv_crop: [f32; 2],
+    /// Authored effect index this pass belongs to (`None` = base material) —
+    /// the script `getEffect(i).setMaterialProperty` addressing space.
+    effect_index: Option<usize>,
     /// Puppet-warp index buffer (`u16` triangle list). `Some` only for a puppet
     /// base pass, whose draw is `draw_indexed` over the mesh instead of the
     /// 4-vertex quad strip.
@@ -1109,6 +1112,48 @@ impl SceneRenderer {
             });
             self.runtime_seq += 1;
         }
+        for (layer_id, effect_idx, name, value) in script.take_material_ops() {
+            // `getEffect(i).setMaterialProperty`: write the constant into the
+            // effect's passes and re-resolve their shader params — the same
+            // live path a `setProperty` material tweak takes.
+            let dynv = match &value {
+                kirie_script::ScriptValue::Float(f) => {
+                    kirie_scene::value::DynamicValue::Float(*f)
+                }
+                kirie_script::ScriptValue::Int(i) => kirie_scene::value::DynamicValue::Int(*i),
+                kirie_script::ScriptValue::Vec2(v) => {
+                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
+                }
+                kirie_script::ScriptValue::Vec3(v) => {
+                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
+                }
+                kirie_script::ScriptValue::Vec4(v) => {
+                    kirie_scene::value::DynamicValue::Vec(v.to_vec())
+                }
+                _ => continue,
+            };
+            for item in &mut self.items {
+                let SceneItem::Image(o) = item else { continue };
+                if o.id != layer_id {
+                    continue;
+                }
+                for pass in &mut o.passes {
+                    if pass.effect_index != Some(effect_idx) {
+                        continue;
+                    }
+                    pass.material_pass.constantshadervalues.insert(
+                        name.clone(),
+                        kirie_scene::user::UserSetting {
+                            value: dynv.clone(),
+                            user: None,
+                            script: None,
+                        },
+                    );
+                    pass.vs_params = resolve_params(&pass.params_vs, &pass.material_pass);
+                    pass.fs_params = resolve_params(&pass.params_fs, &pass.material_pass);
+                }
+            }
+        }
         for op in script.take_particle_ops() {
             let target = match &op {
                 ParticleOp::Command { id, .. }
@@ -1416,6 +1461,8 @@ fn build_object(
         /// whose geometry the puppet mesh replaces (`CImage.cpp:823-834`, the mesh
         /// always lives on the first pass). Its pipeline is a triangle *list*.
         is_puppet_base: bool,
+        /// Authored effect index (script `getEffect(i)` addressing).
+        effect_index: Option<usize>,
     }
     let mut built: Vec<Survivor> = Vec::new();
     for (ci, plan_pass) in chain.passes.iter().enumerate() {
@@ -1485,6 +1532,7 @@ fn build_object(
                     target: plan_pass.target.clone(),
                     binds: plan_pass.binds.clone(),
                     is_puppet_base,
+                    effect_index: plan_pass.effect_index,
                 });
             }
             Err(e) => {
@@ -1560,6 +1608,7 @@ fn build_object(
             target,
             binds,
             is_puppet_base,
+            effect_index,
         } = sv;
         // A donor never draws to the scene: its final composite stays in the
         // ping-pong (image space) for dependents to sample (docs §5.6).
@@ -1793,6 +1842,7 @@ fn build_object(
             output,
             geometry,
             uv_crop,
+            effect_index,
             model_matrix,
             blending: effective_blending(is_puppet_base, raw_pass.blending),
             tex_resolution,

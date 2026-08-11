@@ -178,6 +178,9 @@ pub struct ScriptHost {
     /// Particle playback/instance ops, drained via
     /// [`Self::take_particle_ops`].
     particle_ops: Vec<ParticleOp>,
+    /// Live material-constant writes `(layer, effect idx, name, value)`,
+    /// drained via [`Self::take_material_ops`].
+    material_ops: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
     /// True when any loaded script mentions a media event export — the
     /// renderer only starts the MPRIS worker for scenes that listen.
     wants_media: bool,
@@ -382,6 +385,7 @@ impl ScriptHost {
             created: Vec::new(),
             destroyed: Vec::new(),
             particle_ops: Vec::new(),
+            material_ops: Vec::new(),
             wants_media,
             media_prev: None,
             camera_op: None,
@@ -660,6 +664,9 @@ impl ScriptHost {
                         self.parent_updates.push(u);
                     }
                 }
+                SceneOp::SetMaterialProperty { layer_id, effect, name, value } => {
+                    self.material_ops.push((layer_id, effect as usize, name, value));
+                }
                 SceneOp::ParticleCommand { layer_id, cmd } => {
                     self.particle_ops.push(ParticleOp::Command { id: layer_id, cmd });
                 }
@@ -692,6 +699,11 @@ impl ScriptHost {
     /// `instance.*` writes), for the renderer to route into each system's sim.
     pub fn take_particle_ops(&mut self) -> Vec<ParticleOp> {
         std::mem::take(&mut self.particle_ops)
+    }
+
+    /// Drain the tick's `setMaterialProperty` writes.
+    pub fn take_material_ops(&mut self) -> Vec<(i64, usize, String, kirie_script::ScriptValue)> {
+        std::mem::take(&mut self.material_ops)
     }
 
     /// Whether any loaded script mentions a media event export — the renderer
@@ -1002,6 +1014,21 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
             ls.alpha = Some(img.alpha.value);
             ls.visible = Some(img.visible.value && base.visible.value);
             ls.size = Some(img.size);
+            // Effect handles (d.ts IEffectLayer): name + material-pass count
+            // per authored effect, the getEffect/getMaterialCount surface.
+            ls.effects = Some(
+                img.effects
+                    .iter()
+                    .map(|e| {
+                        let mats = e.resolved.as_ref().map_or(0, |f| {
+                            e.resolved.as_ref().map_or(0, |_| {
+                                f.passes.iter().filter(|p| p.material.is_some()).count() as u32
+                            })
+                        });
+                        (e.name.clone(), mats)
+                    })
+                    .collect(),
+            );
         }
         ObjectKind::Text(txt) => {
             ls.color = Some([txt.color.value[0], txt.color.value[1], txt.color.value[2]]);

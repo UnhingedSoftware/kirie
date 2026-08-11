@@ -97,6 +97,9 @@ pub struct PlanPass {
     pub output: PassOutput,
     /// Geometry / MVP role.
     pub geometry: Geometry,
+    /// Authored effect index (script `getEffect(i)` space); `None` for the
+    /// base material / colorBlend passes.
+    pub effect_index: Option<usize>,
     /// The effect pass's own render `target` FBO name (docs/format-scene-json.md
     /// §11.2), or `None` for the base material and effect passes that render
     /// back into the image composite ping-pong. A named target routes the draw
@@ -151,6 +154,9 @@ struct SrcPass {
     pass: Pass,
     target: Option<String>,
     binds: Vec<(u32, String)>,
+    /// Authored effect index this pass came from (`None` = base material /
+    /// colorBlend pass) — the script `getEffect(i)` addressing space.
+    effect_index: Option<usize>,
 }
 
 /// The shader base name of the synthesized `command:"copy"` blit pass. The
@@ -166,6 +172,7 @@ pub const COPY_COMMAND_SHADER: &str = "commands/copy";
 /// the reference's copy — a blit that also handles differing FBO sizes.
 fn copy_command_pass(source: &str, target: &str) -> SrcPass {
     SrcPass {
+        effect_index: None,
         pass: Pass {
             blending: Blending::Normal,
             cullmode: CullMode::NoCull,
@@ -195,6 +202,7 @@ fn base_passes(image: &ImageObject) -> Vec<SrcPass> {
                     pass,
                     target: None,
                     binds: Vec::new(),
+                    effect_index: None,
                 })
                 .collect()
         })
@@ -206,7 +214,7 @@ fn base_passes(image: &ImageObject) -> Vec<SrcPass> {
 /// `target`/`bind` routing preserved (docs §7.1, §8.1, §11.2).
 fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
     let mut out = Vec::new();
-    for effect in &image.effects {
+    for (ei, effect) in image.effects.iter().enumerate() {
         if !effect.visible.value {
             continue; // §7.1: `visible:false` effects skipped.
         }
@@ -223,7 +231,9 @@ fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
             if epass.material.is_none() {
                 match (&epass.command, &epass.source, &epass.target) {
                     (Some(PassCommand::Copy), Some(source), Some(target)) => {
-                        out.push(copy_command_pass(source, target));
+                        let mut p = copy_command_pass(source, target);
+                        p.effect_index = Some(ei);
+                        out.push(p);
                     }
                     _ => {
                         tracing::debug!(
@@ -257,6 +267,7 @@ fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
                     },
                     target: epass.target.clone(),
                     binds: if mi == 0 { binds.clone() } else { Vec::new() },
+                    effect_index: Some(ei),
                 });
             }
         }
@@ -352,6 +363,7 @@ pub fn plan_image(
             pass: apply_override(first.clone(), &ov),
             target: None,
             binds: Vec::new(),
+            effect_index: None,
         });
     }
 
@@ -414,8 +426,9 @@ pub fn plan_image(
         // A single visible pass composites straight into the scene from the
         // layer texture (copy-space geometry keeps the correct MVP path).
         let geometry = if n == 1 { Geometry::Scene } else { geometry };
-        let SrcPass { pass, target, binds } = src;
+        let SrcPass { pass, target, binds, effect_index } = src;
         wired.push(PlanPass {
+            effect_index,
             shader: pass.shader.clone(),
             blending: pass.blending,
             cull: pass.cullmode,

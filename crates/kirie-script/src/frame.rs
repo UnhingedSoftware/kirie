@@ -61,6 +61,10 @@ pub struct LayerState {
     /// `size` vec2 (image/text bounding box), for cursor hit tests.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size: Option<[f32; 2]>,
+    /// The image layer's effects as `(name, material count)` in authored
+    /// order — the `getEffect`/`getEffectCount` surface.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<(String, u32)>>,
     /// `solid` — the editor flag that opts a layer into cursor events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub solid: Option<bool>,
@@ -83,6 +87,7 @@ impl Clone for LayerState {
             text: self.text.clone(),
             size: self.size,
             solid: self.solid,
+            effects: self.effects.clone(),
         }
     }
 
@@ -104,6 +109,7 @@ impl Clone for LayerState {
             text,
             size,
             solid,
+            effects,
         } = source;
         self.id = *id;
         // `String::clone_from` (and `Option`'s Some→Some forwarding) reuse the
@@ -121,6 +127,7 @@ impl Clone for LayerState {
         self.text.clone_from(text);
         self.size = *size;
         self.solid = *solid;
+        self.effects.clone_from(effects);
     }
 }
 
@@ -392,6 +399,18 @@ pub enum SceneOp {
         layer_id: i64,
         /// Number of particles to spawn now.
         count: u32,
+    },
+    /// `thisLayer.getEffect(i).setMaterialProperty(name, v)` — live material
+    /// constant write on an effect's passes.
+    SetMaterialProperty {
+        /// Target layer id.
+        layer_id: i64,
+        /// Authored effect index.
+        effect: u32,
+        /// Constant name (`constantshadervalues` key).
+        name: String,
+        /// New value.
+        value: ScriptValue,
     },
     /// `thisLayer.instance.<name> = v` — live instance-override write
     /// (scalar multipliers, `colorn`, `controlpointN`).

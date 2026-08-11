@@ -289,6 +289,48 @@ fn particle_ops_drain_with_payloads() {
     );
 }
 
+/// `getEffect(...)` resolves by name/index and `setMaterialProperty` drains
+/// as a typed material op with the layer/effect/name/value payload.
+#[test]
+fn effect_material_writes_drain_as_ops() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 6,
+                "name": "layer",
+                "image": "models/x.json",
+                "effects": [
+                    { "file": "effects/glow.json", "name": "Glow" }
+                ],
+                "alpha": {
+                    "value": 1.0,
+                    "script": "export function update(v) { if (thisLayer.getEffectCount() !== 1) { console.error('count'); return v; } var e = thisLayer.getEffect('Glow'); if (!e || e.name !== 'Glow') { console.error('handle'); return v; } e.setMaterialProperty('g_Strength', 0.75); e.setMaterialProperty('g_Tint', new Vec3(1, 0, 0)); return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    let ops = host.take_material_ops();
+    assert!(
+        ops.iter().any(|(id, eff, name, v)| *id == 6
+            && *eff == 0
+            && name == "g_Strength"
+            && kirie_render::scene::scripting::as_f32(v) == Some(0.75)),
+        "scalar write missing: {ops:?}"
+    );
+    assert!(
+        ops.iter().any(|(id, eff, name, v)| *id == 6
+            && *eff == 0
+            && name == "g_Tint"
+            && kirie_render::scene::scripting::as_vec3(v).is_some_and(|c| c == [1.0, 0.0, 0.0])),
+        "vec write missing: {ops:?}"
+    );
+}
+
 #[test]
 fn scene_without_scripts_spawns_no_host() {
     let json = r#"{
