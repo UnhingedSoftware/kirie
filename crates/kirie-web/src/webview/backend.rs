@@ -436,9 +436,16 @@ fn flush_pending_on_commit(
     webkit: &'static WebKit,
     pending: &Rc<RefCell<Option<Vec<String>>>>,
 ) {
-    /// `WEBKIT_LOAD_COMMITTED`: the document exists and the user scripts (our
-    /// JS bridge) have been injected, so queued calls can run.
-    const WEBKIT_LOAD_COMMITTED: i32 = 2;
+    /// `WEBKIT_LOAD_FINISHED`, NOT `COMMITTED`: webkit injects user scripts
+    /// (the `__wpApplyProps` bridge) at document-start, which begins *after*
+    /// `load-changed` reports COMMITTED — a flush there can race ahead of the
+    /// bridge and the queued call dies in a page that has no
+    /// `window.__wpApplyProps` yet. Silently, because eval is fire-and-forget.
+    /// Pages that BLOCK init on `applyUserProperties` (playlist/music
+    /// wallpapers) then sat on their loading screen forever. At FINISHED both
+    /// the bridge and the page's own scripts have run, and the bridge handles
+    /// either order of listener-assignment vs. property arrival.
+    const WEBKIT_LOAD_FINISHED: i32 = 3;
 
     let Some(signal) = glib::subclass::signal::SignalId::lookup("load-changed", view.type_()) else {
         // Unreachable on a real `WebKitWebView`, but a wallpaper process must
@@ -460,7 +467,7 @@ fn flush_pending_on_commit(
         // live for this call, and it was just checked to hold an enum — which
         // is exactly `g_value_get_enum`'s precondition.
         let event = unsafe { glib::gobject_ffi::g_value_get_enum(event.to_glib_none().0) };
-        if event != WEBKIT_LOAD_COMMITTED {
+        if event != WEBKIT_LOAD_FINISHED {
             return None;
         }
         let view = values.first()?.get::<gtk::Widget>().ok()?;
