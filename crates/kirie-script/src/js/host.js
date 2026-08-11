@@ -115,6 +115,15 @@ globalThis.__cursorEvent = function (wx, wy, wz, lx, ly, lz) {
 // Vec2 payload builder for host-dispatched events (resizeScreen's size).
 globalThis.__vec2 = function (x, y) { return new Vec2(x, y); };
 
+// Media event payload finisher: color arrays become the Vec3 instances the
+// d.ts documents (MediaThumbnailEvent).
+globalThis.__mediaEvent = function (o) {
+  ['primaryColor', 'secondaryColor', 'tertiaryColor', 'textColor', 'highContrastColor'].forEach(function (k) {
+    if (o && o[k] && typeof o[k].length === 'number') o[k] = new Vec3(o[k][0], o[k][1], o[k][2]);
+  });
+  return o;
+};
+
 // ---- ILayer adapter (docs §8) ---------------------------------------------
 function __layerById(id) { var L = __host.layers; for (var i = 0; i < L.length; i++) if (L[i].id === id) return L[i]; return null; }
 function __recordProp(id, name, value) { __host.ops.push({ op: 'setProp', id: id, name: name, value: value }); }

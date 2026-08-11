@@ -258,6 +258,47 @@ pub struct HostFrame {
     /// `__workshopId` fallback for `thisScene.createLayer` path resolution.
     #[serde(rename = "workshopId", skip_serializing_if = "Option::is_none")]
     pub workshop_id: Option<String>,
+    /// Media integration snapshot + per-category change flags. `None` when
+    /// nothing changed this tick (the common case — dispatch is event-driven,
+    /// so this never reaches the JS `__host` marshal).
+    #[serde(skip)]
+    pub media: Option<MediaFrame>,
+}
+
+/// One tick's media-integration delivery (docs: media*Changed events). The
+/// snapshot carries every event's payload; the `*_changed` flags say which
+/// events fire this tick.
+#[derive(Clone, Debug, Default)]
+pub struct MediaFrame {
+    /// `MediaStatusEvent.enabled`.
+    pub enabled: bool,
+    /// `MediaPlaybackEvent.state` (0 stopped / 1 playing / 2 paused).
+    pub state: i32,
+    /// `MediaPropertiesEvent.title`.
+    pub title: String,
+    /// `MediaPropertiesEvent.artist`.
+    pub artist: String,
+    /// `MediaPropertiesEvent.albumTitle`.
+    pub album_title: String,
+    /// `MediaTimelineEvent.position` (seconds).
+    pub position: f64,
+    /// `MediaTimelineEvent.duration` (seconds).
+    pub duration: f64,
+    /// `MediaThumbnailEvent.hasThumbnail`.
+    pub has_thumbnail: bool,
+    /// Thumbnail palette, RGB ∈ [0,1]: primary, secondary, tertiary, text,
+    /// high-contrast. `None` when no art is decoded.
+    pub colors: Option<[[f32; 3]; 5]>,
+    /// Fire `mediaStatusChanged`.
+    pub status_changed: bool,
+    /// Fire `mediaPlaybackChanged`.
+    pub playback_changed: bool,
+    /// Fire `mediaPropertiesChanged`.
+    pub properties_changed: bool,
+    /// Fire `mediaThumbnailChanged`.
+    pub thumbnail_changed: bool,
+    /// Fire `mediaTimelineChanged`.
+    pub timeline_changed: bool,
 }
 
 impl Default for HostFrame {
@@ -277,6 +318,7 @@ impl Default for HostFrame {
             scene: SceneState::default(),
             layers: Vec::new(),
             workshop_id: None,
+            media: None,
         }
     }
 }

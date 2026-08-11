@@ -23,7 +23,7 @@ const WE_VECTOR_JS: &str = include_str!("js/we_vector.js");
 
 /// Snapshot of one module's tick inputs `(key, owner_id, inited, current value,
 /// workshop id)`, cloned out of [`World::modules`] before entering `ctx.with`.
-type ModuleTickState = (String, Option<i64>, bool, ScriptValue, Option<String>, u8);
+type ModuleTickState = (String, Option<i64>, bool, ScriptValue, Option<String>, u8, u8);
 
 /// Cursor-export presence bits (detected once at module load, so the per-tick
 /// dispatch never round-trips into JS for a handler that does not exist).
@@ -41,6 +41,21 @@ const CURSOR_EXPORTS: [(u8, &str); 6] = [
     (F_CURSOR_DOWN, "cursorDown"),
     (F_CURSOR_UP, "cursorUp"),
     (F_CURSOR_CLICK, "cursorClick"),
+];
+
+/// Media-event export bits (same load-time detection as cursor handlers).
+const F_MEDIA_STATUS: u8 = 1;
+const F_MEDIA_PLAYBACK: u8 = 2;
+const F_MEDIA_PROPERTIES: u8 = 4;
+const F_MEDIA_THUMBNAIL: u8 = 8;
+const F_MEDIA_TIMELINE: u8 = 16;
+
+const MEDIA_EXPORTS: [(u8, &str); 5] = [
+    (F_MEDIA_STATUS, "mediaStatusChanged"),
+    (F_MEDIA_PLAYBACK, "mediaPlaybackChanged"),
+    (F_MEDIA_PROPERTIES, "mediaPropertiesChanged"),
+    (F_MEDIA_THUMBNAIL, "mediaThumbnailChanged"),
+    (F_MEDIA_TIMELINE, "mediaTimelineChanged"),
 ];
 
 /// Edge-detection state for cursor event dispatch, persisted across ticks.
@@ -71,6 +86,8 @@ struct ModuleMeta {
     workshop_id: Option<String>,
     /// Which `cursor*` handlers the module exports (`F_CURSOR_*` bits).
     cursor_exports: u8,
+    /// Which `media*Changed` handlers the module exports (`F_MEDIA_*` bits).
+    media_exports: u8,
 }
 
 /// The owned script world. Not `Send` (QuickJS `Runtime` is `!Send`); created and
@@ -150,7 +167,7 @@ impl World {
             return Ok(());
         }
         let key_owned = key.to_owned();
-        let (workshop_id, cursor_exports) = self.context.with(|ctx| -> Result<(Option<String>, u8), ScriptError> {
+        let loaded = self.context.with(|ctx| -> Result<(Option<String>, u8, u8), ScriptError> {
             // docs §5.5: expose this module's scriptproperties before its body
             // runs, so top-level createScriptProperties().finish() reads them.
             let host: Object = global(&ctx, "__host")?;
@@ -182,8 +199,16 @@ impl World {
                     cursor_exports |= bit;
                 }
             }
-            Ok((workshop_id, cursor_exports))
+            let mut media_exports = 0u8;
+            for (bit, name) in MEDIA_EXPORTS {
+                let f: Option<Function> = namespace.get(name).ok();
+                if f.is_some() {
+                    media_exports |= bit;
+                }
+            }
+            Ok((workshop_id, cursor_exports, media_exports))
         })?;
+        let (workshop_id, cursor_exports, media_exports) = loaded;
 
         self.modules.insert(
             key.to_owned(),
@@ -193,6 +218,7 @@ impl World {
                 current: initial,
                 workshop_id,
                 cursor_exports,
+                media_exports,
             },
         );
         Ok(())
@@ -219,6 +245,7 @@ impl World {
                     m.current.clone(),
                     m.workshop_id.clone(),
                     m.cursor_exports,
+                    m.media_exports,
                 )
             })
             .collect();
@@ -244,9 +271,12 @@ impl World {
             // Cursor events fire before the frame's update() calls, mirroring
             // the reference's input-then-update frame order.
             dispatch_cursor(&ctx, &metas, frame, cursor, &mut out);
+            // Media events likewise fire pre-update, on the tick their
+            // category changed (the integrator sets the flags).
+            dispatch_media(&ctx, &metas, frame, &mut out);
 
             let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
-            for (key, owner, inited, current, workshop, _) in &metas {
+            for (key, owner, inited, current, workshop, _, _) in &metas {
                 bind_this_layer(&ctx, *owner);
                 set_workshop_id(&ctx, workshop.as_deref());
                 let arg = match current.to_js(&ctx) {
@@ -545,7 +575,7 @@ fn dispatch_cursor(
     // same previous-tick snapshot (two modules on one layer must both see the
     // same enter edge).
     let mut new_hit: Vec<(i64, bool)> = Vec::new();
-    for (key, owner, _, _, _, flags) in metas {
+    for (key, owner, _, _, _, flags, _) in metas {
         if *flags == 0 {
             continue;
         }
@@ -605,6 +635,99 @@ fn dispatch_cursor(
     }
     if up_edge {
         st.down_on.clear();
+    }
+}
+
+/// Dispatch the tick's media events (d.ts media*Changed) to every module that
+/// exports the matching handler. Payloads are built from the integrator's
+/// snapshot; `__mediaEvent` upgrades color arrays to real `Vec3`s JS-side.
+fn dispatch_media(
+    ctx: &Ctx<'_>,
+    metas: &[ModuleTickState],
+    frame: &HostFrame,
+    out: &mut TickOutput,
+) {
+    let Some(m) = &frame.media else { return };
+    if metas.iter().all(|t| t.6 == 0) {
+        return;
+    }
+    let color = |i: usize| -> serde_json::Value {
+        m.colors
+            .map_or(serde_json::json!([0.0, 0.0, 0.0]), |c| serde_json::json!(c[i]))
+    };
+    // (payload, export name, fires) per category.
+    let events: [(serde_json::Value, &'static str, bool, u8); 5] = [
+        (
+            serde_json::json!({ "enabled": m.enabled }),
+            "mediaStatusChanged",
+            m.status_changed,
+            F_MEDIA_STATUS,
+        ),
+        (
+            serde_json::json!({ "state": m.state }),
+            "mediaPlaybackChanged",
+            m.playback_changed,
+            F_MEDIA_PLAYBACK,
+        ),
+        (
+            serde_json::json!({
+                "title": m.title, "artist": m.artist, "subTitle": "",
+                "albumTitle": m.album_title, "albumArtist": "",
+                "genres": "", "contentType": "",
+            }),
+            "mediaPropertiesChanged",
+            m.properties_changed,
+            F_MEDIA_PROPERTIES,
+        ),
+        (
+            serde_json::json!({
+                "hasThumbnail": m.has_thumbnail,
+                "primaryColor": color(0), "secondaryColor": color(1),
+                "tertiaryColor": color(2), "textColor": color(3),
+                "highContrastColor": color(4),
+            }),
+            "mediaThumbnailChanged",
+            m.thumbnail_changed,
+            F_MEDIA_THUMBNAIL,
+        ),
+        (
+            serde_json::json!({ "position": m.position, "duration": m.duration }),
+            "mediaTimelineChanged",
+            m.timeline_changed,
+            F_MEDIA_TIMELINE,
+        ),
+    ];
+    for (key, owner, _, _, _, _, media_flags) in metas {
+        if *media_flags == 0 {
+            continue;
+        }
+        bind_this_layer(ctx, *owner);
+        for (payload, name, fires, bit) in &events {
+            if !fires || media_flags & bit == 0 {
+                continue;
+            }
+            let arg = match json_to_js(ctx, payload) {
+                Ok(v) => v,
+                Err(e) => {
+                    out.errors.push(ScriptError::Internal(e.to_string()));
+                    continue;
+                }
+            };
+            let arg = match call_ret2(ctx, "__mediaEvent", (arg,)) {
+                Ok(v) => v,
+                Err(e) => {
+                    out.errors.push(e);
+                    continue;
+                }
+            };
+            if let Err(msg) = call_export(ctx, key, name, arg) {
+                out.errors.push(ScriptError::Runtime {
+                    key: key.clone(),
+                    phase: name,
+                    message: msg,
+                });
+            }
+        }
     }
 }
 

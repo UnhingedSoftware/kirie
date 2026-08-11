@@ -1,7 +1,9 @@
 //! End-to-end tests: real JS through the embedded QuickJS runtime.
 //! docs/scripting-api.md is the behavior oracle.
 
-use kirie_script::{AudioBuffers, HostFrame, LayerState, SceneOp, ScriptEngine, ScriptValue};
+use kirie_script::{
+    AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue,
+};
 
 fn num(v: &ScriptValue) -> f64 {
     match v {
@@ -445,6 +447,49 @@ fn initial_layer_config_survives_script_writes() {
     let out = e.tick(mutated, vec![]).unwrap();
     // …but the initial config still reports the authored 0.25.
     assert_eq!(out.property_results[0].1, ScriptValue::Float(0.25));
+}
+
+/// media*Changed handlers fire only for flagged categories, with the
+/// documented payload shapes (thumbnail colors as Vec3).
+#[test]
+fn media_events_dispatch_by_category() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "var log = [];
+         export function mediaPlaybackChanged(ev){ log.push('pb:' + ev.state); }
+         export function mediaThumbnailChanged(ev){ log.push('th:' + (ev.primaryColor instanceof Vec3 ? ev.primaryColor.x : 'bad')); }
+         export function mediaStatusChanged(ev){ log.push('st:' + ev.enabled); }
+         export function update(v){ return log.join(','); }",
+        Some(7),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let media = MediaFrame {
+        enabled: true,
+        state: 1,
+        colors: Some([[1.0, 0.0, 0.0]; 5]),
+        playback_changed: true,
+        thumbnail_changed: true,
+        // status unchanged — its handler must stay silent.
+        status_changed: false,
+        ..Default::default()
+    };
+    let frame = HostFrame {
+        media: Some(media),
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("pb:1,th:1".into()),
+        "errors: {:?}",
+        out.errors
+    );
+    // No media this tick → nothing new fires.
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("pb:1,th:1".into()));
 }
 
 // ---- resizeScreen / applyGeneralSettings (d.ts ScriptModule) ---------------

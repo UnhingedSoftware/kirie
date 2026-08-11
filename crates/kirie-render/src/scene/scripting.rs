@@ -178,6 +178,11 @@ pub struct ScriptHost {
     /// Particle playback/instance ops, drained via
     /// [`Self::take_particle_ops`].
     particle_ops: Vec<ParticleOp>,
+    /// True when any loaded script mentions a media event export — the
+    /// renderer only starts the MPRIS worker for scenes that listen.
+    wants_media: bool,
+    /// Previous media snapshot digest, for per-category change detection.
+    media_prev: Option<MediaPrev>,
     /// Pending runtime camera override (`thisScene.setCameraTransforms`),
     /// merged across the tick's ops, drained via [`Self::take_camera`].
     camera_op: Option<CameraOp>,
@@ -326,6 +331,20 @@ impl ScriptHost {
             }
         };
 
+        // Media-listener detection (string scan; the exact export detection
+        // happens at module load in kirie-script — this only gates whether
+        // the renderer starts the MPRIS worker at all).
+        const MEDIA_EXPORT_NAMES: [&str; 5] = [
+            "mediaStatusChanged",
+            "mediaPlaybackChanged",
+            "mediaPropertiesChanged",
+            "mediaThumbnailChanged",
+            "mediaTimelineChanged",
+        ];
+        let wants_media = pending
+            .iter()
+            .any(|p| MEDIA_EXPORT_NAMES.iter().any(|n| p.source.contains(n)));
+
         let mut props = Vec::with_capacity(pending.len());
         for p in pending {
             match engine.load_property_script(
@@ -363,6 +382,8 @@ impl ScriptHost {
             created: Vec::new(),
             destroyed: Vec::new(),
             particle_ops: Vec::new(),
+            wants_media,
+            media_prev: None,
             camera_op: None,
             order_dirty: false,
             parent_updates: Vec::new(),
@@ -414,6 +435,7 @@ impl ScriptHost {
         pointer: [f32; 2],
         pointer_scene: [f32; 2],
         pointer_left: bool,
+        media: Option<&crate::media::MediaState>,
     ) -> Vec<PropUpdate> {
         self.elapsed += f64::from(dt);
         // Recycle the retained frame (the common case) instead of marshalling a
@@ -462,6 +484,8 @@ impl ScriptHost {
                 .map_or(0.0, |d| d.as_secs_f64()),
             self.tz_offset_secs,
         );
+        // Media events: `Some` only on ticks where a category changed.
+        frame.media = media.and_then(|st| media_frame(st, &mut self.media_prev));
         // Audio bands land in the retained buffers (clear + extend, no allocs
         // once warm). Presence is stable per run, so the None arm's drop of the
         // warm buffers is a one-off transition, not churn.
@@ -670,6 +694,13 @@ impl ScriptHost {
         std::mem::take(&mut self.particle_ops)
     }
 
+    /// Whether any loaded script mentions a media event export — the renderer
+    /// starts the MPRIS worker only for scenes that listen.
+    #[must_use]
+    pub fn wants_media(&self) -> bool {
+        self.wants_media
+    }
+
     /// Drain the tick's merged runtime camera override, if any
     /// (`thisScene.setCameraTransforms`). The renderer applies it to the live
     /// perspective camera the 3D models re-read every frame; the 2D
@@ -752,6 +783,94 @@ impl ScriptHost {
             PropTarget::Brightness | PropTarget::ParticleRate => {}
         }
     }
+}
+
+/// Digest of the previous tick's media snapshot, for change detection.
+struct MediaPrev {
+    available: bool,
+    state: i32,
+    title: String,
+    artist: String,
+    album: String,
+    /// `Arc::as_ptr` of the decoded art (0 = none) — stable per track, the
+    /// same identity key the web feed's art cache uses.
+    art_key: usize,
+    position: f64,
+}
+
+/// Project a media snapshot into this tick's [`MediaFrame`], comparing against
+/// `prev` per category. `None` when nothing changed (the common case). The
+/// first snapshot fires every category so scripts receive the initial state.
+fn media_frame(
+    state: &crate::media::MediaState,
+    prev: &mut Option<MediaPrev>,
+) -> Option<kirie_script::MediaFrame> {
+    let ev = crate::media::MediaPlaybackEvent::from_state(state);
+    let art_key = state.art.as_ref().map_or(0, |a| std::sync::Arc::as_ptr(a) as usize);
+    let (status, playback, properties, thumbnail, timeline) = match prev.as_ref() {
+        None => (true, true, true, true, true),
+        Some(p) => (
+            p.available != ev.available,
+            p.state != ev.state,
+            p.title != ev.title || p.artist != ev.artist || p.album != ev.album,
+            p.art_key != art_key,
+            (p.position - ev.position_secs).abs() > 1e-9,
+        ),
+    };
+    *prev = Some(MediaPrev {
+        available: ev.available,
+        state: ev.state,
+        title: ev.title.clone(),
+        artist: ev.artist.clone(),
+        album: ev.album.clone(),
+        art_key,
+        position: ev.position_secs,
+    });
+    if !(status || playback || properties || thumbnail || timeline) {
+        return None;
+    }
+    // Palette: primary/secondary/text/high-contrast come derived; the d.ts
+    // also wants a tertiary — serve the secondary again (closest derived
+    // swatch; the reference's third swatch is another luminance step).
+    let colors = match (&ev.primary_color, &ev.secondary_color, &ev.text_color, &ev.high_contrast_color) {
+        (Some(p), Some(s), Some(t), Some(h)) => {
+            match (hex_rgb(p), hex_rgb(s), hex_rgb(t), hex_rgb(h)) {
+                (Some(p), Some(s), Some(t), Some(h)) => Some([p, s, s, t, h]),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Some(kirie_script::MediaFrame {
+        enabled: ev.available,
+        state: ev.state,
+        title: ev.title,
+        artist: ev.artist,
+        album_title: ev.album,
+        position: ev.position_secs,
+        duration: ev.duration_secs,
+        has_thumbnail: ev.thumbnail.is_some(),
+        colors,
+        status_changed: status,
+        playback_changed: playback,
+        properties_changed: properties,
+        thumbnail_changed: thumbnail,
+        timeline_changed: timeline,
+    })
+}
+
+/// `#rrggbb` → RGB floats ∈ [0,1].
+fn hex_rgb(s: &str) -> Option<[f32; 3]> {
+    let hex = s.strip_prefix('#')?;
+    if hex.len() != 6 {
+        return None;
+    }
+    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+    Some([
+        f32::from(byte(0)?) / 255.0,
+        f32::from(byte(2)?) / 255.0,
+        f32::from(byte(4)?) / 255.0,
+    ])
 }
 
 /// One drained particle op (see [`ScriptHost::take_particle_ops`]).

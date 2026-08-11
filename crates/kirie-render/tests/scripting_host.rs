@@ -40,7 +40,7 @@ fn scripted_alpha_changes_over_ticks() {
     let mut last = -1.0_f32;
     let mut saw_update = false;
     for _ in 0..4 {
-        let updates = host.tick(0.5, None, [0.5, 0.5], [960.0, 540.0], false);
+        let updates = host.tick(0.5, None, [0.5, 0.5], [960.0, 540.0], false, None);
         for u in updates {
             if u.object_id == 7 && u.target == PropTarget::Alpha {
                 let v = kirie_render::scene::scripting::as_f32(&u.value).expect("alpha is a scalar");
@@ -94,12 +94,12 @@ fn retained_frame_refreshes_user_props() {
     };
 
     // Initial props ('off') through the fresh frame.
-    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false)) - 0.1).abs() < 1e-6);
+    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.1).abs() < 1e-6);
     // Live setProperty flips the combo; the recycled frame must see it.
     host.apply_user_property("mode", &kirie_scene::PropertyValue::Combo("on".to_owned()));
-    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false)) - 0.9).abs() < 1e-6);
+    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.9).abs() < 1e-6);
     // And keep seeing it on later clean (non-dirty) ticks.
-    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false)) - 0.9).abs() < 1e-6);
+    assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.9).abs() < 1e-6);
 }
 
 /// `thisLayer.text = …` from a property script must surface as a Text
@@ -126,7 +126,7 @@ fn text_writes_and_created_layer_writes_reach_updates() {
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
     for t in 0..3 {
-        let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+        let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
         assert!(
             updates.iter().any(|u| u.object_id == 9
                 && u.target == PropTarget::Text
@@ -165,18 +165,18 @@ fn destroy_layer_drains_and_forgets_the_record() {
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
 
     // Tick 1: created.
-    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     let created = host.take_created();
     assert_eq!(created.len(), 1, "created: {created:?}");
     let id = created[0].0;
     assert!(host.take_destroyed().is_empty());
 
     // Tick 2: destroyed — id drained exactly once.
-    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert_eq!(host.take_destroyed(), vec![id]);
 
     // Tick 3: writing through the dead proxy produces no update for it.
-    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert!(
         updates.iter().all(|u| u.object_id != id),
         "write to a destroyed layer must no-op: {updates:?}"
@@ -204,7 +204,7 @@ fn parallax_depth_write_reaches_updates() {
     }"#;
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
-    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert!(
         updates.iter().any(|u| u.object_id == 7
             && u.target == PropTarget::ParallaxDepth
@@ -234,7 +234,7 @@ fn base_origin_leaf_script_is_collected() {
     }"#;
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("origin script spawns the host");
-    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 48.0], false);
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 48.0], false, None);
     assert!(
         updates.iter().any(|u| u.object_id == 5
             && u.target == PropTarget::Origin
@@ -267,7 +267,7 @@ fn particle_ops_drain_with_payloads() {
     }"#;
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
-    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false);
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     let ops = host.take_particle_ops();
     assert!(
         ops.iter().any(|o| matches!(o, ParticleOp::Command { id: 3, cmd } if cmd == "pause")),
@@ -328,7 +328,7 @@ fn throwing_script_does_not_panic_and_leaves_value_alone() {
     let mut host = ScriptHost::build(&model, (64, 64), &[]).expect("script loads even if it throws at tick");
     // Several ticks, no panic; a throwing update yields no applied value.
     for _ in 0..3 {
-        let updates = host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false);
+        let updates = host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None);
         assert!(
             updates.iter().all(|u| u.object_id != 3),
             "a throwing update must not apply a value"

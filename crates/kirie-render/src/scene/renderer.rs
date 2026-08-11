@@ -380,6 +380,9 @@ pub struct SceneRenderer {
     /// from), retained so script origin/scale/angles writes can recompose
     /// `world_xf` and rewrite the affected quads in place.
     locals: HashMap<i64, LocalXf>,
+    /// MPRIS now-playing source, started only when a scene script exports a
+    /// media event handler (docs: media*Changed).
+    media: Option<Arc<crate::media::MediaSource>>,
     /// `object id → live visibility` over every object (incl. non-drawn groups),
     /// kept current by script visibility updates (docs §7.1 ancestor gating).
     visible_by_id: HashMap<i64, bool>,
@@ -818,6 +821,13 @@ impl SceneRenderer {
             }
         }
 
+        // MPRIS media integration: started only when a script listens for the
+        // media*Changed events — no D-Bus worker for the common scene.
+        let media = script
+            .as_ref()
+            .filter(|h| h.wants_media())
+            .map(|_| Arc::new(crate::media::MediaSource::start(crate::media::MediaConfig::default())));
+
         // Allocate the models' shared depth buffer once, only when the scene has
         // a model object (SPEC.md §V5: no per-frame alloc; §7.2).
         let model_depth = items
@@ -880,6 +890,7 @@ impl SceneRenderer {
             pointer_last: [0.5, 0.5],
             pointer_left: false,
             locals: local_xf,
+            media,
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
             runtime_templates,
@@ -1964,8 +1975,16 @@ impl Renderer for SceneRenderer {
             let (pw, ph) = self.projection_size();
             [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
         };
+        let media_state = self.media.as_ref().map(|m| m.latest());
         let updates = match &mut self.script {
-            Some(script) => script.tick(dt, spectrum.as_deref(), self.pointer, pointer_scene, self.pointer_left),
+            Some(script) => script.tick(
+                dt,
+                spectrum.as_deref(),
+                self.pointer,
+                pointer_scene,
+                self.pointer_left,
+                media_state.as_deref(),
+            ),
             None => Vec::new(),
         };
         // Scene ops (createLayer/camera/…) first: a layer created this tick must
