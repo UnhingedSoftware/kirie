@@ -10,6 +10,7 @@ pub mod args;
 pub mod ipc_app;
 pub mod list_props;
 pub mod playlist;
+pub mod power;
 pub mod resolve;
 pub mod run;
 pub mod screenshot;

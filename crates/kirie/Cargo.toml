@@ -35,6 +35,8 @@ web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
 vaapi = ["kirie-video/vaapi"]
 
 [dependencies]
+# System-bus UPower probe for the on-battery power profile.
+zbus = { workspace = true }
 kirie-formats = { workspace = true }
 # Sibling workspace crates, not listed in [workspace.dependencies]; path deps
 # (root manifest is frozen — same convention kirie-render/kirie-video use).

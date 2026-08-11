@@ -51,6 +51,7 @@ use kirie_video::{VideoControl, VideoOptions, VideoPlayer, VideoRenderer};
 use crate::compat::args::{ClampMode, CompatArgs, ScalingMode, WindowMode};
 use crate::compat::ipc_app::{IpcApp, Register};
 use crate::compat::playlist::{ActivePlaylist, PlaylistDefinition, Rng};
+use crate::compat::power;
 use crate::compat::resolve::{self, ClassifyError, Wallpaper};
 use crate::compat::{list_props, screenshot, signals};
 
@@ -635,13 +636,23 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // never-seen wallpaper loads like a warm one. Root = the current
     // background's workshop directory parent; skipped for non-workshop paths
     // or with KIRIE_NO_PREBAKE=1. The handle lives for the engine's lifetime.
-    let _prebaker = if std::env::var_os("KIRIE_NO_PREBAKE").is_none() {
+    let prebaker = if std::env::var_os("KIRIE_NO_PREBAKE").is_none() {
         prebake_root.as_deref().and_then(|root| {
             kirie_render::start_background_prebake(root, resolve::we_assets_dir().as_deref())
         })
     } else {
         None
-    };
+    }
+    .map(std::sync::Arc::new);
+
+    // On-battery throttle state (see compat::power): the watcher writes,
+    // feed/audio cadences read. Battery fps target is shared so the
+    // `set batteryfps` socket key can retune it live.
+    let power_save = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let normal_fps = u32::try_from(args.fps).ok().filter(|f| *f > 0);
+    let battery_fps = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(10));
+    let power_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut power_handle: Option<std::thread::JoinHandle<()>> = None;
 
     let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {
         Ok(mut platform) => {
@@ -679,6 +690,19 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
                     ),
                 }
             }
+            // On-battery power profile: fps cap + pre-baker pause + halved
+            // feed cadences while unplugged. No-op (not even a thread) on
+            // machines without a battery.
+            if let Some(cmd_tx) = platform.command_sender() {
+                power_handle = power::spawn(power::PowerWatch {
+                    cmd_tx,
+                    normal_fps,
+                    battery_fps: battery_fps.clone(),
+                    power_save: power_save.clone(),
+                    baker: prebaker.clone(),
+                    stop: power_stop.clone(),
+                });
+            }
             // A test/CI bound on the otherwise-infinite run; the daemon never
             // sets it, so live behavior is unchanged (runs until stopped).
             let duration = std::env::var("KIRIE_RUN_SECONDS")
@@ -704,6 +728,13 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // Stop the playlist rotator and join it.
     playlist_stop.store(true, Ordering::Relaxed);
     if let Some(h) = playlist_handle {
+        let _ = h.join();
+    }
+
+    // Stop the power watcher and join it (unpark cuts the poll wait short).
+    power_stop.store(true, Ordering::Relaxed);
+    if let Some(h) = power_handle {
+        h.thread().unpark();
         let _ = h.join();
     }
 
