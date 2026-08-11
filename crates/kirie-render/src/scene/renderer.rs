@@ -2034,6 +2034,30 @@ fn ancestors_visible(
 }
 
 impl Renderer for SceneRenderer {
+    /// SPEC §V6: report Static only when provably nothing animates — no
+    /// scripts, no audio reactivity, no video/atlas textures, no runtime
+    /// layers, no particles, no model animation tracks, and no pointer
+    /// parallax. Everything else keeps continuous pacing (Unknown), so a
+    /// false negative costs frames, never correctness.
+    fn redraw_hint(&self) -> kirie_platform::RedrawHint {
+        let animated = self.script.is_some()
+            || self.audio.is_some()
+            || !self.video_textures.is_empty()
+            || !self.atlas_textures.is_empty()
+            || !self.runtime_layers.is_empty()
+            || (self.general.cameraparallax.value && !self.options.disable_parallax)
+            || self.items.iter().any(|it| match it {
+                SceneItem::Particle(_) => true,
+                SceneItem::Model(m) => m.has_animation(),
+                _ => false,
+            });
+        if animated {
+            kirie_platform::RedrawHint::Unknown
+        } else {
+            kirie_platform::RedrawHint::Static
+        }
+    }
+
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32) {
         self.elapsed += f64::from(dt);
         let time = self.elapsed as f32;

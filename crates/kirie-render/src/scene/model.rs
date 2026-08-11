@@ -99,6 +99,11 @@ impl ModelGpu {
     pub(super) fn set_angles(&mut self, v: [f32; 3]) {
         self.angles = v;
     }
+
+    /// Whether this model animates on its own (`angles.animation` track).
+    pub(super) fn has_animation(&self) -> bool {
+        self.angles_animation.is_some()
+    }
 }
 
 /// One renderable 3D model object: its sub-meshes plus the object transform the

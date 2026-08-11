@@ -353,6 +353,16 @@ impl ImageRenderer {
 }
 
 impl Renderer for ImageRenderer {
+    fn redraw_hint(&self) -> kirie_platform::RedrawHint {
+        if !self.is_animated() {
+            return kirie_platform::RedrawHint::Static;
+        }
+        match self.time_until_frame_change() {
+            Some(d) => kirie_platform::RedrawHint::After(d),
+            None => kirie_platform::RedrawHint::Static,
+        }
+    }
+
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32) {
         // Unscaled wall-clock accumulation (docs/format-tex.md §8.1 step 2:
         // frame selection uses render time, not the playback-speed-scaled

@@ -1229,6 +1229,10 @@ impl PlatformState {
         renderer.set_pointer_buttons(self.buttons.left());
 
         renderer.render(&view, ctx.physical_size, dt);
+        // Consulted below when re-arming: static content stops scheduling
+        // entirely (SPEC §V6); timed content wakes exactly at its next
+        // visible change instead of spinning at the frame cap.
+        let hint = renderer.redraw_hint();
 
         // Uncapped: request the next frame callback *before* presenting so it
         // rides the same commit and vsync-paces the loop (the C++ driver's
@@ -1242,7 +1246,7 @@ impl PlatformState {
         // when we only present a few frames a second. A static wallpaper —
         // which never requests a callback — leaves the compositor idle; the
         // timer path makes a capped live wallpaper behave the same way.
-        if self.min_frame.is_none() && !ctx.frame_pending {
+        if self.min_frame.is_none() && !ctx.frame_pending && hint == crate::renderer::RedrawHint::Unknown {
             ctx.wl_surface().frame(&self.qh, ctx.wl_surface().clone());
             ctx.frame_pending = true;
         }
@@ -1267,16 +1271,31 @@ impl PlatformState {
             }
         }
 
-        // Capped: schedule the next render off a one-shot timer instead of a
-        // frame callback (see the present block above). One timer in flight at
-        // a time — `timer_armed` also covers a timer armed by the early-callback
-        // skip path, so the two never stack.
-        if let Some(min) = self.min_frame {
+        // Re-arm per the hint (SPEC §V6):
+        // - Static: arm NOTHING — the content never changes on its own, and
+        //   every external change path (SetProperty commits a callback,
+        //   swaps draw directly, SetFps repaints, pause-resume kicks) wakes
+        //   the output again. A plain image now costs zero frames forever.
+        // - After(d): one timer at the content's next visible change, floored
+        //   at the frame cap. Covers animated images/atlases in BOTH pacing
+        //   modes — uncapped ones no longer pin the compositor between
+        //   frame changes either.
+        // - Unknown + capped: the classic one-shot pacing timer.
+        // One timer in flight at a time — `timer_armed` also covers a timer
+        // armed by the early-callback skip path, so the two never stack.
+        let next = match hint {
+            crate::renderer::RedrawHint::Static => None,
+            crate::renderer::RedrawHint::After(d) => {
+                Some(d.max(self.min_frame.unwrap_or(std::time::Duration::ZERO)))
+            }
+            crate::renderer::RedrawHint::Unknown => self.min_frame,
+        };
+        if let Some(wait) = next {
             let ctx = &mut self.outputs[index];
             if !ctx.timer_armed {
                 ctx.timer_armed = true;
                 let surface = ctx.wl_surface().clone();
-                let timer = Timer::from_duration(min);
+                let timer = Timer::from_duration(wait);
                 let _ = self.loop_handle.insert_source(timer, move |_, _, state| {
                     if let Some(ctx) = state.outputs.iter_mut().find(|c| c.wl_surface() == &surface) {
                         ctx.timer_armed = false;
@@ -1285,6 +1304,8 @@ impl PlatformState {
                     TimeoutAction::Drop
                 });
             }
+        } else if hint == crate::renderer::RedrawHint::Static {
+            tracing::debug!(output = %self.outputs[index].name, "static content; frame scheduling stopped");
         }
     }
 

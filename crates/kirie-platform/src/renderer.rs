@@ -44,6 +44,19 @@ pub struct RenderTarget<'a> {
     pub size: (u32, u32),
 }
 
+/// See [`Renderer::redraw_hint`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedrawHint {
+    /// No knowledge — keep the continuous frame-callback/timer pacing.
+    Unknown,
+    /// Content never changes on its own: present nothing further until an
+    /// external change (property/swap/resume) wakes the output.
+    Static,
+    /// Content next changes after this long (animated-image frame walk):
+    /// schedule one wake then, instead of spinning at the frame cap.
+    After(std::time::Duration),
+}
+
 /// A per-output frame producer driven by compositor frame callbacks.
 ///
 /// `render` is called exactly once per `wl_surface` frame callback — never
@@ -126,6 +139,17 @@ pub trait Renderer {
     /// keeps its centered default). Drives `g_PointerPosition*`, camera
     /// parallax, SceneScript `pointer_screen` and the web backend's mouse.
     fn set_pointer(&mut self, _x: f32, _y: f32) {}
+
+    /// Redraw-scheduling hint (SPEC §V6), consulted after each present.
+    ///
+    /// [`RedrawHint::Unknown`] (the default) keeps continuous pacing;
+    /// [`RedrawHint::Static`] stops scheduling entirely — the content will
+    /// never change on its own, and every external change path (property,
+    /// swap, fps, pause-resume) re-kicks the output; [`RedrawHint::After`]
+    /// schedules exactly one wake at the content's next visible change.
+    fn redraw_hint(&self) -> RedrawHint {
+        RedrawHint::Unknown
+    }
 
     /// Pointer button state (T26/SceneScript cursor events). `left_down` is
     /// true only while the cursor is over the wallpaper surface itself —
