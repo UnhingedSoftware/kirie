@@ -640,6 +640,58 @@ fn local_storage_persists_across_engines() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---- stubbed surface (presence-correct, never a crash) ---------------------
+
+/// Every stubbed API returns its documented shape; a script chaining through
+/// them runs to completion.
+#[test]
+fn stubbed_surface_never_crashes() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_1",
+        r#"
+        export function update(v) {
+            var bad = [];
+            if (thisLayer.getAnimationLayerCount() !== 0) bad.push('alc');
+            var al = thisLayer.playSingleAnimation('walk');
+            al.play(); al.setFrame(3);
+            if (!al.isPlaying() || al.getFrame() !== 3) bad.push('al');
+            if (!(thisLayer.getBoneTransform('head') instanceof Mat4)) bad.push('bone');
+            if (!(thisLayer.getAttachmentOrigin(0) instanceof Vec3)) bad.push('attach');
+            if (!(thisLayer.transformAttachmentToTexture(0, 0) instanceof Mat3)) bad.push('t2t');
+            thisLayer.volume = 0.5; thisLayer.applyData([]);
+            var md = thisScene.createModelData({});
+            if (!md || md.__modelData !== true) bad.push('md');
+            if (thisScene.destroyModelData(md) !== false) bad.push('dmd');
+            if (typeof renderContext !== 'object') bad.push('rc');
+            return bad.length ? bad.join(',') : 'ok';
+        }
+        "#,
+        Some(1),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        layers: vec![LayerState {
+            id: 1,
+            name: "L".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("ok".into()),
+        "errors: {:?} logs: {:?}",
+        out.errors,
+        out.logs
+    );
+    // The stub warnings surfaced (once per category).
+    assert!(out.logs.iter().any(|l| l.message.contains("not simulated")));
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]

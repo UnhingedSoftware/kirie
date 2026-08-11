@@ -192,6 +192,27 @@ function __makeLayer(id) {
     // frames advance on the render clock; scripted frame control is not
     // implemented (documented limitation).
     getTextureAnimation: function () { return __makeTextureAnimation(id); },
+    // ---- Presence-correct stubs (d.ts surface kirie does not simulate:
+    // skeletal animation layers, bones, attachments, sound layers, puppet
+    // data). Each returns the documented shape so scripts run to completion;
+    // the first use logs one console warning per category.
+    getAnimationLayerCount: function () { return 0; },
+    getAnimationLayer: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
+    createAnimationLayer: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
+    playSingleAnimation: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
+    destroyAnimationLayer: function () { return false; },
+    getBoneTransform: function () { __stubWarn('bones'); return Mat4.identity(); },
+    getAttachmentIndex: function () { return -1; },
+    getAttachmentMatrix: function () { __stubWarn('attachments'); return Mat4.identity(); },
+    getAttachmentOrigin: function () { __stubWarn('attachments'); return new Vec3(0, 0, 0); },
+    getAttachmentAngles: function () { __stubWarn('attachments'); return new Vec3(0, 0, 0); },
+    transformAttachmentToTexture: function () { __stubWarn('attachments'); return Mat3.identity(); },
+    applyData: function () { __stubWarn('puppet-data'); },
+    replaceData: function () { __stubWarn('puppet-data'); },
+    // ---- ISoundLayer: sound objects are not played (documented; kirie's
+    // audio surface is capture, not playback).
+    get volume() { return 1; },
+    set volume(v) { __stubWarn('sound'); },
     // ---- IEffectLayer (d.ts): effect handles by authored index or name.
     getEffectCount: function () { var l = __layerById(id); return (l && l.effects) ? l.effects.length : 0; },
     getEffect: function (arg) {
@@ -310,6 +331,10 @@ var __scene = {
     __host.ops.push({ op: 'destroyLayer', id: id });
     return true;
   },
+  // IModelData (d.ts): custom-geometry buffers are not simulated — the handle
+  // is inert but shaped, so createLayer(modelData) degrades to no layer.
+  createModelData: function (configuration) { __stubWarn('model-data'); return { __modelData: true, configuration: configuration }; },
+  destroyModelData: function () { return false; },
   // d.ts: the layer's authored (scene.json) configuration, regardless of what
   // scripts changed since — served from the first-frame snapshot.
   getInitialLayerConfig: function (arg) {
@@ -425,6 +450,34 @@ function __makeInstance(id) {
   })(i);
   return inst;
 }
+
+// One-time warning per unimplemented-surface category (SPEC stub policy:
+// presence-correct returns, loud once, never a crash).
+function __stubWarn(cat) {
+  if (!__host.__stubWarned) __host.__stubWarned = {};
+  if (__host.__stubWarned[cat]) return;
+  __host.__stubWarned[cat] = true;
+  __host.console.push('E' + cat + ' scripting is not simulated by kirie; calls are inert');
+}
+
+// Inert IAnimationLayer (d.ts shape): playback state is tracked locally so
+// scripted play/pause logic runs; nothing renders from it.
+function __makeAnimationLayer() {
+  var playing = false, frame = 0;
+  return {
+    fps: 30, frameCount: 0, duration: 0, name: '', rate: 1, blend: 1, visible: true,
+    play: function () { playing = true; },
+    pause: function () { playing = false; },
+    stop: function () { playing = false; frame = 0; },
+    isPlaying: function () { return playing; },
+    getFrame: function () { return frame; },
+    setFrame: function (f) { frame = +f || 0; },
+    addEndedCallback: function () { },
+  };
+}
+
+// IRenderContext is an empty interface in the d.ts; the reference reserves it.
+globalThis.renderContext = {};
 
 // Resolve a layer argument (name, scriptable index, or proxy) to its id.
 function __resolveLayerId(arg) {
