@@ -506,6 +506,14 @@ impl ActivePlaylist {
         self.definition.settings.mode == "timer" && self.definition.items.len() > 1 && now >= self.next_switch
     }
 
+    /// The next rotation deadline, or `None` for playlists that never rotate
+    /// on a timer (the rotator sleeps to the earliest deadline instead of
+    /// waking four times a second).
+    pub(crate) fn next_due(&self) -> Option<Instant> {
+        (self.definition.settings.mode == "timer" && self.definition.items.len() > 1)
+            .then_some(self.next_switch)
+    }
+
     /// `WallpaperApplication::selectNextCandidate`
     /// (WallpaperApplication.cpp:391-411): the first non-failed order position
     /// at or after `candidate` (wrapping), or `None` when every item failed.

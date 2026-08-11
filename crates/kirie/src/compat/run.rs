@@ -760,9 +760,10 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         }
     };
 
-    // Stop the playlist rotator and join it.
+    // Stop the playlist rotator and join it (unpark ends its deadline wait).
     playlist_stop.store(true, Ordering::Relaxed);
     if let Some(h) = playlist_handle {
+        h.thread().unpark();
         let _ = h.join();
     }
 
@@ -829,7 +830,22 @@ fn spawn_playlist_rotator(
         .name("kirie-playlist".into())
         .spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                std::thread::sleep(Duration::from_millis(250));
+                // Sleep to the earliest rotation deadline (rotation intervals
+                // are typically minutes; the old loop woke 4×/s to compare
+                // clocks). Capped so a clock jump or an all-manual playlist
+                // still re-checks eventually; shutdown unparks (see the join).
+                let now = Instant::now();
+                let wait = active
+                    .iter()
+                    .filter_map(|(_, s)| s.next_due())
+                    .map(|due| due.saturating_duration_since(now))
+                    .min()
+                    .unwrap_or(Duration::from_secs(300))
+                    .clamp(Duration::from_millis(50), Duration::from_secs(300));
+                std::thread::park_timeout(wait);
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 let now = Instant::now();
                 for (screen, state) in &mut active {
                     if !state.due(now) {
