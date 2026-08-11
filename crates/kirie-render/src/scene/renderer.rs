@@ -1006,6 +1006,26 @@ impl SceneRenderer {
             }
             dirty.push(u.object_id);
         }
+        // Text quads bake no parent chain (build_text uses the authored
+        // origin directly), so origin/scale writes apply to the item
+        // directly; angle writes are ignored (the quad is built unrotated).
+        for u in updates {
+            let (origin, scale) = match u.target {
+                PropTarget::Origin => (as_vec3(&u.value).map(|v| [v[0], v[1]]), None),
+                PropTarget::Scale => (None, as_vec3(&u.value).map(|v| [v[0], v[1]])),
+                _ => continue,
+            };
+            if origin.is_none() && scale.is_none() {
+                continue;
+            }
+            for item in &mut self.items {
+                if let SceneItem::Text(tg) = item
+                    && tg.id == u.object_id
+                {
+                    tg.set_transform(&self.device, origin, scale);
+                }
+            }
+        }
         if dirty.is_empty() {
             return;
         }

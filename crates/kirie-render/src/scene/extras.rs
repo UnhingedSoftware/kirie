@@ -117,6 +117,12 @@ struct TextRebuild {
     padding: f32,
     /// Bitmap-pixel → scene-unit factor per axis (`scale / raster_scale`).
     quad_scale: [f32; 2],
+    /// The shaping supersample factor, retained so a live scale write can
+    /// recompute `quad_scale` from the new object scale.
+    raster_scale: f32,
+    /// Last raster's pixel size, so a transform-only requad needs no
+    /// re-rasterization.
+    raster_size: (u32, u32),
     origin: [f32; 2],
     scene_size: (u32, u32),
     bundled: Option<String>,
@@ -127,6 +133,50 @@ impl TextGpu {
     #[must_use]
     pub fn current_text(&self) -> &str {
         &self.rebuild.current
+    }
+
+    /// Live script transform (`thisLayer.origin`/`scale`): move/scale the
+    /// quad without re-rasterizing. Angles are not part of the text quad
+    /// (built unrotated), so rotation writes are ignored — documented
+    /// limitation.
+    pub fn set_transform(
+        &mut self,
+        device: &wgpu::Device,
+        origin: Option<[f32; 2]>,
+        scale: Option<[f32; 2]>,
+    ) {
+        let rb = &mut self.rebuild;
+        if let Some(o) = origin {
+            rb.origin = o;
+        }
+        if let Some(s) = scale {
+            rb.quad_scale = [s[0] / rb.raster_scale, s[1] / rb.raster_scale];
+        }
+        self.rebuild_quad(device);
+    }
+
+    /// Rebuild the vertex buffer from the retained layout state (shared by
+    /// [`Self::retext`] and [`Self::set_transform`]).
+    fn rebuild_quad(&mut self, device: &wgpu::Device) {
+        let rb = &self.rebuild;
+        let sx = rb.raster_size.0 as f32 * rb.quad_scale[0];
+        let sy = rb.raster_size.1 as f32 * rb.quad_scale[1];
+        let quad = scene_space_quad(rb.origin[0], rb.origin[1], sx, sy, rb.scene_size);
+        let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
+        let mut verts = Vec::with_capacity(4 * 20);
+        for (p, uv) in quad.iter().zip(uvs.iter()) {
+            for &f in p {
+                verts.extend_from_slice(&f.to_le_bytes());
+            }
+            for &f in uv {
+                verts.extend_from_slice(&f.to_le_bytes());
+            }
+        }
+        self.vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("kirie-scene-text-vb"),
+            contents: &verts,
+            usage: wgpu::BufferUsages::VERTEX,
+        });
     }
 
     /// Re-rasterize with `new_text` (a script changed the string): new
@@ -165,24 +215,8 @@ impl TextGpu {
         let texture = text::upload(device, queue, &raster);
         // Quad = rasterized block mapped back into scene units (see
         // build_text: bitmap px × scale / raster_scale).
-        let sx = raster.width as f32 * rb.quad_scale[0];
-        let sy = raster.height as f32 * rb.quad_scale[1];
-        let quad = scene_space_quad(rb.origin[0], rb.origin[1], sx, sy, rb.scene_size);
-        let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
-        let mut verts = Vec::with_capacity(4 * 20);
-        for (p, uv) in quad.iter().zip(uvs.iter()) {
-            for &f in p {
-                verts.extend_from_slice(&f.to_le_bytes());
-            }
-            for &f in uv {
-                verts.extend_from_slice(&f.to_le_bytes());
-            }
-        }
-        self.vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("kirie-scene-text-vb"),
-            contents: &verts,
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.rebuild.raster_size = (raster.width, raster.height);
+        self.rebuild_quad(device);
         self.bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kirie-scene-text-bg"),
             layout: &tp.bgl,
@@ -547,6 +581,8 @@ pub fn build_text(
             valign: tobj.verticalalign.clone(),
             padding,
             quad_scale,
+            raster_scale,
+            raster_size: (raster.width, raster.height),
             origin: [origin[0], origin[1]],
             scene_size,
             bundled,
