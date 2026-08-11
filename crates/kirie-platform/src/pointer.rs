@@ -45,6 +45,11 @@ impl PointerButtons {
 #[derive(Clone, Default)]
 pub struct PointerPoll {
     pos: Arc<RwLock<Option<(f64, f64)>>>,
+    /// Demand gate, written by the platform: true while at least one output
+    /// is live (unpaused, non-static). While false the poller sleeps in long
+    /// strides and opens no sockets — a fullscreen game or an all-static
+    /// desktop costs zero pointer round-trips.
+    active: Arc<AtomicBool>,
 }
 
 impl PointerPoll {
@@ -52,25 +57,40 @@ impl PointerPoll {
     /// handle; it just stays `None` when there is nothing to poll.
     #[must_use]
     pub fn start() -> Self {
-        let handle = PointerPoll::default();
+        let handle = PointerPoll {
+            // Assume demand until the platform's first recompute says
+            // otherwise — the launch frame wants a real pointer.
+            active: Arc::new(AtomicBool::new(true)),
+            ..PointerPoll::default()
+        };
         let Some(sock) = hypr_socket_path() else {
             return handle;
         };
         let slot = handle.pos.clone();
+        let active = handle.active.clone();
         // The engine runs for the process lifetime; the poller thread parks on
         // sleep and exits with the process (detached by design, like audio).
         let _ = std::thread::Builder::new()
             .name("kirie-pointer-poll".into())
             .spawn(move || {
                 loop {
-                    let read = query_cursorpos(&sock);
-                    if let Ok(mut w) = slot.write() {
-                        *w = read;
+                    if active.load(Ordering::Relaxed) {
+                        let read = query_cursorpos(&sock);
+                        if let Ok(mut w) = slot.write() {
+                            *w = read;
+                        }
+                        std::thread::sleep(Duration::from_millis(16));
+                    } else {
+                        std::thread::sleep(Duration::from_millis(250));
                     }
-                    std::thread::sleep(Duration::from_millis(16));
                 }
             });
         handle
+    }
+
+    /// Platform-side demand gate (see the field doc).
+    pub(crate) fn set_active(&self, active: bool) {
+        self.active.store(active, Ordering::Relaxed);
     }
 
     /// The latest global cursor position, if known.

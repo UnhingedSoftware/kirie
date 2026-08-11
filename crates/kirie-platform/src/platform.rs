@@ -705,6 +705,7 @@ impl PlatformState {
             configured: false,
             frame_pending: false,
             timer_armed: false,
+            static_content: false,
             paused: false,
             paused_at: None,
             released: false,
@@ -785,6 +786,8 @@ impl PlatformState {
             self.draw(&surface);
         }
 
+        // Pause transitions change what the pointer poller has to serve.
+        self.update_pointer_demand();
         self.ensure_pause_watchdog();
     }
 
@@ -1307,6 +1310,19 @@ impl PlatformState {
         } else if hint == crate::renderer::RedrawHint::Static {
             tracing::debug!(output = %self.outputs[index].name, "static content; frame scheduling stopped");
         }
+        self.outputs[index].static_content = hint == crate::renderer::RedrawHint::Static;
+        self.update_pointer_demand();
+    }
+
+    /// Recompute the pointer poller's demand gate: poll only while some
+    /// output is live (unpaused, non-static). A fullscreen game or an
+    /// all-static desktop costs zero pointer round-trips.
+    fn update_pointer_demand(&self) {
+        let live = self
+            .outputs
+            .iter()
+            .any(|c| c.renderer.is_some() && !c.paused && !c.static_content);
+        self.pointer.set_active(live);
     }
 
     /// Apply a scale change to the output backing `surface`

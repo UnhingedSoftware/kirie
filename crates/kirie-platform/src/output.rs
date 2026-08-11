@@ -51,6 +51,9 @@ pub(crate) struct OutputContext {
     /// cap. Guards against stacking timers when several early frame callbacks
     /// arrive before the timer fires. Cleared when the timer fires.
     pub timer_armed: bool,
+    /// Last redraw hint was Static — the output presents nothing until an
+    /// external change kicks it. Feeds the pointer poller's demand gate.
+    pub static_content: bool,
     /// A fullscreen application currently covers this output, so `draw` must
     /// do nothing at all — no swapchain acquire, no render, and crucially no
     /// re-arming of the frame callback or the `--fps` timer (that is what makes
