@@ -173,6 +173,12 @@ class Vec4 {
   round() { return new Vec4(Math.round(this.x), Math.round(this.y), Math.round(this.z), Math.round(this.w)); }
   fract() { return new Vec4(__fractNum(this.x), __fractNum(this.y), __fractNum(this.z), __fractNum(this.w)); }
   clamp(lo, hi) { return new Vec4(__clampNum(this.x, __comp(lo, 0, 0), __comp(hi, 0, 0)), __clampNum(this.y, __comp(lo, 1, 0), __comp(hi, 1, 0)), __clampNum(this.z, __comp(lo, 2, 0), __comp(hi, 2, 0)), __clampNum(this.w, __comp(lo, 3, 0), __comp(hi, 3, 0))); }
+  mod(v) { return new Vec4(__modNum(this.x, __comp(v, 0, 1)), __modNum(this.y, __comp(v, 1, 1)), __modNum(this.z, __comp(v, 2, 1)), __modNum(this.w, __comp(v, 3, 1))); }
+  sign() { return new Vec4(Math.sign(this.x), Math.sign(this.y), Math.sign(this.z), Math.sign(this.w)); }
+  step(edge) { return new Vec4(this.x < __comp(edge, 0, 0) ? 0 : 1, this.y < __comp(edge, 1, 0) ? 0 : 1, this.z < __comp(edge, 2, 0) ? 0 : 1, this.w < __comp(edge, 3, 0) ? 0 : 1); }
+  smoothStep(e0, e1) { return new Vec4(__smoothStepNum(__comp(e0, 0, 0), __comp(e1, 0, 1), this.x), __smoothStepNum(__comp(e0, 1, 0), __comp(e1, 1, 1), this.y), __smoothStepNum(__comp(e0, 2, 0), __comp(e1, 2, 1), this.z), __smoothStepNum(__comp(e0, 3, 0), __comp(e1, 3, 1), this.w)); }
+  project(onto) { var o = new Vec4(__comp(onto, 0, 0), __comp(onto, 1, 0), __comp(onto, 2, 0), __comp(onto, 3, 0)); var d = o.lengthSqr(); if (d < EPS) return new Vec4(0, 0, 0, 0); return o.multiply(this.dot(o) / d); }
+  reflect(n) { var nn = new Vec4(__comp(n, 0, 0), __comp(n, 1, 0), __comp(n, 2, 0), __comp(n, 3, 0)); return this.subtract(nn.multiply(2 * this.dot(nn))); }
   toString() { return this.x.toFixed(6) + ', ' + this.y.toFixed(6) + ', ' + this.z.toFixed(6) + ', ' + this.w.toFixed(6); }
 }
 
@@ -245,6 +251,82 @@ class Mat4 {
   transpose() { var m = this.m, r = new Mat4(); for (var c = 0; c < 4; c++) for (var ro = 0; ro < 4; ro++) r.m[ro * 4 + c] = m[c * 4 + ro]; return r; }
   copy() { return new Mat4(this.m); }
   equals(o) { for (var i = 0; i < 16; i++) if (Math.abs(this.m[i] - o.m[i]) > EPS) return false; return true; }
+  static fromBasis(right, up, forward) {
+    return new Mat4([
+      __comp(right, 0, 1), __comp(right, 1, 0), __comp(right, 2, 0), 0,
+      __comp(up, 0, 0), __comp(up, 1, 1), __comp(up, 2, 0), 0,
+      __comp(forward, 0, 0), __comp(forward, 1, 0), __comp(forward, 2, 1), 0,
+      0, 0, 0, 1]);
+  }
+  static lookAt(eye, center, up) {
+    var e = new Vec3(__comp(eye, 0, 0), __comp(eye, 1, 0), __comp(eye, 2, 0));
+    var f = new Vec3(__comp(center, 0, 0), __comp(center, 1, 0), __comp(center, 2, 0)).subtract(e).normalize();
+    var u0 = new Vec3(__comp(up, 0, 0), __comp(up, 1, 0), __comp(up, 2, 0));
+    var sv = f.cross(u0).normalize();
+    var u = sv.cross(f);
+    return new Mat4([
+      sv.x, u.x, -f.x, 0,
+      sv.y, u.y, -f.y, 0,
+      sv.z, u.z, -f.z, 0,
+      -sv.dot(e), -u.dot(e), f.dot(e), 1]);
+  }
+  translate(v) { return this.multiply(Mat4.fromTranslation(v)); }
+  rotate(angleDeg, axis) { return this.multiply(Mat4.fromRotation(angleDeg, axis)); }
+  scale(v) { return this.multiply(Mat4.fromScale(v)); }
+  determinant() {
+    var m = this.m;
+    var b0 = m[0] * m[5] - m[1] * m[4], b1 = m[0] * m[6] - m[2] * m[4], b2 = m[0] * m[7] - m[3] * m[4];
+    var b3 = m[1] * m[6] - m[2] * m[5], b4 = m[1] * m[7] - m[3] * m[5], b5 = m[2] * m[7] - m[3] * m[6];
+    var b6 = m[8] * m[13] - m[9] * m[12], b7 = m[8] * m[14] - m[10] * m[12], b8 = m[8] * m[15] - m[11] * m[12];
+    var b9 = m[9] * m[14] - m[10] * m[13], b10 = m[9] * m[15] - m[11] * m[13], b11 = m[10] * m[15] - m[11] * m[14];
+    return b0 * b11 - b1 * b10 + b2 * b9 + b3 * b8 - b4 * b7 + b5 * b6;
+  }
+  inverse() {
+    var m = this.m;
+    var b0 = m[0] * m[5] - m[1] * m[4], b1 = m[0] * m[6] - m[2] * m[4], b2 = m[0] * m[7] - m[3] * m[4];
+    var b3 = m[1] * m[6] - m[2] * m[5], b4 = m[1] * m[7] - m[3] * m[5], b5 = m[2] * m[7] - m[3] * m[6];
+    var b6 = m[8] * m[13] - m[9] * m[12], b7 = m[8] * m[14] - m[10] * m[12], b8 = m[8] * m[15] - m[11] * m[12];
+    var b9 = m[9] * m[14] - m[10] * m[13], b10 = m[9] * m[15] - m[11] * m[13], b11 = m[10] * m[15] - m[11] * m[14];
+    var det = b0 * b11 - b1 * b10 + b2 * b9 + b3 * b8 - b4 * b7 + b5 * b6;
+    if (Math.abs(det) < EPS) return new Mat4();
+    var id = 1 / det;
+    return new Mat4([
+      (m[5] * b11 - m[6] * b10 + m[7] * b9) * id,
+      (m[2] * b10 - m[1] * b11 - m[3] * b9) * id,
+      (m[13] * b5 - m[14] * b4 + m[15] * b3) * id,
+      (m[10] * b4 - m[9] * b5 - m[11] * b3) * id,
+      (m[6] * b8 - m[4] * b11 - m[7] * b7) * id,
+      (m[0] * b11 - m[2] * b8 + m[3] * b7) * id,
+      (m[14] * b2 - m[12] * b5 - m[15] * b1) * id,
+      (m[8] * b5 - m[10] * b2 + m[11] * b1) * id,
+      (m[4] * b10 - m[5] * b8 + m[7] * b6) * id,
+      (m[1] * b8 - m[0] * b10 - m[3] * b6) * id,
+      (m[12] * b4 - m[13] * b2 + m[15] * b0) * id,
+      (m[9] * b2 - m[8] * b4 - m[11] * b0) * id,
+      (m[5] * b7 - m[4] * b9 - m[6] * b6) * id,
+      (m[0] * b9 - m[1] * b7 + m[2] * b6) * id,
+      (m[13] * b1 - m[12] * b3 - m[14] * b0) * id,
+      (m[8] * b3 - m[9] * b1 + m[10] * b0) * id]);
+  }
+  normalMatrix() { return Mat3.fromMat4(this.inverse().transpose()); }
+  extractEuler() {
+    // Inverts fromEuler's Rz·Ry·Rx composition. Columns normalized first so
+    // a scaled matrix still yields pure angles.
+    var m = this.m;
+    var sx = Math.hypot(m[0], m[1], m[2]) || 1, sy = Math.hypot(m[4], m[5], m[6]) || 1, sz = Math.hypot(m[8], m[9], m[10]) || 1;
+    var r00 = m[0] / sx, r10 = m[1] / sx, r20 = m[2] / sx;
+    var r21 = m[6] / sy, r22 = m[10] / sz;
+    var b = Math.asin(-__clampNum(r20, -1, 1));
+    var a, c;
+    if (Math.abs(r20) < 0.999999) { a = Math.atan2(r21, r22); c = Math.atan2(r10, r00); }
+    else { a = Math.atan2(-m[9] / sz, m[5] / sy); c = 0; }
+    return new Vec3(a * RAD2DEG, b * RAD2DEG, c * RAD2DEG);
+  }
+  decompose() {
+    var m = this.m;
+    var sx = Math.hypot(m[0], m[1], m[2]), sy = Math.hypot(m[4], m[5], m[6]), sz = Math.hypot(m[8], m[9], m[10]);
+    return { translation: new Vec3(m[12], m[13], m[14]), rotation: this.extractEuler(), scale: new Vec3(sx, sy, sz) };
+  }
   toString() { return 'mat4(' + this.m.join(', ') + ')'; }
 }
 
@@ -262,6 +344,33 @@ class Mat3 {
   }
   transformPoint(v) { var r = this.multiply(new Vec3(__comp(v, 0, 0), __comp(v, 1, 0), 1)); var w = r.z || 1; return new Vec2(r.x / w, r.y / w); }
   copy() { return new Mat3(this.m); }
+  static fromBasis(right, up) { return new Mat3([__comp(right, 0, 1), __comp(right, 1, 0), 0, __comp(up, 0, 0), __comp(up, 1, 1), 0, 0, 0, 1]); }
+  static compose(t, angleDeg, sc) { return Mat3.fromTranslation(t).multiply(Mat3.fromRotation(angleDeg)).multiply(Mat3.fromScale(sc)); }
+  translation(pos) { if (pos !== undefined) { this.m[6] = __comp(pos, 0, 0); this.m[7] = __comp(pos, 1, 0); return new Vec2(this.m[6], this.m[7]); } return new Vec2(this.m[6], this.m[7]); }
+  angle() { return Math.atan2(this.m[1], this.m[0]) * RAD2DEG; }
+  add(o) { var r = new Mat3(this.m); for (var i = 0; i < 9; i++) r.m[i] = this.m[i] + o.m[i]; return r; }
+  subtract(o) { var r = new Mat3(this.m); for (var i = 0; i < 9; i++) r.m[i] = this.m[i] - o.m[i]; return r; }
+  translate(v) { return this.multiply(Mat3.fromTranslation(v)); }
+  rotate(angleDeg) { return this.multiply(Mat3.fromRotation(angleDeg)); }
+  scale(v) { return this.multiply(Mat3.fromScale(v)); }
+  transformDirection(v) { var x = __comp(v, 0, 0), y = __comp(v, 1, 0), m = this.m; return new Vec2(m[0] * x + m[3] * y, m[1] * x + m[4] * y); }
+  transpose() { var m = this.m, r = new Mat3(); for (var c = 0; c < 3; c++) for (var ro = 0; ro < 3; ro++) r.m[ro * 3 + c] = m[c * 3 + ro]; return r; }
+  determinant() { var m = this.m; return m[0] * (m[4] * m[8] - m[5] * m[7]) - m[3] * (m[1] * m[8] - m[2] * m[7]) + m[6] * (m[1] * m[5] - m[2] * m[4]); }
+  inverse() {
+    var m = this.m, det = this.determinant();
+    if (Math.abs(det) < EPS) return new Mat3();
+    var id = 1 / det;
+    return new Mat3([
+      (m[4] * m[8] - m[5] * m[7]) * id, (m[2] * m[7] - m[1] * m[8]) * id, (m[1] * m[5] - m[2] * m[4]) * id,
+      (m[5] * m[6] - m[3] * m[8]) * id, (m[0] * m[8] - m[2] * m[6]) * id, (m[2] * m[3] - m[0] * m[5]) * id,
+      (m[3] * m[7] - m[4] * m[6]) * id, (m[1] * m[6] - m[0] * m[7]) * id, (m[0] * m[4] - m[1] * m[3]) * id]);
+  }
+  decompose() {
+    var m = this.m;
+    var sx = Math.hypot(m[0], m[1]), sy = Math.hypot(m[3], m[4]);
+    return { translation: new Vec2(m[6], m[7]), rotation: Math.atan2(m[1], m[0]) * RAD2DEG, scale: new Vec2(sx, sy) };
+  }
+  equals(o) { for (var i = 0; i < 9; i++) if (Math.abs(this.m[i] - o.m[i]) > EPS) return false; return true; }
   toString() { return 'mat3(' + this.m.join(', ') + ')'; }
 }
 

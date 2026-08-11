@@ -547,6 +547,55 @@ fn apply_general_settings_delivers_language_at_load() {
     }
 }
 
+// ---- math surface completeness (d.ts Vec4/Mat3/Mat4) -----------------------
+
+/// One script exercising the added math; each check appends pass/fail.
+#[test]
+fn math_surface_matches_hand_computed_values() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_1",
+        r#"
+        function close(a, b) { return Math.abs(a - b) < 1e-4; }
+        export function update(v) {
+            var bad = [];
+            // Vec4 reflect: (1,0,0,0) off normal (0,1,0,0) is itself.
+            var r = new Vec4(1, 2, 0, 0).reflect(new Vec4(0, 1, 0, 0));
+            if (!(close(r.x, 1) && close(r.y, -2))) bad.push('v4reflect');
+            // Mat3 inverse: M * M^-1 = I.
+            var m3 = Mat3.compose(new Vec2(3, 4), 30, new Vec2(2, 2));
+            var i3 = m3.multiply(m3.inverse());
+            if (!i3.equals(Mat3.identity())) bad.push('m3inverse');
+            // Mat3 decompose round-trips.
+            var d3 = m3.decompose();
+            if (!(close(d3.translation.x, 3) && close(d3.rotation, 30) && close(d3.scale.x, 2))) bad.push('m3decompose');
+            // Mat4 inverse: M * M^-1 = I.
+            var m4 = Mat4.compose(new Vec3(1, 2, 3), new Vec3(10, 20, 30), new Vec3(2, 3, 4));
+            if (!m4.multiply(m4.inverse()).equals(Mat4.identity())) bad.push('m4inverse');
+            // Mat4 determinant of a pure scale = product of scales.
+            if (!close(Mat4.fromScale(new Vec3(2, 3, 4)).determinant(), 24)) bad.push('m4det');
+            // extractEuler inverts fromEuler.
+            var eu = Mat4.fromEuler(10, 20, 30).extractEuler();
+            if (!(close(eu.x, 10) && close(eu.y, 20) && close(eu.z, 30))) bad.push('m4euler');
+            // lookAt from origin toward -Z with +Y up is identity.
+            if (!Mat4.lookAt(new Vec3(0, 0, 0), new Vec3(0, 0, -1), new Vec3(0, 1, 0)).equals(Mat4.identity())) bad.push('m4lookat');
+            return bad.length ? bad.join(',') : 'ok';
+        }
+        "#,
+        Some(1),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("ok".into()),
+        "errors: {:?}",
+        out.errors
+    );
+}
+
 // ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]
