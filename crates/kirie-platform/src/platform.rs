@@ -525,6 +525,21 @@ impl PlatformState {
                 self.min_frame = fps
                     .filter(|f| *f > 0)
                     .map(|f| std::time::Duration::from_secs_f64(1.0 / f64::from(f)));
+                // Apply immediately rather than at the next scheduled wake:
+                // with only the assignment, a change converges with a latency
+                // of up to one OLD interval (`--fps 1` → `set fps 60` took a
+                // second). `draw` re-arms its own pacing from the new
+                // interval — too-early calls just re-arm the timer for the
+                // remainder, so this converges regardless of what was armed.
+                let surfaces: Vec<_> = self
+                    .outputs
+                    .iter()
+                    .filter(|c| c.configured && c.renderer.is_some() && !c.paused)
+                    .map(|c| c.wl_surface().clone())
+                    .collect();
+                for surface in surfaces {
+                    self.draw(&surface);
+                }
             }
             RenderCommand::SetSpeed(speed) => {
                 self.playback_speed = if speed > 0.0 { speed } else { 1.0 };
