@@ -640,8 +640,12 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         )
     });
 
+    // §V7: platform writes this while any output is fullscreen-paused; the
+    // baker's pause gate below reads it.
+    let fullscreen_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let present = kirie_platform::PresentOptions {
         screen_roots,
+        activity_paused: Some(fullscreen_paused.clone()),
         fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
         playback_speed: args.playback_speed,
         // Fullscreen pause is on by default in the reference engine, so the
@@ -658,9 +662,17 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // never-seen wallpaper loads like a warm one. Root = the current
     // background's workshop directory parent; skipped for non-workshop paths
     // or with KIRIE_NO_PREBAKE=1. The handle lives for the engine's lifetime.
+    // §V7 pause gate: fullscreen activity (platform-written) OR battery
+    // (power watcher via the power-save flag) suspends the idle baker.
     let prebaker = if std::env::var_os("KIRIE_NO_PREBAKE").is_none() {
+        let fullscreen = fullscreen_paused.clone();
+        let power = power_save_flag();
+        let pause: kirie_bake::PauseFn = std::sync::Arc::new(move || {
+            fullscreen.load(std::sync::atomic::Ordering::Relaxed)
+                || power.load(std::sync::atomic::Ordering::Relaxed)
+        });
         prebake_root.as_deref().and_then(|root| {
-            kirie_render::start_background_prebake(root, resolve::we_assets_dir().as_deref())
+            kirie_render::start_background_prebake(root, resolve::we_assets_dir().as_deref(), Some(pause))
         })
     } else {
         None

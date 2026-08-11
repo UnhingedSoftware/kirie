@@ -99,6 +99,8 @@ struct Inner {
     content_fn: ContentFn,
     should_pause: PauseFn,
     paused: AtomicBool,
+    /// Set at shutdown so paused workers stop their slow retry loops.
+    shutdown: AtomicBool,
     cap_bytes: u64,
 }
 
@@ -156,6 +158,7 @@ impl BackgroundBaker {
             content_fn: config.content_fn,
             should_pause: config.should_pause,
             paused: AtomicBool::new(false),
+            shutdown: AtomicBool::new(false),
             cap_bytes: config.cap_bytes,
         });
         let pool = rayon::ThreadPoolBuilder::new()
@@ -242,6 +245,9 @@ impl BackgroundBaker {
     /// coordinator exits. Called automatically on drop.
     pub fn shutdown(&mut self) {
         self.watchers.clear();
+        self.inner
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = self.tx.send(Msg::Stop);
         if let Some(h) = self.coordinator.take() {
             let _ = h.join();
@@ -265,15 +271,26 @@ fn coordinator_loop(inner: &Arc<Inner>, pool: &rayon::ThreadPool, rx: &Receiver<
             Msg::Stop => break,
         };
         let job = Arc::clone(inner);
-        pool.spawn(move || match job.bake_item(&item) {
-            Ok(BakeOutcome::Paused) => {
-                // Retry later without a busy loop.
-                std::thread::sleep(std::time::Duration::from_millis(250));
-                // Best-effort: if still paused it will re-pause and re-sleep.
-                let _ = job.bake_item(&item);
+        pool.spawn(move || {
+            // While paused (fullscreen app, battery), keep the item alive
+            // with a slow retry instead of dropping it after one attempt —
+            // a long gaming session must not silently lose the queue
+            // (SPEC.md §V7). The worker stops looping on shutdown.
+            loop {
+                match job.bake_item(&item) {
+                    Ok(BakeOutcome::Paused) => {
+                        if job.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(5));
+                    }
+                    Ok(_) => return,
+                    Err(e) => {
+                        tracing::warn!(item = %item.display(), error = %e, "background bake failed");
+                        return;
+                    }
+                }
             }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(item = %item.display(), error = %e, "background bake failed"),
         });
     }
 }

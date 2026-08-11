@@ -93,6 +93,10 @@ pub struct PresentOptions {
     /// The delay exists so alt-tabbing in and out of a game does not thrash
     /// teardown/rebuild: only a wallpaper that stays hidden pays it back.
     pub release_hidden_after: Option<Duration>,
+    /// Written by the platform: `true` while ANY output is fullscreen-paused.
+    /// The engine's background baker reads it as a pause gate (SPEC §V7) —
+    /// no cache-grinding while a game has the machine.
+    pub activity_paused: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for PresentOptions {
@@ -111,6 +115,7 @@ impl Default for PresentOptions {
             // rebuild on resume), so it should be the user's choice, not a
             // surprise.
             release_hidden_after: None,
+            activity_paused: None,
         }
     }
 }

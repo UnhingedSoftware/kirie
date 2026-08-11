@@ -186,6 +186,8 @@ struct PlatformState {
     /// reclaim the memory (`PresentOptions::release_hidden_after`). `None`
     /// keeps hidden wallpapers resident.
     release_hidden_after: Option<Duration>,
+    /// See `PresentOptions::activity_paused`.
+    activity_paused: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A [`PAUSE_WATCHDOG_INTERVAL`] timer is scheduled. Guards against
     /// stacking one watchdog per pause transition; cleared by the watchdog
     /// itself when it finds nothing paused and drops.
@@ -308,6 +310,7 @@ impl WaylandPlatform {
                 namespace: options.layer_namespace,
                 screen_roots: options.screen_roots,
                 release_hidden_after: options.release_hidden_after,
+                activity_paused: options.activity_paused.clone(),
                 min_frame: options
                     .fps
                     .filter(|f| *f > 0)
@@ -788,6 +791,12 @@ impl PlatformState {
 
         // Pause transitions change what the pointer poller has to serve.
         self.update_pointer_demand();
+        // Publish "something is fullscreen-paused" for the engine's baker
+        // gate (SPEC §V7).
+        if let Some(flag) = &self.activity_paused {
+            let any = self.outputs.iter().any(|c| c.paused);
+            flag.store(any, std::sync::atomic::Ordering::Relaxed);
+        }
         self.ensure_pause_watchdog();
     }
 

@@ -283,6 +283,7 @@ pub fn load_workshop_scene(
 pub fn start_background_prebake(
     workshop_root: &Path,
     assets_dir: Option<&Path>,
+    should_pause: Option<kirie_bake::PauseFn>,
 ) -> Option<kirie_bake::BackgroundBaker> {
     let cache = kirie_bake::Cache::open_default().ok()?;
     let assets_a: Option<std::path::PathBuf> = assets_dir.map(std::path::Path::to_path_buf);
@@ -340,8 +341,13 @@ pub fn start_background_prebake(
         Ok(content)
     });
 
-    let mut baker =
-        kirie_bake::BackgroundBaker::start(kirie_bake::BakerConfig::new(cache, source_fn, content_fn));
+    let mut config = kirie_bake::BakerConfig::new(cache, source_fn, content_fn);
+    if let Some(pause) = should_pause {
+        // SPEC.md §V7: the idle baker yields to foreground activity — a
+        // fullscreen app or a battery-powered session suspends the grind.
+        config.should_pause = pause;
+    }
+    let mut baker = kirie_bake::BackgroundBaker::start(config);
     let mut queued = 0usize;
     if let Ok(entries) = std::fs::read_dir(workshop_root) {
         for entry in entries.flatten() {
