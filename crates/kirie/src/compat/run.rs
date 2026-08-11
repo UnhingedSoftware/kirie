@@ -170,11 +170,24 @@ fn wants_media(spec: &RunSpec) -> bool {
 /// not the system-audio reactive input, so it does not gate capture here.
 #[must_use]
 pub fn audio_config(args: &CompatArgs) -> AudioConfig {
-    if args.no_audio_processing {
+    let mut config = if args.no_audio_processing {
         AudioConfig::disabled()
     } else {
         AudioConfig::with_device(args.audio_device.clone())
-    }
+    };
+    // On battery the FFT halves its publish rate (compat::power).
+    config.power_save = Some(power_save_flag());
+    config
+}
+
+/// The process-wide on-battery flag (written by the power watcher, read by
+/// the audio FFT and web feed cadences). A `OnceLock` global for the same
+/// reason as the render-scale bits: it must reach lazily-built renderers
+/// without threading through every build path.
+pub(crate) fn power_save_flag() -> Arc<std::sync::atomic::AtomicBool> {
+    static FLAG: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> = std::sync::OnceLock::new();
+    FLAG.get_or_init(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
+        .clone()
 }
 
 /// The system-audio capture and the MPRIS now-playing source, each started the
@@ -648,7 +661,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     // On-battery throttle state (see compat::power): the watcher writes,
     // feed/audio cadences read. Battery fps target is shared so the
     // `set batteryfps` socket key can retune it live.
-    let power_save = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let power_save = power_save_flag();
     let normal_fps = u32::try_from(args.fps).ok().filter(|f| *f > 0);
     let battery_fps = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(10));
     let power_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -1208,6 +1221,7 @@ fn build_web(
             // registered and never fired, which is why an audio-reactive page
             // sat still and a media page sat on "Loading…". The renderer polls
             // it and pushes only what changed (kirie_web::feed).
+            renderer.set_power_save(power_save_flag());
             if let Some(feed) = EngineWebFeed::new(audio, media) {
                 renderer.set_feed(Box::new(feed));
             } else {

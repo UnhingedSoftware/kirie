@@ -55,6 +55,8 @@ pub(crate) struct WorkerParams {
     pub level: f32,
     pub gate: f32,
     pub tick: Duration,
+    /// See [`crate::AudioConfig::power_save`].
+    pub power_save: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 /// Run the FFT worker until `shutdown` is set. Publishes a fresh snapshot into
@@ -119,7 +121,17 @@ pub(crate) fn run(
         smoother.tick();
         shared.store(Arc::new(AudioSpectrum::from(&smoother)));
 
-        std::thread::sleep(params.tick);
+        // Power save (on battery): half the publish rate, double the sleep.
+        let tick = if params
+            .power_save
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            params.tick * 2
+        } else {
+            params.tick
+        };
+        std::thread::sleep(tick);
     }
 }
 

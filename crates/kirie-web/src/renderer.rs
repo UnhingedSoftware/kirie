@@ -177,6 +177,12 @@ impl WebRenderer {
         self.feed = Some(feed);
     }
 
+    /// Wire the engine's on-battery flag into the feed pump (halves the
+    /// audio/media push cadence while set).
+    pub fn set_power_save(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.pump.set_power_save(flag);
+    }
+
     /// Deliver whatever the feed has that the page has not been told yet.
     ///
     /// Called from both drive paths; the pump itself decides what is due, so

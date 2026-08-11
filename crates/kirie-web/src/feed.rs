@@ -297,12 +297,34 @@ pub struct FeedPump {
     audio_at: Option<Instant>,
     /// When the media snapshot was last examined.
     media_at: Option<Instant>,
+    /// On-battery flag (the engine's power watcher): while set, both
+    /// intervals double — the listener still fires (pages use it as a
+    /// clock), just at half the rate.
+    power_save: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// Last values delivered per channel; `None` = the page has been told
     /// nothing, so the next pump sends every channel.
     sent: Option<SentMedia>,
 }
 
 impl FeedPump {
+    /// Wire the engine's power-save flag (see the field doc).
+    pub fn set_power_save(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
+        self.power_save = Some(flag);
+    }
+
+    /// The current interval scale: 2 in power-save, 1 otherwise.
+    fn scale(&self) -> u32 {
+        if self
+            .power_save
+            .as_ref()
+            .is_some_and(|f| f.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            2
+        } else {
+            1
+        }
+    }
+
     /// A pump that has delivered nothing yet.
     #[must_use]
     pub fn new() -> Self {
@@ -322,7 +344,7 @@ impl FeedPump {
     fn pump_audio(&mut self, feed: &dyn WebFeed, backend: &mut dyn WebBackend, now: Instant) {
         if self
             .audio_at
-            .is_some_and(|at| now.duration_since(at) < AUDIO_INTERVAL)
+            .is_some_and(|at| now.duration_since(at) < AUDIO_INTERVAL * self.scale())
         {
             return;
         }
@@ -353,7 +375,7 @@ impl FeedPump {
     fn pump_media(&mut self, feed: &dyn WebFeed, backend: &mut dyn WebBackend, now: Instant) {
         if self
             .media_at
-            .is_some_and(|at| now.duration_since(at) < MEDIA_INTERVAL)
+            .is_some_and(|at| now.duration_since(at) < MEDIA_INTERVAL * self.scale())
         {
             return;
         }

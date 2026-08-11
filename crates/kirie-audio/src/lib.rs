@@ -127,6 +127,10 @@ pub struct AudioConfig {
     /// Smoother/publish cadence. Defaults to 16 ms (~60 Hz) to mirror the C++
     /// per-render-frame `update()` at which `move_towards` slews.
     pub tick: Duration,
+    /// On-battery flag (engine's power watcher): while set, the publish
+    /// cadence doubles — half the wakes, still ~30 Hz, imperceptible on a
+    /// smoothed spectrum. `None` = never power-save.
+    pub power_save: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Default for AudioConfig {
@@ -136,6 +140,7 @@ impl Default for AudioConfig {
             device: None,
             gate: None,
             tick: Duration::from_millis(16),
+            power_save: None,
         }
     }
 }
@@ -257,6 +262,7 @@ impl AudioCapture {
             .unwrap_or(0.12)
             .min(64.0);
         let tick = config.tick;
+        let power_save = config.power_save.clone();
 
         // SPSC ring: producer → capture thread, consumer → worker thread (V3).
         let (prod, cons) = HeapRb::<u8>::new(RING_CAPACITY).split();
@@ -268,7 +274,17 @@ impl AudioCapture {
                 std::thread::Builder::new()
                     .name("kirie-audio-fft".into())
                     .spawn(move || {
-                        worker::run(cons, shared, shutdown, worker::WorkerParams { level, gate, tick });
+                        worker::run(
+                            cons,
+                            shared,
+                            shutdown,
+                            worker::WorkerParams {
+                                level,
+                                gate,
+                                tick,
+                                power_save,
+                            },
+                        );
                     })
                     .expect("spawn fft worker"),
             )
