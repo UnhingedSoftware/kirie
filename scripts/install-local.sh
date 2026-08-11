@@ -7,7 +7,12 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-cargo build --release -p kirie -p kirie-web --features kirie/web-webview,kirie/vaapi
+cargo build --release -p kirie --features web-webview,vaapi
+# Explicit second invocation: `-p kirie-web` under kirie's feature does NOT
+# rebuild kirie-web's own feature-gated bin targets (kirie-webviewhost) —
+# the host binary silently stays stale (bit us for two days of webview
+# "fixes" that never ran).
+cargo build --release -p kirie-web --features webview
 
 if ! ./target/release/kirie check 2>/dev/null | grep -q "web backend (webview)"; then
     echo "refusing to install: built kirie has no web backend" >&2
