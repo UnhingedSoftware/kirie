@@ -68,7 +68,7 @@ rquickjs = "0.12"
 # resampling). Dropping avdevice/avfilter shrinks the link and, crucially, lets
 # the `portable` static build avoid ffmpeg's external device libs (libavc1394…).
 # The static, from-source ffmpeg is opt-in via kirie's `portable` feature.
-ffmpeg-next = { version = "8", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
+ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 notify = "8"
 zbus = "5"
 x11rb = "0.13"
