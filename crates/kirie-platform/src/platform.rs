@@ -143,10 +143,6 @@ struct PlatformState {
     /// (`PresentOptions::playback_speed`; live-updated by
     /// [`RenderCommand::SetSpeed`]).
     playback_speed: f32,
-    /// Set when the compositor closed the last layer surface — treated as
-    /// abnormal, mirroring WaylandOpenGLDriver.cpp:234-274
-    /// (docs/render-architecture.md §2.3).
-    all_surfaces_closed: bool,
     /// Sender for the render thread's own command channel — build workers send
     /// `Install` back through it.
     cmd_tx: CmdSender<RenderCommand>,
@@ -320,7 +316,6 @@ impl WaylandPlatform {
                 } else {
                     1.0
                 },
-                all_surfaces_closed: false,
                 cmd_tx,
                 preloaded: HashMap::new(),
                 pointer: crate::pointer::PointerPoll::start(),
@@ -370,10 +365,6 @@ impl WaylandPlatform {
         let deadline = duration.map(|d| Instant::now() + d);
 
         loop {
-            if self.state.all_surfaces_closed {
-                return Err(PlatformError::AllSurfacesClosed);
-            }
-
             let timeout = match deadline {
                 Some(deadline) => {
                     let now = Instant::now();
@@ -1444,6 +1435,7 @@ impl OutputHandler for PlatformState {
         self.outputs.retain(|ctx| ctx.wl_output != output);
         if self.outputs.len() != before {
             tracing::info!("output removed; destroyed its layer surface");
+            self.update_pointer_demand();
         }
     }
 }
@@ -1453,11 +1445,14 @@ impl LayerShellHandler for PlatformState {
         self.outputs.retain(|ctx| &ctx.layer != layer);
         tracing::warn!("compositor closed a layer surface");
         if self.outputs.is_empty() {
-            // Abnormal: supervisor should relaunch
-            // (docs/render-architecture.md §2.3,
-            // WaylandOpenGLDriver.cpp:234-274).
-            self.all_surfaces_closed = true;
+            // Every output gone (monitors off / unplugged). Unlike the C++
+            // reference, which exits for a supervisor relaunch
+            // (WaylandOpenGLDriver.cpp:234-274), we already handle wl_output
+            // hotplug: idle here and re-present when an output returns.
+            // Compositor shutdown still exits via the connection error path.
+            tracing::info!("all outputs gone; idling until an output returns");
         }
+        self.update_pointer_demand();
     }
 
     fn configure(

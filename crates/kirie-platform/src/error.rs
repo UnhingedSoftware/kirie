@@ -63,13 +63,6 @@ pub enum PlatformError {
     #[error("failed to register wayland source in the event loop: {0}")]
     EventLoopRegister(String),
 
-    /// The compositor closed every layer surface. The C++ reference treats
-    /// losing the last layer surface as an abnormal exit so a supervisor can
-    /// relaunch (docs/render-architecture.md §2.3,
-    /// WaylandOpenGLDriver.cpp:234-274).
-    #[error("all layer surfaces were closed by the compositor")]
-    AllSurfacesClosed,
-
     // ── X11 backend (docs/render-architecture.md §2.2) ──────────────────
     /// Connecting to the X server named by `$DISPLAY` failed.
     #[error("failed to connect to the X display: {0}")]
