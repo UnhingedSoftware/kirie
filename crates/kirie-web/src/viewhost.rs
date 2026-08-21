@@ -62,17 +62,38 @@ use crate::feed::{MediaChannel, audio_line, media_line};
 /// the engine. Releasing without a stand-in is exactly today's behaviour.
 const SNAP_TIMEOUT: Duration = Duration::from_millis(1500);
 
-/// Locate the `kirie-webviewhost` binary: `KIRIE_WEBVIEWHOST` override, else
-/// beside the current executable.
-fn host_path() -> Result<std::path::PathBuf, WebError> {
+/// The argument that makes a `kirie` built with the host embedded run as the
+/// host instead of the engine. Underscored so it cannot collide with the
+/// reference CLI, which this binary otherwise mirrors exactly.
+pub const HOST_ARG: &str = "__webviewhost";
+
+/// How to start the host process.
+enum HostCommand {
+    /// Re-execute this binary as the host (`web-webview`: one file to ship).
+    SelfExec(std::path::PathBuf),
+    /// Spawn a separate `kirie-webviewhost` binary (`web-webview-client`, or
+    /// the `KIRIE_WEBVIEWHOST` override).
+    Sibling(std::path::PathBuf),
+}
+
+/// Decide how to start the host.
+///
+/// An explicit `KIRIE_WEBVIEWHOST` always wins — it is the escape hatch for a
+/// host built elsewhere. Otherwise a binary with the host compiled in hosts
+/// itself, which also means a stale `kirie-webviewhost` left in `~/.local/bin`
+/// by an older install can no longer shadow the engine it sits beside.
+fn host_command() -> Result<HostCommand, WebError> {
     if let Some(p) = std::env::var_os("KIRIE_WEBVIEWHOST") {
-        return Ok(std::path::PathBuf::from(p));
+        return Ok(HostCommand::Sibling(std::path::PathBuf::from(p)));
     }
     let exe = std::env::current_exe().map_err(|_| WebError::Init("current_exe".into()))?;
+    if cfg!(feature = "webview") {
+        return Ok(HostCommand::SelfExec(exe));
+    }
     let dir = exe.parent().ok_or_else(|| WebError::Init("exe dir".into()))?;
     let candidate = dir.join("kirie-webviewhost");
     if candidate.is_file() {
-        Ok(candidate)
+        Ok(HostCommand::Sibling(candidate))
     } else {
         Err(WebError::Init("kirie-webviewhost binary not found".into()))
     }
@@ -85,8 +106,18 @@ fn host_path() -> Result<std::path::PathBuf, WebError> {
 /// handshake: the reader thread stops the moment nobody is listening, and the
 /// `snap` reply has to arrive through it later.
 fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin, Receiver<String>), WebError> {
-    let host = host_path()?;
-    let mut child = Command::new(&host)
+    let (host, mut child) = match host_command()? {
+        HostCommand::SelfExec(exe) => {
+            let mut cmd = Command::new(&exe);
+            cmd.arg(HOST_ARG);
+            (exe, cmd)
+        }
+        HostCommand::Sibling(path) => {
+            let cmd = Command::new(&path);
+            (path, cmd)
+        }
+    };
+    let mut child = child
         .arg("--url")
         .arg(url)
         .arg("--width")

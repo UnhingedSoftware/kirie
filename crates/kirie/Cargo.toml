@@ -23,13 +23,19 @@ portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
 # wgpu presentation layer (a `kirie_platform::Renderer` blitting CEF's OSR
 # frames), so it also powers `--screenshot`.
 web-cef = ["dep:kirie-web", "kirie-web/host"]
-# Webview (system webkit) web wallpapers via the out-of-process
-# `kirie-webviewhost` binary, which owns webkit + a gtk-layer-shell window on
-# the compositor's background layer. The ENGINE side is only the process
-# client (`kirie-web/webview-client`) — no gtk/webkit linkage here; the host
-# binary (built from kirie-web with `--features webview`) carries those and
-# must ship beside the engine executable.
-web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
+# Webview (system webkit) web wallpapers. webkit has no off-screen path, so a
+# separate PROCESS owns webkit and a gtk-layer-shell window on the
+# compositor's background layer; the engine drives it over a pipe.
+#
+# That process is this same binary re-executed as `kirie __webviewhost`, so an
+# install is one file. The cost is that gtk + gtk-layer-shell are linked into
+# the engine (webkit itself is still `dlopen`ed on demand): ~70 ms of extra
+# startup and ~12 MB of RSS per process, paid even by scene wallpapers.
+#
+# `web-webview-client` is the older split: engine with no gtk linkage at all,
+# spawning a sibling `kirie-webviewhost` binary that must ship beside it.
+web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
+web-webview-client = ["dep:kirie-web", "kirie-web/webview-client"]
 # VAAPI hardware video decode in kirie-video. Runtime-safe to enable: when no
 # VAAPI device/driver exists, playback degrades to the usual CPU decode path.
 vaapi = ["kirie-video/vaapi"]

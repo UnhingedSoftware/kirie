@@ -79,6 +79,7 @@
 //! defends against them (SPEC V9 concerns malformed *wallpaper* input).
 
 mod backend;
+pub mod host;
 mod webkit_sys;
 
 pub use backend::WebviewBackend;

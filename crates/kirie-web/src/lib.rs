@@ -48,8 +48,8 @@ pub mod hosted;
 /// webkit2gtk has no off-screen/pixel-readback path (upstream won't-fix) and
 /// its objects are `!Send` (GTK main-thread-bound), so this backend can never
 /// be the composited, frame-publishing [`WebBackend`] — see [`webview`] for
-/// the evidence (wry 0.55.1 API survey). Instead it renders **natively**: the
-/// out-of-process `kirie-webviewhost` binary owns a gtk-layer-shell window on
+/// the evidence (wry 0.55.1 API survey). Instead it renders **natively**: a
+/// separate host process ([`webview::host`]) owns a gtk-layer-shell window on
 /// the compositor's background layer and webkit paints straight into it. The
 /// engine talks to that process through [`viewhost`]. webkit is reached by
 /// `dlopen` rather than by linking, so one binary works against both
@@ -58,10 +58,11 @@ pub mod hosted;
 #[cfg(feature = "webview")]
 pub mod webview;
 
-/// Out-of-process webview host client (feature `webview-client`): spawns
-/// `kirie-webviewhost` (which owns webkit + a background-layer window) and
-/// drives it over stdin. No browser or gtk linkage in this crate feature —
-/// the engine stays webkit-free.
+/// Out-of-process webview host client (feature `webview-client`): starts the
+/// host (which owns webkit + a background-layer window) and drives it over
+/// stdin. This feature alone links no browser or gtk; an engine that also
+/// enables `webview` hosts itself by re-executing, so it ships as one file,
+/// while `webview-client` on its own spawns a sibling `kirie-webviewhost`.
 #[cfg(feature = "webview-client")]
 pub mod viewhost;
 

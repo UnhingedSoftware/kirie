@@ -7,12 +7,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# One binary: the webview host is compiled into the engine and reached by
+# re-executing it (`kirie __webviewhost`), which also retires the stale-sibling
+# footgun — a `kirie-webviewhost` left in ~/.local/bin by an older install used
+# to shadow every webview fix until someone noticed it was two days old.
 cargo build --release -p kirie --features web-webview,vaapi
-# Explicit second invocation: `-p kirie-web` under kirie's feature does NOT
-# rebuild kirie-web's own feature-gated bin targets (kirie-webviewhost) —
-# the host binary silently stays stale (bit us for two days of webview
-# "fixes" that never ran).
-cargo build --release -p kirie-web --features webview
 
 if ! ./target/release/kirie check 2>/dev/null | grep -q "web backend (webview)"; then
     echo "refusing to install: built kirie has no web backend" >&2
@@ -20,7 +19,9 @@ if ! ./target/release/kirie check 2>/dev/null | grep -q "web backend (webview)";
 fi
 
 install -m 755 target/release/kirie "$HOME/.local/bin/kirie"
-install -m 755 target/release/kirie-webviewhost "$HOME/.local/bin/kirie-webviewhost"
+# An older split install leaves a sibling host that is now dead weight; the
+# engine ignores it, but keeping it around invites confusion.
+rm -f "$HOME/.local/bin/kirie-webviewhost"
 
 restart="$HOME/.config/hypr/wallpaper-daemon/wallpaperengine-restart.sh"
 [ -x "$restart" ] && "$restart"

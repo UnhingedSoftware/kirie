@@ -189,34 +189,26 @@ fn check_web_backends(r: &mut Report) {
     }
     #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
     {
-        if beside("kirie-webviewhost") {
-            // The host binary shipping is only half of it: it renders through
-            // the system's WebKitGTK, which many distros do not install by
-            // default and which ships under several parallel ABIs. Without
-            // this the failure surfaces much later as an opaque "webviewhost
-            // died during startup".
-            match webkit_runtime() {
-                Some(lib) => r.line(
-                    &Verdict::Ok,
+        // The host is this binary, re-executed (`kirie __webviewhost`), unless
+        // an override or an older split install points elsewhere. What it
+        // still needs from the system is WebKitGTK, which many distros do not
+        // install by default and which ships under several parallel ABIs —
+        // without this check that failure surfaces much later as an opaque
+        // "webviewhost died during startup".
+        let host = match std::env::var_os("KIRIE_WEBVIEWHOST") {
+            Some(path) => format!("host {}", std::path::Path::new(&path).display()),
+            None => "host built in".to_owned(),
+        };
+        match webkit_runtime() {
+            Some(lib) => r.line(&Verdict::Ok, "web backend (webview)", &format!("{host}, {lib}")),
+            None => {
+                r.line(
+                    &Verdict::Warn,
                     "web backend (webview)",
-                    &format!("kirie-webviewhost present, {lib}"),
-                ),
-                None => {
-                    r.line(
-                        &Verdict::Warn,
-                        "web backend (webview)",
-                        "kirie-webviewhost present, but no WebKitGTK runtime found",
-                    );
-                    r.hint(&webkit_install_hint());
-                }
+                    &format!("{host}, but no WebKitGTK runtime found"),
+                );
+                r.hint(&webkit_install_hint());
             }
-        } else {
-            r.line(
-                &Verdict::Warn,
-                "web backend (webview)",
-                "kirie-webviewhost NOT beside the engine",
-            );
-            r.hint("web wallpapers need kirie-webviewhost next to the kirie binary (or KIRIE_WEBVIEWHOST).");
         }
     }
     #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
