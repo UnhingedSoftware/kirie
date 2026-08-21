@@ -71,15 +71,11 @@ pub struct PlaylistDefinition {
     pub settings: PlaylistSettings,
 }
 
-/// The Steam `steamapps/common` roots probed for the `wallpaper_engine` install
-/// that holds `config.json`, in the reference's order
-/// (Steam/FileSystem/FileSystem.cpp:9-14 `appDirectoryPaths`).
-const APP_DIRECTORY_ROOTS: [&str; 4] = [
-    ".steam/steam/steamapps/common",
-    ".local/share/Steam/steamapps/common",
-    ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common",
-    "snap/steam/common/.local/share/Steam/steamapps/common",
-];
+/// Where the `wallpaper_engine` install holding `config.json` sits inside a
+/// Steam library. The reference probes `$HOME` only
+/// (Steam/FileSystem/FileSystem.cpp:9-14 `appDirectoryPaths`); we search every
+/// library, so an install on another disk is found too.
+const APP_DIRECTORY_RELATIVE: &str = "common/wallpaper_engine";
 
 /// A doubled fatal (doc §4.7) — playlist config errors are `sLog.exception`s
 /// thrown inside the argparse action, printed once bare and once with the
@@ -96,21 +92,11 @@ fn fatal(message: impl Into<String>) -> ParseError {
 /// first existing `<steam root>/wallpaper_engine` directory wins. No install →
 /// fatal, same text as the reference.
 fn config_file_path() -> Result<PathBuf, ParseError> {
-    let Some(home) = std::env::var_os("HOME") else {
-        return Err(fatal(
-            "Cannot locate wallpaper engine installation to read config.json",
-        ));
-    };
-    let home = PathBuf::from(home);
-    for root in APP_DIRECTORY_ROOTS {
-        let dir = home.join(root).join("wallpaper_engine");
-        if dir.is_dir() {
-            return Ok(dir.join("config.json"));
-        }
-    }
-    Err(fatal(
-        "Cannot locate wallpaper engine installation to read config.json",
-    ))
+    crate::compat::steam::steamapps_dirs(APP_DIRECTORY_RELATIVE)
+        .into_iter()
+        .next()
+        .map(|dir| dir.join("config.json"))
+        .ok_or_else(|| fatal("Cannot locate wallpaper engine installation to read config.json"))
 }
 
 /// Load every playlist from the installed Wallpaper Engine's `config.json`

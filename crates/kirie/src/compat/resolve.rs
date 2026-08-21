@@ -14,15 +14,12 @@ use std::path::{Path, PathBuf};
 use kirie_formats::project::{Project, WallpaperType};
 
 use crate::compat::args::{ParseError, WORKSHOP_APP_ID};
+use crate::compat::steam;
 
-/// The four Steam workshop roots probed for a bare id, relative to `$HOME`
-/// (doc §3.4, Steam/FileSystem/FileSystem.cpp:16-53), in priority order.
-const STEAM_WORKSHOP_ROOTS: [&str; 4] = [
-    ".local/share/Steam/steamapps/workshop/content",
-    ".steam/steam/steamapps/workshop/content",
-    ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/workshop/content",
-    "snap/steam/common/.local/share/Steam/steamapps/workshop/content",
-];
+/// Workshop content lives at this path inside every Steam library
+/// ([`steam::libraries`] finds them, including libraries on other disks —
+/// which the reference, probing `$HOME` only, misses).
+const WORKSHOP_RELATIVE: &str = "workshop/content";
 
 /// Every Wallpaper Engine workshop content directory that exists on this
 /// machine, in the same priority order [`translate_background`] probes.
@@ -33,14 +30,7 @@ const STEAM_WORKSHOP_ROOTS: [&str; 4] = [
 /// folders by reading them.
 #[must_use]
 pub fn workshop_dirs() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Vec::new();
-    };
-    STEAM_WORKSHOP_ROOTS
-        .iter()
-        .map(|root| home.join(root).join(WORKSHOP_APP_ID))
-        .filter(|dir| dir.is_dir())
-        .collect()
+    steam::steamapps_dirs(Path::new(WORKSHOP_RELATIVE).join(WORKSHOP_APP_ID))
 }
 
 /// The C++ `translateBackground` (doc §3.4).
@@ -54,11 +44,13 @@ pub fn translate_background(value: &str) -> Result<String, ParseError> {
     if value.contains('/') {
         return Ok(value.to_owned());
     }
-    let home = std::env::var_os("HOME")
-        .ok_or_else(|| fatal("Cannot find home directory, please set the HOME environment variable"))?;
-    let home = PathBuf::from(home);
-    for root in STEAM_WORKSHOP_ROOTS {
-        let candidate = home.join(root).join(WORKSHOP_APP_ID).join(value);
+    if std::env::var_os("HOME").is_none() && std::env::var_os("KIRIE_STEAM_LIBRARY").is_none() {
+        return Err(fatal(
+            "Cannot find home directory, please set the HOME environment variable",
+        ));
+    }
+    for dir in workshop_dirs() {
+        let candidate = dir.join(value);
         if candidate.is_dir() {
             return Ok(candidate.to_string_lossy().into_owned());
         }
@@ -166,12 +158,7 @@ impl Wallpaper {
 /// install holds the shared builtin assets (`genericimage2`, effect shaders,
 /// builtin materials) that scene `.pkg`s reference but do not bundle
 /// (docs/render-architecture.md §10 asset lookup).
-const STEAM_COMMON_ROOTS: [&str; 4] = [
-    ".local/share/Steam/steamapps/common/wallpaper_engine/assets",
-    ".steam/steam/steamapps/common/wallpaper_engine/assets",
-    ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
-    "snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
-];
+const WE_ASSETS_RELATIVE: &str = "common/wallpaper_engine/assets";
 
 /// Locate the shared Wallpaper Engine builtin-assets directory, or `None` if it
 /// is not installed. `KIRIE_WE_ASSETS` overrides the probe (docs/corpus.md).
@@ -185,21 +172,14 @@ pub fn we_assets_dir() -> Option<PathBuf> {
         let dir = PathBuf::from(dir);
         return dir.is_dir().then_some(dir);
     }
-    let home = PathBuf::from(std::env::var_os("HOME")?);
-    STEAM_COMMON_ROOTS
-        .iter()
-        .map(|root| home.join(root))
-        .find(|candidate| candidate.is_dir())
+    steam::steamapps_dirs(WE_ASSETS_RELATIVE).into_iter().next()
 }
 
 /// The absolute paths [`we_assets_dir`] probes (for a diagnostic listing when
 /// none exist). Empty if `$HOME` is unset.
 #[must_use]
 pub fn steam_assets_candidates() -> Vec<PathBuf> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return Vec::new();
-    };
-    STEAM_COMMON_ROOTS.iter().map(|root| home.join(root)).collect()
+    steam::steamapps_candidates(WE_ASSETS_RELATIVE)
 }
 
 /// Like [`we_assets_dir`], but emits a single loud `WARN` the first time the

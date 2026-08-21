@@ -15,6 +15,7 @@ pub mod resolve;
 pub mod run;
 pub mod screenshot;
 pub mod signals;
+pub mod steam;
 /// The engine's [`kirie_web::WebFeed`]: system audio + MPRIS now-playing,
 /// adapted to the shapes a web page's `wallpaperRegister*Listener` callbacks
 /// expect. Only exists in a build with a web backend — nothing else consumes
