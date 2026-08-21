@@ -219,14 +219,18 @@ jobs:
             echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
           fi
           # gtk + gtk-layer-shell are expected: the host role is compiled in
-          # and needs them. webkit itself must still be dlopened, so that a
-          # machine without WebKitGTK still runs scene and video wallpapers.
+          # and needs them. This is the GTK3 stack, not GTK4 — webkit2gtk-4.1
+          # is a GTK3 library, so its host window must be one too. webkit
+          # itself must still be dlopened, so that a machine without WebKitGTK
+          # keeps running scene and video wallpapers.
           if echo "$needed" | grep -iqE 'webkit|libsoup'; then
             echo "::error::engine links webkit — it must stay dlopened"; exit 1
           fi
-          if ! echo "$needed" | grep -iq 'libgtk-4'; then
-            echo "::error::gtk not linked — the built-in webview host would be unusable"; exit 1
-          fi
+          for lib in libgtk-3 libgtk-layer-shell; do
+            if ! echo "$needed" | grep -iq "$lib"; then
+              echo "::error::$lib not linked — the built-in webview host would be unusable"; exit 1
+            fi
+          done
           echo "ok: ffmpeg + shaderc static; webkit dlopened; host built in"
 
       - name: Stage webview binary

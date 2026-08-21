@@ -28,9 +28,10 @@ web-cef = ["dep:kirie-web", "kirie-web/host"]
 # compositor's background layer; the engine drives it over a pipe.
 #
 # That process is this same binary re-executed as `kirie __webviewhost`, so an
-# install is one file. The cost is that gtk + gtk-layer-shell are linked into
-# the engine (webkit itself is still `dlopen`ed on demand): ~70 ms of extra
-# startup and ~12 MB of RSS per process, paid even by scene wallpapers.
+# install is one file. The cost is that gtk3 + gtk-layer-shell are linked into
+# the engine — GTK3 because webkit2gtk-4.1 is a GTK3 library — which costs
+# ~15 ms of startup per process, paid even by scene wallpapers. webkit itself
+# is still `dlopen`ed, so a machine without it still runs scenes and video.
 #
 # `web-webview-client` is the older split: engine with no gtk linkage at all,
 # spawning a sibling `kirie-webviewhost` binary that must ship beside it.
