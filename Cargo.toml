@@ -82,6 +82,14 @@ mime_guess = "2"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
+# The symbol table is 2.5 MB of a binary users download; `panic = "abort"`
+# already means a crash gives little more than an address, so keep the
+# symbols in `release-dbg` for triage rather than in everything we ship.
+strip = "symbols"
+
+[profile.release-dbg]
+inherits = "release"
+strip = false
 
 [workspace.lints.rust]
 missing_docs = "warn"

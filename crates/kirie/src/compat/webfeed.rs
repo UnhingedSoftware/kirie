@@ -172,11 +172,7 @@ mod tests {
     use kirie_render::media::{AlbumArt, MediaConfig, TrackMetadata};
 
     fn art(color: u8) -> Arc<AlbumArt> {
-        Arc::new(AlbumArt {
-            width: 2,
-            height: 1,
-            pixels: vec![color, 20, 30, 255, 0, 0, 0, 255],
-        })
+        Arc::new(AlbumArt::new(2, 1, vec![color, 20, 30, 255, 0, 0, 0, 255]))
     }
 
     fn feed() -> EngineWebFeed {

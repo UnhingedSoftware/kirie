@@ -139,6 +139,10 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
 
 /// Run the clap-driven `info` / `extract` subcommands.
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
+    // The engine path caps arenas as its first act (`compat::run`); the
+    // subcommands never did, so they ran with glibc's default of 8x cores —
+    // 256 on a 32-thread box — and paid the fragmentation for it.
+    kirie_bake::limit_malloc_arenas(2);
     let cli = Cli::parse_from(args);
     // `check` owns its exit code: it reports prerequisites as a checklist and
     // exits nonzero when a required check failed (not via an error).

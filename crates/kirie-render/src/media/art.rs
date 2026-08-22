@@ -38,6 +38,14 @@ pub struct AlbumArt {
     pub height: u32,
     /// Tightly-packed RGBA8 pixels (`width * height * 4` bytes).
     pub pixels: Vec<u8>,
+    /// Dominant colour, derived from `pixels` once at decode.
+    ///
+    /// Held rather than recomputed because the consumers ask for it *per
+    /// frame* (`scene/scripting.rs` builds a `MediaPlaybackEvent` every tick),
+    /// while the answer only changes when the art does. Deriving it here also
+    /// puts the work on the MPRIS worker thread instead of the render thread
+    /// (SPEC §V4).
+    primary: [u8; 3],
 }
 
 impl AlbumArt {
@@ -45,10 +53,18 @@ impl AlbumArt {
     #[must_use]
     fn from_rgba(img: image::RgbaImage) -> Self {
         let (width, height) = img.dimensions();
+        Self::new(width, height, img.into_raw())
+    }
+
+    /// Build from raw RGBA8 pixels, deriving the dominant colour once.
+    #[must_use]
+    pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
+        let primary = compute_primary_color(width, height, &pixels);
         Self {
             width,
             height,
-            pixels: img.into_raw(),
+            pixels,
+            primary,
         }
     }
 
@@ -59,23 +75,38 @@ impl AlbumArt {
     /// scaled up so the max channel reaches 170 (avoids a near-black swatch).
     #[must_use]
     pub fn primary_color(&self) -> [u8; 3] {
+        self.primary
+    }
+}
+
+/// The dominant-colour derivation itself. Called once per decoded image by
+/// [`AlbumArt::new`].
+fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
+    {
         let mut acc = [0.0f64; 3];
         let mut weight_sum = 0.0f64;
 
         // Subsample large images so palette extraction stays O(1)-ish and never
         // stalls the worker: cap at ~64x64 sampled pixels.
-        let step_x = (self.width / 64).max(1);
-        let step_y = (self.height / 64).max(1);
+        let step_x = (width / 64).max(1);
+        let step_y = (height / 64).max(1);
 
         let mut y = 0;
-        while y < self.height {
+        while y < height {
             let mut x = 0;
-            while x < self.width {
-                let idx = ((y * self.width + x) * 4) as usize;
-                let r = self.pixels[idx] as f64;
-                let g = self.pixels[idx + 1] as f64;
-                let b = self.pixels[idx + 2] as f64;
-                let a = self.pixels[idx + 3] as f64 / 255.0;
+            while x < width {
+                let idx = ((y * width + x) * 4) as usize;
+                // The buffer is allowed to disagree with the declared size
+                // (V9: odd art must not panic); such pixels simply do not
+                // contribute.
+                let Some(px) = pixels.get(idx..idx + 4) else {
+                    x += step_x;
+                    continue;
+                };
+                let r = px[0] as f64;
+                let g = px[1] as f64;
+                let b = px[2] as f64;
+                let a = px[3] as f64 / 255.0;
                 let max = r.max(g).max(b);
                 let min = r.min(g).min(b);
                 let brightness = max / 255.0;
@@ -110,7 +141,9 @@ impl AlbumArt {
         }
         [color[0] as u8, color[1] as u8, color[2] as u8]
     }
+}
 
+impl AlbumArt {
     /// Encode this art as a `data:image/png;base64,…` URI, the exact shape a WE
     /// web wallpaper expects in `event.thumbnail`.
     ///
@@ -471,11 +504,7 @@ mod tests {
             128, 128, 128, 255, // gray
             0, 0, 0, 255, // black
         ];
-        let art = AlbumArt {
-            width: 2,
-            height: 2,
-            pixels,
-        };
+        let art = AlbumArt::new(2, 2, pixels);
         let c = art.primary_color();
         // Red channel dominates strongly.
         assert!(c[0] > c[1] && c[0] > c[2], "got {c:?}");
@@ -484,11 +513,7 @@ mod tests {
     /// A fully-gray image (zero saturation) falls back to mid-gray, no NaN.
     #[test]
     fn primary_color_grayscale_fallback() {
-        let art = AlbumArt {
-            width: 2,
-            height: 1,
-            pixels: vec![100, 100, 100, 255, 40, 40, 40, 255],
-        };
+        let art = AlbumArt::new(2, 1, vec![100, 100, 100, 255, 40, 40, 40, 255]);
         assert_eq!(art.primary_color(), [128, 128, 128]);
     }
 
@@ -496,11 +521,7 @@ mod tests {
     #[test]
     fn primary_color_lifts_dark() {
         // Single dark-blue saturated pixel.
-        let art = AlbumArt {
-            width: 1,
-            height: 1,
-            pixels: vec![0, 0, 60, 255],
-        };
+        let art = AlbumArt::new(1, 1, vec![0, 0, 60, 255]);
         let c = art.primary_color();
         assert_eq!(c.iter().copied().max(), Some(170));
     }
@@ -577,11 +598,7 @@ mod tests {
     /// must decode back to an image (round-trip through `load_art`).
     #[test]
     fn png_data_uri_round_trips_through_load_art() {
-        let art = AlbumArt {
-            width: 2,
-            height: 1,
-            pixels: vec![10, 200, 30, 255, 0, 0, 0, 255],
-        };
+        let art = AlbumArt::new(2, 1, vec![10, 200, 30, 255, 0, 0, 0, 255]);
         let uri = art.png_data_uri().expect("encode");
         assert!(uri.starts_with("data:image/png;base64,"), "{}", &uri[..32]);
         let back = load_art(&uri).expect("decode");
@@ -593,11 +610,7 @@ mod tests {
     #[test]
     fn png_data_uri_downscales_to_the_edge_cap() {
         let w = MAX_THUMBNAIL_EDGE * 2;
-        let art = AlbumArt {
-            width: w,
-            height: w / 2,
-            pixels: vec![128; (w as usize) * (w as usize / 2) * 4],
-        };
+        let art = AlbumArt::new(w, w / 2, vec![128; (w as usize) * (w as usize / 2) * 4]);
         let back = load_art(&art.png_data_uri().expect("encode")).expect("decode");
         assert_eq!(back.width, MAX_THUMBNAIL_EDGE);
         assert_eq!(back.height, MAX_THUMBNAIL_EDGE / 2);
@@ -607,11 +620,7 @@ mod tests {
     /// rather than panicking (V9).
     #[test]
     fn png_data_uri_rejects_inconsistent_pixels() {
-        let art = AlbumArt {
-            width: 4,
-            height: 4,
-            pixels: vec![0; 8],
-        };
+        let art = AlbumArt::new(4, 4, vec![0; 8]);
         assert!(art.png_data_uri().is_none());
     }
 }

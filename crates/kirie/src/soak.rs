@@ -137,21 +137,34 @@ fn bench() -> Result<()> {
     }
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
 
-    // Time each frame to completion so the number is GPU cost, not queue depth.
+    // Two clocks per frame. `cpu` stops when `render` returns — that is the
+    // encode cost, everything this process actually spends. `wall` additionally
+    // waits for the GPU to finish. Reporting only the second (as this bench
+    // used to) hides every CPU-side regression behind GPU time, which is
+    // exactly what an optimization pass needs to see.
     let mut times = Vec::with_capacity(frames);
+    let mut cpu_times = Vec::with_capacity(frames);
     for _ in 0..frames {
         let t = Instant::now();
         renderer.render(&view, size, 1.0 / 60.0);
+        cpu_times.push(t.elapsed().as_secs_f64() * 1e3);
         let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         times.push(t.elapsed().as_secs_f64() * 1e3);
     }
-    times.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-    let mean = times.iter().sum::<f64>() / times.len() as f64;
-    let p50 = times[times.len() / 2];
-    let p99 = times[times.len() * 99 / 100];
+    let stats = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        (
+            v.iter().sum::<f64>() / v.len() as f64,
+            v[v.len() / 2],
+            v[v.len() * 99 / 100],
+        )
+    };
+    let (cpu_mean, cpu_p50, cpu_p99) = stats(&mut cpu_times);
+    let (mean, p50, p99) = stats(&mut times);
 
     eprintln!(
-        "bench: adapter={} ({:?}) {}x{} | build={build_ms:.0}ms | frame mean={mean:.2}ms \
+        "bench: adapter={} ({:?}) {}x{} | build={build_ms:.0}ms | cpu mean={cpu_mean:.3}ms \
+         p50={cpu_p50:.3}ms p99={cpu_p99:.3}ms | frame mean={mean:.2}ms \
          p50={p50:.2}ms p99={p99:.2}ms | sustainable={:.0} fps | budget@30fps={:.0}%",
         info.name,
         info.device_type,
