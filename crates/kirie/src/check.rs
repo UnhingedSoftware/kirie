@@ -174,6 +174,38 @@ fn check_workshop(r: &mut Report) {
         );
         r.hint("Steam has a newer manifest than the copy on disk; it updates them when it next runs.");
     }
+
+    check_workshop_browse(r);
+}
+
+/// Whether `kirie workshop` can reach Steam at all.
+///
+/// Browsing needs three things and fails differently on each: the helper
+/// binary beside kirie, a running Steam client, and an account that owns
+/// Wallpaper Engine. Steam enforces the last one, so the check is simply
+/// whether the helper's `probe` comes back owning the app.
+fn check_workshop_browse(r: &mut Report) {
+    let Some(helper) = crate::workshop::helper_path() else {
+        r.line(&Verdict::Warn, "workshop browse", "kirie-steam-helper NOT FOUND");
+        r.hint("`kirie workshop` needs the helper that ships beside kirie; set KIRIE_STEAM_HELPER to point at it.");
+        return;
+    };
+
+    match crate::workshop::probe() {
+        Ok(true) => r.line(&Verdict::Ok, "workshop browse", &helper.display().to_string()),
+        Ok(false) => {
+            r.line(
+                &Verdict::Warn,
+                "workshop browse",
+                "Steam is running, but this account does not own Wallpaper Engine",
+            );
+            r.hint("browsing and subscribing go through Steam, which only answers for an account that owns the app.");
+        }
+        Err(why) => {
+            r.line(&Verdict::Warn, "workshop browse", &why.to_string());
+            r.hint("`kirie list` and everything else keep working; only browsing the Workshop needs Steam running.");
+        }
+    }
 }
 
 /// The shared WE builtin-assets directory: required by any scene that uses
