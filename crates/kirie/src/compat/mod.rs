@@ -7,6 +7,7 @@
 //! module, [`ipc_app`], [`screenshot`]).
 
 pub mod args;
+pub mod autopin;
 pub mod ipc_app;
 pub mod list_props;
 pub mod playlist;
@@ -45,6 +46,8 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     // On a multi-GPU box this is the single biggest memory saving available —
     // the loader otherwise keeps BOTH vendors' userspace stacks resident.
     // `--gpu` wins over `KIRIE_GPU`.
+    // An explicit selection wins; this only acts when there is none.
+    autopin::auto_pin(argv);
     pin_gpu(argv);
     init_tracing();
     let argv0 = argv

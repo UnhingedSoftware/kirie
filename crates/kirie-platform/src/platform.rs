@@ -353,6 +353,21 @@ impl WaylandPlatform {
         self.state.outputs.len()
     }
 
+    /// Outputs that actually got a wgpu surface.
+    ///
+    /// Fewer than [`Self::output_count`] means some outputs will stay black:
+    /// surface creation is per-output and non-fatal, so the caller is the only
+    /// one placed to decide whether that is worth acting on (a driver pinned by
+    /// [`kirie`'s auto-pin] that cannot present is the case this exists for).
+    #[must_use]
+    pub fn surface_count(&self) -> usize {
+        self.state
+            .outputs
+            .iter()
+            .filter(|o| o.wgpu_surface.is_some())
+            .count()
+    }
+
     /// Dispatch compositor events — and therefore render frames — until
     /// `duration` elapses (`None` = run forever).
     ///

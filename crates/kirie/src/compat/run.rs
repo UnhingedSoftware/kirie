@@ -693,6 +693,12 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         Ok(mut platform) => {
             // Launch builds go to a worker (P1.6); outputs it declines fall
             // back to the synchronous factory.
+            // A driver we pinned ourselves that yields no usable surface would
+            // leave the desktop black; retry unpinned instead. Never returns
+            // when it acts.
+            if platform.output_count() > 0 && platform.surface_count() == 0 {
+                crate::compat::autopin::recover_from_bad_pin();
+            }
             platform.set_initial_build(initial_build);
             // Enable live `bg`/`preload` swaps: hand the applier the render
             // thread's command channel + the build params (Wayland only; X11

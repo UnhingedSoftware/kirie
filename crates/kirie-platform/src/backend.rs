@@ -219,6 +219,16 @@ impl Platform {
         }
     }
 
+    /// Outputs that actually got a GPU surface — see
+    /// [`WaylandPlatform::surface_count`].
+    #[must_use]
+    pub fn surface_count(&self) -> usize {
+        match self {
+            Self::Wayland(p) => p.surface_count(),
+            Self::X11(p) => p.surface_count(),
+        }
+    }
+
     /// Render-command sender for live `bg`/`preload` swaps. `Some` on Wayland;
     /// `None` on X11 (not wired there yet — X11 relaunches per switch).
     #[must_use]

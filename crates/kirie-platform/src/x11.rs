@@ -258,6 +258,12 @@ impl X11Platform {
         self.outputs.len()
     }
 
+    /// Outputs with a live surface. X11 windows are created with their surface
+    /// or not at all, so this is the same number.
+    pub(crate) fn surface_count(&self) -> usize {
+        self.outputs.len()
+    }
+
     /// (Re)configure the swapchain of `outputs[index]` for its current size.
     fn configure_swapchain(&mut self, index: usize) {
         let Some(ctx) = self.outputs.get_mut(index) else {

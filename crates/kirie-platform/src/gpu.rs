@@ -19,7 +19,7 @@ use crate::error::PlatformError;
 /// not need the discrete GPU spun up), but neutral when the user pinned a
 /// GPU (`--gpu`/`KIRIE_GPU` re-exec forces one ICD; a preference could only
 /// fight the pin on multi-adapter ICDs).
-pub(crate) fn power_preference() -> wgpu::PowerPreference {
+pub fn power_preference() -> wgpu::PowerPreference {
     if std::env::var_os("KIRIE_GPU").is_some() || std::env::var_os("KIRIE_GPU_PINNED").is_some() {
         wgpu::PowerPreference::None
     } else {
