@@ -40,6 +40,14 @@ pub struct Item {
     pub renderable: bool,
     /// Why not, when `renderable` is false.
     pub reason: Option<String>,
+    /// Steam's installed manifest is behind the latest it knows about — the
+    /// item is out of date until Steam next updates it.
+    ///
+    /// Read from Steam's own bookkeeping rather than the item directory, so it
+    /// is answerable with the client closed. `false` when Steam records
+    /// nothing about the item (a `--dir` listing, or content that arrived
+    /// outside Steam).
+    pub update_available: bool,
 }
 
 /// Every installed item across all Steam installation shapes, sorted by id.
@@ -52,6 +60,16 @@ pub fn scan(root: Option<&Path>) -> Vec<Item> {
         Some(dir) => vec![dir.to_path_buf()],
         None => resolve::workshop_dirs(),
     };
+
+    // Steam's own record of what is subscribed and whether an update is
+    // pending. Read once for the whole scan; empty when Steam has never
+    // fetched anything for the app, which is not an error.
+    let pending: std::collections::HashSet<String> =
+        crate::compat::steam::workshop_item_states(crate::compat::args::WORKSHOP_APP_ID)
+            .into_iter()
+            .filter(|state| state.update_available)
+            .map(|state| state.id)
+            .collect();
 
     let mut items: Vec<Item> = Vec::new();
     for dir in roots {
@@ -69,7 +87,8 @@ pub fn scan(root: Option<&Path>) -> Vec<Item> {
             if !path.join("project.json").is_file() {
                 continue;
             }
-            if let Some(item) = describe(&path) {
+            if let Some(mut item) = describe(&path) {
+                item.update_available = pending.contains(&item.id);
                 // A later Steam root never shadows an earlier one, matching the
                 // priority order `translate_background` resolves a bare id with.
                 if !items.iter().any(|existing| existing.id == item.id) {
@@ -127,6 +146,9 @@ fn describe(dir: &Path) -> Option<Item> {
         kind,
         dir: dir.to_path_buf(),
         id,
+        // Filled in by `scan`, which reads Steam's bookkeeping once for the
+        // whole listing rather than per item.
+        update_available: false,
     })
 }
 
@@ -175,6 +197,7 @@ pub fn to_json(items: &[Item]) -> String {
                 "preview": i.preview.as_ref().map(|p| p.to_string_lossy().into_owned()),
                 "renderable": i.renderable,
                 "reason": i.reason,
+                "update_available": i.update_available,
             })
         })
         .collect();

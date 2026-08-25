@@ -81,6 +81,7 @@ pub fn run(path: Option<&Path>) -> Result<bool> {
     // the GPU from it and reuse it for the scene build.
     let gpu = check_gpu(&mut r);
     let assets = check_we_assets(&mut r);
+    check_workshop(&mut r);
     check_web_backends(&mut r);
 
     if let Some(path) = path {
@@ -126,6 +127,52 @@ fn check_gpu(r: &mut Report) -> Option<Headless> {
             r.hint("install a Vulkan driver, or mesa's software fallback (vulkan-swrast).");
             None
         }
+    }
+}
+
+/// What Steam records about the Workshop library, read from its own files.
+///
+/// Answerable with the client closed, which is the point: a wallpaper daemon
+/// starts at login and Steam usually is not up yet.
+fn check_workshop(r: &mut Report) {
+    let states = crate::compat::steam::workshop_item_states(crate::compat::args::WORKSHOP_APP_ID);
+    if states.is_empty() {
+        r.line(
+            &Verdict::Ok,
+            "workshop library",
+            "Steam records no items for this app",
+        );
+        r.hint("subscribe to wallpapers in Steam, or pass --dir to point at a folder.");
+        return;
+    }
+
+    let installed = states.iter().filter(|s| s.installed).count();
+    let waiting = states.iter().filter(|s| s.subscribed && !s.installed).count();
+    let stale = states.iter().filter(|s| s.update_available).count();
+
+    r.line(
+        &Verdict::Ok,
+        "workshop library",
+        &format!("{installed} installed of {} subscribed", states.len()),
+    );
+
+    // Both of these explain a wallpaper that is "missing" or looks wrong, and
+    // neither was visible to kirie before.
+    if waiting > 0 {
+        r.line(
+            &Verdict::Warn,
+            "workshop downloads",
+            &format!("{waiting} subscribed but not downloaded yet"),
+        );
+        r.hint("Steam has not fetched them; they will not appear in `kirie list` until it does.");
+    }
+    if stale > 0 {
+        r.line(
+            &Verdict::Warn,
+            "workshop updates",
+            &format!("{stale} installed item(s) are out of date"),
+        );
+        r.hint("Steam has a newer manifest than the copy on disk; it updates them when it next runs.");
     }
 }
 

@@ -52,21 +52,40 @@ fn main() -> std::process::ExitCode {
 /// This is also the answer to "may this user use the Workshop features" — the
 /// ownership question is Steam's to answer, and `Session::open` fails closed
 /// when the answer is no.
-fn probe(steam_roots: &[String]) -> std::process::ExitCode {
-    let roots: Vec<PathBuf> = steam_roots.iter().map(PathBuf::from).collect();
+fn probe(args: &[String]) -> std::process::ExitCode {
+    // `--hold <seconds>` keeps the session open, which exists only to measure
+    // what Steam does while an app is "running": presence in the friends list
+    // and playtime accrual. Nothing in normal operation should use it — the
+    // whole design rests on the session being momentary.
+    let mut hold_secs = 0u64;
+    let mut roots: Vec<PathBuf> = Vec::new();
+    let mut it = args.iter();
+    while let Some(arg) = it.next() {
+        if arg == "--hold" {
+            hold_secs = it.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        } else {
+            roots.push(PathBuf::from(arg));
+        }
+    }
 
     let library = steam::find_library(&roots);
     let session = Session::open(&roots);
 
     let value = match session {
-        Ok(session) => serde_json::json!({
+        Ok(session) => {
+            if hold_secs > 0 {
+                eprintln!("holding the Steam session open for {hold_secs}s (measurement only)");
+                std::thread::sleep(std::time::Duration::from_secs(hold_secs));
+            }
+            serde_json::json!({
             "appid": APP_ID,
             "library": library.as_ref().map(|p| p.display().to_string()),
             "running": true,
             "owned": session.owns_app(),
             "installed": session.app_installed(),
             "install_dir": session.app_install_dir().map(|p| p.display().to_string()),
-        }),
+            })
+        }
         Err(err) => {
             // Not running / not owned / too-old client are ordinary answers
             // here, not crashes: the caller falls back to reading Steam's files

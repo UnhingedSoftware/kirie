@@ -10,10 +10,15 @@
 //!   SDK under Valve's own terms, which does not combine with this project's
 //!   AGPL.
 //! * **The connection is never held open.** Initialising as an app makes the
-//!   Steam client treat this process as that app running; a wallpaper daemon
-//!   that did so at login would sit in "Playing Wallpaper Engine" forever. Each
-//!   [`Session`] does one job and shuts down, which is why this is a separate
-//!   short-lived process rather than a module inside the engine.
+//!   Steam client treat this process as that app running. This is measured, not
+//!   assumed: holding a session for 40 s moved the account's Wallpaper Engine
+//!   `LastPlayed` to the second the session ended and incremented `Playtime`
+//!   by a minute. A wallpaper daemon that held it would sit in "Playing
+//!   Wallpaper Engine" forever and bill the user's play history for it. Each
+//!   [`Session`] therefore does one job and shuts down, which is why this is a
+//!   separate short-lived process rather than a module inside the engine — and
+//!   why waiting for a download must be done by watching the filesystem, never
+//!   by polling Steam.
 //! * **The licence check is Steam's.** [`Session::open`] succeeds only when the
 //!   signed-in account owns the app, so "does the user actually own Wallpaper
 //!   Engine" is answered by Steam rather than trusted from our side.
