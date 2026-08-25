@@ -36,6 +36,9 @@ webview = ["dep:libloading", "dep:gtk", "dep:gtk-layer-shell", "dep:tracing-subs
 webview-client = []
 
 [dependencies]
+# Content-hashes the embedded webview host so a rebuilt one never reuses a
+# stale extraction.
+blake3 = { workspace = true }
 memmap2 = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }

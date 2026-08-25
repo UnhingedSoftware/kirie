@@ -110,11 +110,11 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
     if std::env::var_os("KIRIE_BENCH").is_some() {
         return soak::bench_from_env();
     }
-    // The webview host runs as this same binary re-executed with a hidden
-    // argument, so a `web-webview` install is one file rather than an engine
-    // plus a `kirie-webviewhost` that has to sit beside it. Checked before
-    // anything else: the host must not touch engine setup.
-    #[cfg(feature = "web-webview")]
+    // Only the in-process build answers to the host argument; the shipped one
+    // carries the host as an embedded binary instead, so that it does not have
+    // to link gtk (see crates/kirie/build.rs). Checked before anything else:
+    // the host must not touch engine setup.
+    #[cfg(feature = "web-webview-inproc")]
     if args.get(1).is_some_and(|a| a == kirie_web::viewhost::HOST_ARG) {
         kirie_web::webview::host::run();
         return ExitCode::SUCCESS;

@@ -76,6 +76,72 @@ enum HostCommand {
     Sibling(std::path::PathBuf),
 }
 
+/// The host binary carried inside the engine, if the build embedded one.
+///
+/// The engine deliberately does not *link* gtk: doing so maps the whole gtk /
+/// gdk / cairo / pango / fontconfig chain at exec for every wallpaper,
+/// including scene-only ones that never open a browser (measured: +10 MB peak
+/// and +265 mappings). Carrying the host as bytes keeps the install one file
+/// without paying that.
+static EMBEDDED_HOST: std::sync::OnceLock<&'static [u8]> = std::sync::OnceLock::new();
+
+/// Offer the embedded host bytes. Called once at startup by the binary that
+/// embedded them; an empty slice means "this build embedded none".
+pub fn set_embedded_host(bytes: &'static [u8]) {
+    if !bytes.is_empty() {
+        let _ = EMBEDDED_HOST.set(bytes);
+    }
+}
+
+/// Materialise the embedded host into the cache and return its path.
+///
+/// Named by a hash of its own bytes, so a rebuilt engine writes a new file
+/// rather than reusing a stale host — the exact footgun that cost two days
+/// when a sibling `kirie-webviewhost` silently stayed behind.
+fn extracted_host() -> Option<std::path::PathBuf> {
+    extract_host(*EMBEDDED_HOST.get()?)
+}
+
+/// [`extracted_host`] over explicit bytes, so the extraction is testable
+/// without setting the process-wide slot.
+fn extract_host(bytes: &[u8]) -> Option<std::path::PathBuf> {
+    let base = if let Some(x) = std::env::var_os("XDG_CACHE_HOME").filter(|x| !x.is_empty()) {
+        std::path::PathBuf::from(x).join("kirie")
+    } else {
+        std::path::PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?)
+            .join(".cache")
+            .join("kirie")
+    };
+    let dir = base.join("host");
+    let digest = blake3::hash(bytes).to_hex();
+    let path = dir.join(format!("kirie-webviewhost-{}", &digest[..16]));
+
+    // Already extracted, and by content hash it is the right one.
+    if path.is_file() {
+        return Some(path);
+    }
+
+    std::fs::create_dir_all(&dir).ok()?;
+    // Write to a unique temp name and rename: two engines starting at once
+    // must not read a half-written host.
+    let tmp = dir.join(format!(
+        ".kirie-webviewhost-{}.{}",
+        &digest[..16],
+        std::process::id()
+    ));
+    std::fs::write(&tmp, bytes).ok()?;
+    let mut perms = std::fs::metadata(&tmp).ok()?.permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&tmp, perms).ok()?;
+    match std::fs::rename(&tmp, &path) {
+        Ok(()) => Some(path),
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            path.is_file().then_some(path)
+        }
+    }
+}
+
 /// Decide how to start the host.
 ///
 /// An explicit `KIRIE_WEBVIEWHOST` always wins — it is the escape hatch for a
@@ -86,9 +152,14 @@ fn host_command() -> Result<HostCommand, WebError> {
     if let Some(p) = std::env::var_os("KIRIE_WEBVIEWHOST") {
         return Ok(HostCommand::Sibling(std::path::PathBuf::from(p)));
     }
+    // A host compiled into this same binary (dev builds with the `webview`
+    // feature) hosts itself; a release carries it as bytes instead.
     let exe = std::env::current_exe().map_err(|_| WebError::Init("current_exe".into()))?;
     if cfg!(feature = "webview") {
         return Ok(HostCommand::SelfExec(exe));
+    }
+    if let Some(path) = extracted_host() {
+        return Ok(HostCommand::Sibling(path));
     }
     let dir = exe.parent().ok_or_else(|| WebError::Init("exe dir".into()))?;
     let candidate = dir.join("kirie-webviewhost");
@@ -415,5 +486,41 @@ impl WebBackend for ViewHostBackend {
 impl Drop for ViewHostBackend {
     fn drop(&mut self) {
         self.shutdown();
+    }
+}
+
+#[cfg(test)]
+mod embedded_host_tests {
+    use super::*;
+
+    /// The carried host must land on disk executable, and a second call must
+    /// reuse it rather than rewrite it.
+    #[test]
+    fn extracts_once_and_is_executable() {
+        let bytes: &[u8] = b"#!/bin/true\n-- pretend host --";
+        let first = extract_host(bytes).expect("extraction");
+        assert!(first.is_file(), "host was not written: {}", first.display());
+
+        let mode = std::os::unix::fs::PermissionsExt::mode(
+            &std::fs::metadata(&first).expect("metadata").permissions(),
+        );
+        assert_eq!(mode & 0o111, 0o111, "extracted host is not executable");
+        assert_eq!(std::fs::read(&first).expect("read"), bytes);
+
+        let second = extract_host(bytes).expect("second extraction");
+        assert_eq!(first, second, "same bytes must resolve to the same path");
+
+        let _ = std::fs::remove_file(&first);
+    }
+
+    /// Different bytes must not reuse the previous file — this is the
+    /// stale-host footgun that once cost two days of phantom webview fixes.
+    #[test]
+    fn different_bytes_get_a_different_path() {
+        let a = extract_host(b"host A").expect("a");
+        let b = extract_host(b"host B").expect("b");
+        assert_ne!(a, b, "a rebuilt host must not reuse the old extraction");
+        let _ = std::fs::remove_file(&a);
+        let _ = std::fs::remove_file(&b);
     }
 }

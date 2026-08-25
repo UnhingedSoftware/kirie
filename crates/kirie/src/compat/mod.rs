@@ -47,6 +47,12 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     // the loader otherwise keeps BOTH vendors' userspace stacks resident.
     // `--gpu` wins over `KIRIE_GPU`.
     // An explicit selection wins; this only acts when there is none.
+    // Hand the web client the host binary this build carries, if any. Empty
+    // when nothing was embedded, which the client reads as "fall back".
+    #[cfg(feature = "web-webview")]
+    kirie_web::viewhost::set_embedded_host(include_bytes!(env!("KIRIE_WEBVIEWHOST_BLOB")));
+
+    // An explicit selection wins; this only acts when there is none.
     autopin::auto_pin(argv);
     pin_gpu(argv);
     init_tracing();

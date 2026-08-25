@@ -222,10 +222,14 @@ jobs:
       - name: Build the trimmed static ffmpeg
         run: ./scripts/build-ffmpeg.sh "$HOME/.cache/kirie/ffmpeg-static"
 
-      - name: Build web-webview (portable single binary, host built in)
+      - name: Build web-webview (portable single binary, host carried inside)
         run: |
           export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
-          cargo build --release -p kirie --features portable,web-webview
+          # The host links gtk; the engine must not. Build it separately and
+          # embed it, so scene-only wallpapers never map the gtk chain.
+          cargo build --release -p kirie-web --features webview --bin kirie-webviewhost
+          KIRIE_EMBED_WEBVIEWHOST="$PWD/target/release/kirie-webviewhost" \
+            cargo build --release -p kirie --features portable,web-webview
 
       - name: Verify static deps + engine stays webkit-free
         run: |
@@ -235,20 +239,13 @@ jobs:
           if echo "$needed" | grep -iqE 'libav|libsw|shaderc|glslang'; then
             echo "::error::churny soname present — ffmpeg/shaderc not static"; exit 1
           fi
-          # gtk + gtk-layer-shell are expected: the host role is compiled in
-          # and needs them. This is the GTK3 stack, not GTK4 — webkit2gtk-4.1
-          # is a GTK3 library, so its host window must be one too. webkit
-          # itself must still be dlopened, so that a machine without WebKitGTK
-          # keeps running scene and video wallpapers.
-          if echo "$needed" | grep -iqE 'webkit|libsoup'; then
-            echo "::error::engine links webkit — it must stay dlopened"; exit 1
+          # The engine must link NEITHER webkit NOR gtk: the host that needs
+          # them is carried as an embedded binary and extracted on first web
+          # use, so a scene-only wallpaper never maps that chain.
+          if echo "$needed" | grep -iqE 'webkit|libsoup|libgtk|libgdk'; then
+            echo "::error::engine links the browser/gtk stack — it must stay out of the engine"; exit 1
           fi
-          for lib in libgtk-3 libgtk-layer-shell; do
-            if ! echo "$needed" | grep -iq "$lib"; then
-              echo "::error::$lib not linked — the built-in webview host would be unusable"; exit 1
-            fi
-          done
-          echo "ok: ffmpeg + shaderc static; webkit dlopened; host built in"
+          echo "ok: ffmpeg + shaderc static; engine free of webkit and gtk"
 
       - name: Stage webview binary
         run: cp target/release/kirie kirie-web-webview-linux-x86_64

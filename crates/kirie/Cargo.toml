@@ -30,16 +30,16 @@ web-cef = ["dep:kirie-web", "kirie-web/host"]
 # separate PROCESS owns webkit and a gtk-layer-shell window on the
 # compositor's background layer; the engine drives it over a pipe.
 #
-# That process is this same binary re-executed as `kirie __webviewhost`, so an
-# install is one file. The cost is that gtk3 + gtk-layer-shell are linked into
-# the engine — GTK3 because webkit2gtk-4.1 is a GTK3 library — which costs
-# ~15 ms of startup per process, paid even by scene wallpapers. webkit itself
-# is still `dlopen`ed, so a machine without it still runs scenes and video.
-#
-# `web-webview-client` is the older split: engine with no gtk linkage at all,
-# spawning a sibling `kirie-webviewhost` binary that must ship beside it.
-web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
-web-webview-client = ["dep:kirie-web", "kirie-web/webview-client"]
+# The engine links NO gtk: that would map the whole gtk/gdk/cairo/pango/
+# fontconfig chain at exec for every wallpaper, including scene-only ones that
+# never open a browser (measured on a scene render: 186 MB peak / 562 mappings
+# without, 196 MB / 827 with). The install stays one file because the engine
+# carries the host binary as bytes and extracts it on first web use — see
+# `crates/kirie/build.rs` and `KIRIE_EMBED_WEBVIEWHOST`.
+web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
+# Compiles the host INTO the engine (`kirie __webviewhost`) instead of carrying
+# it. Convenient for working on the host itself; costs the gtk linkage above.
+web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
 # VAAPI hardware video decode in kirie-video. Runtime-safe to enable: when no
 # VAAPI device/driver exists, playback degrades to the usual CPU decode path.
 vaapi = ["kirie-video/vaapi"]

@@ -195,9 +195,17 @@ fn check_web_backends(r: &mut Report) {
         // install by default and which ships under several parallel ABIs —
         // without this check that failure surfaces much later as an opaque
         // "webviewhost died during startup".
+        // The host is a separate gtk-linked binary carried inside this one and
+        // extracted on first use, so "is it there" is a property of the build,
+        // not of the filesystem.
+        const HOST_BLOB: &[u8] = include_bytes!(env!("KIRIE_WEBVIEWHOST_BLOB"));
         let host = match std::env::var_os("KIRIE_WEBVIEWHOST") {
             Some(path) => format!("host {}", std::path::Path::new(&path).display()),
-            None => "host built in".to_owned(),
+            None if !HOST_BLOB.is_empty() => {
+                format!("host carried in this binary ({} KB)", HOST_BLOB.len() / 1024)
+            }
+            None if cfg!(feature = "web-webview-inproc") => "host built in".to_owned(),
+            None => "no host embedded (set KIRIE_WEBVIEWHOST)".to_owned(),
         };
         match webkit_runtime() {
             Some(lib) => r.line(&Verdict::Ok, "web backend (webview)", &format!("{host}, {lib}")),
