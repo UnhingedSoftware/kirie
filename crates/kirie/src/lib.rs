@@ -146,6 +146,9 @@ enum WorkshopCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Browse the Workshop interactively
+    #[cfg(feature = "tui")]
+    Browse,
     /// Report whether an item is subscribed, installed or downloading
     State {
         /// Workshop id
@@ -286,6 +289,8 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
                 json,
             ),
             WorkshopCommand::State { id, json } => workshop::run_state(&id, json),
+            #[cfg(feature = "tui")]
+            WorkshopCommand::Browse => workshop::tui::run(),
         },
         Command::Check { .. } => unreachable!("handled above"),
     };

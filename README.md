@@ -89,7 +89,23 @@ launch and steer it without a wrapper:
 kirie --screen-root HDMI-A-1 --bg /path/to/workshop/item --scaling fill
 kirie info  <item|scene.pkg|.tex>      # inspect
 kirie extract <scene.pkg|.tex> -o DIR  # unpack
+kirie list                             # what is installed
+kirie workshop browse                  # find more, and subscribe
 ```
+
+The Workshop commands talk to your own running Steam client, so they need
+Steam open and an account that owns Wallpaper Engine — Steam enforces that,
+kirie does not check licences itself. `kirie workshop search "miku" --tag
+Scene` is the same thing without the terminal UI, and every result says
+whether this build can render it before you install it.
+
+```sh
+kirie workshop subscribe 1388331347 --wait --apply HDMI-A-1
+```
+
+subscribes, waits for Steam to fetch it, and shows it — the wallpaper arrives
+in Steam's own library, updates with it, and Wallpaper Engine on Windows sees
+it too.
 
 ## Credits
 

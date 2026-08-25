@@ -14,6 +14,9 @@
 //! whether *this build* can render an item, decided from the item's type by
 //! the same match the engine uses on load.
 
+#[cfg(feature = "tui")]
+pub mod tui;
+
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow};
@@ -366,6 +369,27 @@ fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
         return Err(anyhow!(message.to_owned()));
     }
     Ok(value)
+}
+
+/// Whether Steam is reachable and this account owns Wallpaper Engine.
+///
+/// `Ok(false)` is the ownership answer; `Err` is everything that stopped us
+/// asking (no Steam running, a client too old to carry the library), already
+/// phrased for a user to read.
+///
+/// # Errors
+/// When the helper could not ask Steam at all.
+pub fn probe() -> Result<bool> {
+    let answer = ask_helper(&["probe".to_owned()])?;
+    // A refusal that is *about Steam* comes back as a normal answer with a
+    // reason, not as `error` — see the helper's `probe`.
+    if let Some(detail) = answer.get("detail").and_then(serde_json::Value::as_str) {
+        return Err(anyhow!(detail.to_owned()));
+    }
+    Ok(answer
+        .get("owned")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false))
 }
 
 /// Where the helper binary is.
