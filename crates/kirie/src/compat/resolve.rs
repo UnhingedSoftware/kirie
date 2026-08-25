@@ -154,6 +154,34 @@ impl Wallpaper {
     }
 }
 
+/// Why kirie could not render a wallpaper of this declared type, judged from
+/// the type alone.
+///
+/// A Workshop *listing* knows an item's type from its Steam tags long before
+/// any of its files exist locally, and `kirie workshop` reports whether kirie
+/// can render each result. That answer has to be the same one
+/// [`Wallpaper::unrunnable_reason`] gives once the item is installed —
+/// promising a wallpaper the engine then refuses is worse than saying nothing
+/// — so it is derived from the same match rather than restated.
+#[must_use]
+pub fn reason_for_kind(kind: &str) -> Option<String> {
+    match kind {
+        "scene" | "video" | "image" => None,
+        // The paths are irrelevant: the web arm answers from the build's
+        // features, not from what it was handed.
+        "web" => Wallpaper::Web {
+            dir: PathBuf::new(),
+            file: String::new(),
+        }
+        .unrunnable_reason(),
+        "asset" => Wallpaper::Asset.unrunnable_reason(),
+        "application" => Wallpaper::Unsupported { kind: "application" }.unrunnable_reason(),
+        // Steam tags every item with its type, so this is a listing kirie
+        // cannot vouch for rather than a type it refuses.
+        _ => Some("Steam did not report this item's type".to_owned()),
+    }
+}
+
 /// Steam roots (relative to `$HOME`) whose sibling `common/wallpaper_engine`
 /// install holds the shared builtin assets (`genericimage2`, effect shaders,
 /// builtin materials) that scene `.pkg`s reference but do not bundle
