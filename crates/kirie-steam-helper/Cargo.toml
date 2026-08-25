@@ -1,0 +1,14 @@
+[package]
+name = "kirie-steam-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Short-lived Steam client bridge: Workshop query/subscribe and install discovery, spoken as JSON on stdout"
+
+[dependencies]
+libloading = "0.8"
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

@@ -231,3 +231,254 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 }
+
+/// What Steam records locally about one Workshop item.
+///
+/// Read from `appworkshop_<app>.acf`, which Steam keeps up to date whether or
+/// not it is running — so this answers questions the engine could not answer
+/// before (is an item subscribed but not yet downloaded? is an update waiting?)
+/// without needing the client at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkshopItemState {
+    /// Workshop id.
+    pub id: String,
+    /// Present in `WorkshopItemsInstalled` — its files are on disk.
+    pub installed: bool,
+    /// Present in `WorkshopItemDetails` — the account is subscribed to it.
+    ///
+    /// Subscribed without installed is the "Steam has not downloaded it yet"
+    /// state; installed without subscribed happens after an unsubscribe that
+    /// has not been cleaned up.
+    pub subscribed: bool,
+    /// Size on disk in bytes, when installed.
+    pub size: Option<u64>,
+    /// When the installed copy was last updated (unix seconds).
+    pub updated: Option<u64>,
+    /// The installed manifest differs from the latest Steam knows about — an
+    /// update is pending.
+    pub update_available: bool,
+}
+
+/// Every Workshop item Steam records for `app`, across all libraries.
+///
+/// Empty when Steam has never fetched anything for the app, which is a normal
+/// answer rather than an error (V9: a missing or malformed file yields no
+/// entries, never a panic).
+#[must_use]
+pub fn workshop_item_states(app: &str) -> Vec<WorkshopItemState> {
+    let mut out: Vec<WorkshopItemState> = Vec::new();
+    for library in libraries() {
+        let path = library
+            .join("steamapps/workshop")
+            .join(format!("appworkshop_{app}.acf"));
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for state in parse_workshop_acf(&text) {
+            if !out.iter().any(|existing| existing.id == state.id) {
+                out.push(state);
+            }
+        }
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    out
+}
+
+/// Pull the item states out of one `appworkshop_*.acf`.
+fn parse_workshop_acf(text: &str) -> Vec<WorkshopItemState> {
+    let installed = acf_section(text, "WorkshopItemsInstalled");
+    let details = acf_section(text, "WorkshopItemDetails");
+
+    let mut ids: Vec<&str> = installed.iter().map(|(id, _)| *id).collect();
+    for (id, _) in &details {
+        if !ids.contains(id) {
+            ids.push(id);
+        }
+    }
+
+    ids.into_iter()
+        .map(|id| {
+            let inst = installed.iter().find(|(k, _)| *k == id).map(|(_, v)| v);
+            let det = details.iter().find(|(k, _)| *k == id).map(|(_, v)| v);
+            let manifest = inst.and_then(|b| acf_value(b, "manifest"));
+            let latest = det.and_then(|b| acf_value(b, "latest_manifest"));
+            WorkshopItemState {
+                id: id.to_owned(),
+                installed: inst.is_some(),
+                subscribed: det.is_some(),
+                size: inst
+                    .and_then(|b| acf_value(b, "size"))
+                    .and_then(|v| v.parse().ok()),
+                updated: inst
+                    .and_then(|b| acf_value(b, "timeupdated"))
+                    .and_then(|v| v.parse().ok()),
+                // Only meaningful when both are known; an item Steam has never
+                // compared is not "out of date".
+                update_available: match (manifest, latest) {
+                    (Some(have), Some(newest)) => have != newest,
+                    _ => false,
+                },
+            }
+        })
+        .collect()
+}
+
+/// The `"<id>" { … }` pairs directly inside a named section.
+///
+/// Deliberately not a general VDF parser: it walks quoted tokens and brace
+/// depth, which is all this file's shape needs, and it cannot recurse or blow
+/// up on a hostile file.
+fn acf_section<'a>(text: &'a str, section: &str) -> Vec<(&'a str, &'a str)> {
+    let mut out = Vec::new();
+    let Some(start) = find_section_body(text, section) else {
+        return out;
+    };
+    let body = &text[start..];
+
+    let mut rest = body;
+    while let Some((key, after_key)) = next_quoted(rest) {
+        // A key at depth 0 followed by a block is one item; anything else ends
+        // the section.
+        let Some(brace) = after_key.find(|c: char| !c.is_whitespace()) else {
+            break;
+        };
+        if after_key.as_bytes().get(brace) != Some(&b'{') {
+            break;
+        }
+        let block_start = brace + 1;
+        let mut idx = block_start;
+        let mut depth = 1i32;
+        for (i, b) in after_key.as_bytes()[block_start..].iter().enumerate() {
+            match b {
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        idx = block_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if depth != 0 {
+            break;
+        }
+        out.push((key, &after_key[block_start..idx]));
+        rest = &after_key[idx + 1..];
+
+        // The section itself ends at the next unmatched `}`.
+        if rest.trim_start().starts_with('}') {
+            break;
+        }
+    }
+    out
+}
+
+/// Byte offset just past `"<section>"` and its opening brace.
+fn find_section_body(text: &str, section: &str) -> Option<usize> {
+    let needle = format!("\"{section}\"");
+    let at = text.find(&needle)? + needle.len();
+    let brace = text[at..].find('{')?;
+    Some(at + brace + 1)
+}
+
+/// The first `"<key>" "<value>"` pair in a block.
+fn acf_value<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let at = block.find(&needle)? + needle.len();
+    next_quoted(&block[at..]).map(|(value, _)| value)
+}
+
+/// The next `"…"` token, and everything after it.
+fn next_quoted(text: &str) -> Option<(&str, &str)> {
+    let open = text.find('"')?;
+    let rest = &text[open + 1..];
+    let close = rest.find('"')?;
+    Some((&rest[..close], &rest[close + 1..]))
+}
+
+#[cfg(test)]
+mod acf_tests {
+    use super::*;
+
+    const SAMPLE: &str = r#"
+"AppWorkshop"
+{
+	"appid"		"431960"
+	"SizeOnDisk"		"3794410365"
+	"WorkshopItemsInstalled"
+	{
+		"1388331347"
+		{
+			"size"		"4275510"
+			"timeupdated"		"1526612969"
+			"manifest"		"1182392897106109395"
+		}
+		"1627026721"
+		{
+			"size"		"2602171"
+			"timeupdated"		"1547964330"
+			"manifest"		"6265639993187744802"
+		}
+	}
+	"WorkshopItemDetails"
+	{
+		"1388331347"
+		{
+			"manifest"		"1182392897106109395"
+			"timeupdated"		"1526612969"
+			"subscribedby"		"200304480"
+			"latest_manifest"		"1182392897106109395"
+		}
+		"1627026721"
+		{
+			"manifest"		"6265639993187744802"
+			"latest_manifest"		"9999999999999999999"
+		}
+		"3600453929"
+		{
+			"manifest"		"4042593478675097175"
+			"latest_manifest"		"4042593478675097175"
+		}
+	}
+}
+"#;
+
+    #[test]
+    fn reads_installed_subscribed_and_pending_updates() {
+        let states = parse_workshop_acf(SAMPLE);
+        assert_eq!(states.len(), 3, "two installed plus one subscribed-only");
+
+        let first = states.iter().find(|s| s.id == "1388331347").expect("first");
+        assert!(first.installed && first.subscribed);
+        assert_eq!(first.size, Some(4_275_510));
+        assert_eq!(first.updated, Some(1_526_612_969));
+        assert!(!first.update_available, "manifests match");
+
+        let stale = states.iter().find(|s| s.id == "1627026721").expect("stale");
+        assert!(stale.update_available, "latest_manifest differs");
+
+        // Subscribed but never downloaded — the state kirie could not see
+        // before, and the one that explains an item missing from `list`.
+        let pending = states.iter().find(|s| s.id == "3600453929").expect("pending");
+        assert!(pending.subscribed && !pending.installed);
+        assert_eq!(pending.size, None);
+    }
+
+    /// V9: a truncated or nonsense file yields nothing rather than panicking.
+    #[test]
+    fn malformed_input_yields_no_entries() {
+        for text in [
+            "",
+            "\"AppWorkshop\"",
+            "\"AppWorkshop\" {",
+            "\"WorkshopItemsInstalled\" { \"123\" { \"size\"",
+            "\"WorkshopItemsInstalled\" { \"123\" }",
+            "{{{{{{",
+            "\"WorkshopItemsInstalled\" { \"123\" { } ",
+        ] {
+            let _ = parse_workshop_acf(text);
+        }
+    }
+}

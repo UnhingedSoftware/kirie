@@ -14,6 +14,7 @@ members = [
     "crates/kirie-platform",
     "crates/kirie-ipc",
     "crates/kirie-launcher",
+    "crates/kirie-steam-helper",
 ]
 
 [workspace.package]
