@@ -24,6 +24,7 @@ pub mod gpus;
 pub mod info;
 pub mod list;
 pub mod soak;
+pub mod workshop;
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -65,6 +66,11 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Browse the Steam Workshop, subscribe to items, and check their state
+    Workshop {
+        #[command(subcommand)]
+        command: WorkshopCommand,
+    },
     /// List the Wallpaper Engine items installed on this machine
     List {
         /// Workshop content directory to read instead of probing Steam's
@@ -87,6 +93,66 @@ enum Command {
         /// with a warning)
         #[arg(long)]
         tex_to_png: bool,
+    },
+}
+
+/// `kirie workshop <…>` — the Workshop surface, which needs a running Steam
+/// client and an account that owns Wallpaper Engine (Steam enforces both).
+#[derive(Subcommand, Debug)]
+enum WorkshopCommand {
+    /// Search the Workshop for wallpapers, installed or not
+    Search {
+        /// Free-text search
+        text: Option<String>,
+        /// Only items carrying this tag (repeatable, e.g. Scene, Video, Web)
+        #[arg(long = "tag")]
+        tags: Vec<String>,
+        /// Skip items carrying this tag (repeatable, e.g. Mature, Questionable)
+        #[arg(long = "exclude-tag")]
+        exclude_tags: Vec<String>,
+        /// Match any --tag rather than all of them
+        #[arg(long)]
+        any_tag: bool,
+        /// popular | trend | recent | rated
+        #[arg(long, default_value = "popular")]
+        sort: String,
+        /// Days --sort trend ranks over
+        #[arg(long)]
+        days: Option<u32>,
+        /// 1-based page; Steam answers 50 items per page
+        #[arg(long, default_value_t = 1)]
+        page: u32,
+        /// Keep at most this many results
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Subscribe to an item, so Steam downloads it where kirie will find it
+    Subscribe {
+        /// Workshop id
+        id: String,
+        /// Wait for Steam to finish downloading it
+        #[arg(long)]
+        wait: bool,
+        /// Wait, then show it on this screen through a running engine
+        #[arg(long, value_name = "SCREEN")]
+        apply: Option<String>,
+        /// Control socket of the running engine (--apply)
+        #[arg(long, value_name = "PATH")]
+        socket: Option<PathBuf>,
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report whether an item is subscribed, installed or downloading
+    State {
+        /// Workshop id
+        id: String,
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -129,12 +195,29 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Some(sub)
-            if sub == "info" || sub == "extract" || sub == "check" || sub == "list" || sub == "gpus" =>
+            if sub == "info"
+                || sub == "extract"
+                || sub == "check"
+                || sub == "list"
+                || sub == "gpus"
+                || sub == "workshop" =>
         {
             run_subcommand(args)
         }
         _ => compat::run(&args),
     }
+}
+
+/// Where a running engine is expected to be listening.
+///
+/// kirie's `--control-socket` has no default — the daemon is always told where
+/// to listen — so this is the path the shells that drive it use, and the one a
+/// user typing `--apply` by hand almost certainly means.
+fn default_control_socket() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    runtime.join("lwe.sock")
 }
 
 /// Run the clap-driven `info` / `extract` subcommands.
@@ -165,6 +248,45 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
         } => extract::run(&path, &output, tex_to_png),
         Command::List { dir, json } => list::run(dir.as_deref(), json),
         Command::Gpus { json } => gpus::run(json),
+        Command::Workshop { command } => match command {
+            WorkshopCommand::Search {
+                text,
+                tags,
+                exclude_tags,
+                any_tag,
+                sort,
+                days,
+                page,
+                limit,
+                json,
+            } => workshop::run_search(
+                &workshop::Query {
+                    text,
+                    tags,
+                    excluded_tags: exclude_tags,
+                    match_any_tag: any_tag,
+                    sort,
+                    trend_days: days,
+                    page,
+                    limit,
+                },
+                json,
+            ),
+            WorkshopCommand::Subscribe {
+                id,
+                wait,
+                apply,
+                socket,
+                json,
+            } => workshop::run_subscribe(
+                &id,
+                wait,
+                apply.as_deref(),
+                &socket.unwrap_or_else(default_control_socket),
+                json,
+            ),
+            WorkshopCommand::State { id, json } => workshop::run_state(&id, json),
+        },
         Command::Check { .. } => unreachable!("handled above"),
     };
     match result {
