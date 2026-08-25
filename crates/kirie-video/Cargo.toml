@@ -6,12 +6,20 @@ license.workspace = true
 repository.workspace = true
 
 [features]
-# Statically link ffmpeg by building it from source (ffmpeg-sys-next `build` =>
-# --enable-static --disable-shared). Removes the version-specific libav*/libsw*
-# sonames from the binary so it runs across distros. Needs a C toolchain + nasm
-# at build time. Enabled via kirie's `portable` feature; off by default (dynamic
-# link, fast dev/CI builds).
-static-ffmpeg = ["ffmpeg-next/build"]
+# Statically link a prebuilt ffmpeg, pointed at by `FFMPEG_DIR`. Removes the
+# version-specific libav*/libsw* sonames from the binary so it runs across
+# distros. `scripts/build-ffmpeg.sh` produces the prefix; the release workflow
+# runs it first.
+#
+# NOT `ffmpeg-next/build`: that builds ffmpeg with a `./configure` line the
+# crate hardcodes and exposes no hook into, which enables every decoder,
+# muxer and network protocol ffmpeg has — about 19 MB of a 46 MB release
+# binary, for a program that opens six container types off local disk.
+# `static` takes the prebuilt instead, so the trim is ours to choose.
+static-ffmpeg = ["ffmpeg-next/static"]
+# Escape hatch: build ffmpeg from source with its stock (untrimmed) configure,
+# for a platform where the prebuilt prefix cannot be produced.
+static-ffmpeg-from-source = ["ffmpeg-next/build"]
 # VAAPI hardware video decode (SPEC T11): attach a VAAPI hw device at decoder
 # open and download decoded surfaces to system memory for the existing RGBA
 # conversion path. Degrades to CPU decode (info log) when no render node/

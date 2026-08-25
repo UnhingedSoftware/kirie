@@ -134,8 +134,16 @@ jobs:
           v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
 
+      # The stock `ffmpeg-next/build` compiles ffmpeg with a hardcoded configure
+      # line: every decoder, muxer and network protocol, ~19 MB of the binary.
+      # Build the trimmed one instead and link that.
+      - name: Build the trimmed static ffmpeg
+        run: ./scripts/build-ffmpeg.sh "$HOME/.cache/kirie/ffmpeg-static"
+
       - name: Build default (portable)
-        run: cargo build --release -p kirie --features portable
+        run: |
+          export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
+          cargo build --release -p kirie --features portable
 
       # Guard: ffmpeg + shaderc must be static; the engine must never link
       # libcef (the browser stays out-of-process in kirie-webhost).
@@ -164,6 +172,7 @@ jobs:
 
       - name: Build web-cef (engine + helper + webhost)
         run: |
+          export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
           cargo build --release -p kirie --features portable,web-cef
           cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
           cargo build --release -p kirie-web --features cef --bin kirie-webhost
@@ -207,8 +216,16 @@ jobs:
           v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
           sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
 
+      # The stock `ffmpeg-next/build` compiles ffmpeg with a hardcoded configure
+      # line: every decoder, muxer and network protocol, ~19 MB of the binary.
+      # Build the trimmed one instead and link that.
+      - name: Build the trimmed static ffmpeg
+        run: ./scripts/build-ffmpeg.sh "$HOME/.cache/kirie/ffmpeg-static"
+
       - name: Build web-webview (portable single binary, host built in)
-        run: cargo build --release -p kirie --features portable,web-webview
+        run: |
+          export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
+          cargo build --release -p kirie --features portable,web-webview
 
       - name: Verify static deps + engine stays webkit-free
         run: |

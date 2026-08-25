@@ -18,6 +18,9 @@ default = []
 # xcb/x11, alsa/pulse). Build the release with this feature (needs nasm + cmake +
 # python + ninja + git); leave it off for fast dynamic dev/CI builds.
 portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
+# `portable`, but building ffmpeg from source instead of taking a prebuilt
+# prefix — one word to fall back on if a trimmed build ever misses a format.
+portable-fatlibs = ["kirie-video/static-ffmpeg-from-source", "kirie-render/static-shaderc"]
 # Chromium Embedded Framework off-screen-rendering backend. `kirie-web/cef`
 # downloads + links libcef. This is the backend that composites through kirie's
 # wgpu presentation layer (a `kirie_platform::Renderer` blitting CEF's OSR
