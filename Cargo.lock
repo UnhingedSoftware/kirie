@@ -2156,6 +2156,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kirie-steam-helper"
+version = "0.1.0"
+dependencies = [
+ "libloading 0.8.9",
+ "serde_json",
+]
+
+[[package]]
 name = "kirie-video"
 version = "0.1.0"
 dependencies = [
@@ -2177,6 +2185,7 @@ name = "kirie-web"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "blake3",
  "bytemuck",
  "cef",
  "cef-dll-sys",
