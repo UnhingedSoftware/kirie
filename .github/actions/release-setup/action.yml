@@ -31,7 +31,7 @@ runs:
         $SUDO apt-get update
         $SUDO apt-get install -y --no-install-recommends \
           build-essential clang ninja-build nasm git curl ca-certificates \
-          pkg-config python3 python3-pip binutils \
+          pkg-config python3 python3-pip binutils xz-utils \
           libasound2-dev libpulse-dev \
           libxcb1-dev libwayland-dev libxkbcommon-dev libx11-dev libdbus-1-dev \
           ${{ inputs.extra-apt }}
