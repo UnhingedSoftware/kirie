@@ -27,6 +27,13 @@ fn main() {
             IpcEvent::List { reply } => {
                 let _ = reply.send("[]".to_owned());
             }
+            // Browsing needs a Steam client; the demo server says so rather
+            // than pretending the Workshop is empty.
+            IpcEvent::Workshop { request, reply } => {
+                let _ = reply.send(format!(
+                    r#"{{"error":"the demo server has no Steam surface ({request:?})"}}"#
+                ));
+            }
             IpcEvent::Status { reply } => {
                 let _ = reply.send(StatusSnapshot {
                     speed,

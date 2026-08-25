@@ -43,6 +43,11 @@ pub enum Request {
     /// `getproperties`: it exists so a shell that already talks to the engine
     /// does not have to rediscover Steam's workshop layout for itself.
     List,
+    /// `workshop <verb> …` → the Steam Workshop surface
+    /// (docs/compat-socket.md §13). A **kirie extension**, like `list`: it
+    /// exists so a shell can offer wallpapers the user has not installed yet
+    /// without shelling out to `kirie workshop` per keystroke.
+    Workshop(WorkshopRequest),
     /// A recognized command, forwarded to the app as an [`crate::IpcEvent`].
     Command(Command),
     /// Recognized command with an argument the C++ app would reject with
@@ -53,6 +58,35 @@ pub enum Request {
     /// ControlSocket.cpp:154). Also produced for whitespace-only lines,
     /// whose command-token extraction fails exactly as in C++.
     Unknown,
+}
+
+/// One `workshop` request.
+///
+/// The query itself is carried as the raw argument text rather than a parsed
+/// structure: every field of it belongs to the Steam surface, which lives in
+/// `kirie`, and `kirie-ipc` stays free of that dependency exactly as it stays
+/// free of the `project.json` schema (SPEC V3 — owned data crosses the
+/// channel, and this is the smallest owned thing that says everything).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkshopRequest {
+    /// `workshop search [key=value]…` — the arguments verbatim.
+    ///
+    /// Keys mirror the CLI: `text=`, `tag=`, `nottag=`, `anytag=`, `sort=`,
+    /// `days=`, `page=`, `limit=`. `text=` swallows the rest of the line (a
+    /// search phrase has spaces in it), so it goes last.
+    Search(String),
+    /// `workshop state <id>` — subscribed/installed/downloading, answerable
+    /// with Steam closed.
+    State(String),
+    /// `workshop subscribe <id>` — answers with a job id **immediately**; the
+    /// download is then followed with [`Self::Job`].
+    ///
+    /// It cannot answer with the finished item: the socket has no event stream
+    /// (doc §6) and clients set short timeouts, so a reply held for the length
+    /// of a download would simply time out.
+    Subscribe(String),
+    /// `workshop job <n>` — how a subscription started earlier is going.
+    Job(u64),
 }
 
 /// A typed control-socket command, ready for the app (SPEC V3: sent over a
@@ -452,6 +486,38 @@ fn rest_path(cur: &mut Cursor<'_>) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(cur.rest()).to_os_string())
 }
 
+/// `workshop <verb> …` (docs/compat-socket.md §13).
+///
+/// An unknown verb answers `unknown command\n` like any other unrecognized
+/// token, so a client can probe for the extension the same way it probes for
+/// `getproperties`.
+fn parse_workshop(cur: &mut Cursor<'_>) -> Request {
+    let Some(verb) = cur.token() else {
+        return Request::Unknown;
+    };
+    match verb {
+        b"search" => Request::Workshop(WorkshopRequest::Search(rest_string(cur))),
+        b"state" => match cur.token() {
+            Some(id) => Request::Workshop(WorkshopRequest::State(String::from_utf8_lossy(id).into_owned())),
+            None => Request::Rejected,
+        },
+        b"subscribe" => match cur.token() {
+            Some(id) => Request::Workshop(WorkshopRequest::Subscribe(
+                String::from_utf8_lossy(id).into_owned(),
+            )),
+            None => Request::Rejected,
+        },
+        b"job" => match cur
+            .token()
+            .and_then(|t| std::str::from_utf8(t).ok()?.parse().ok())
+        {
+            Some(job) => Request::Workshop(WorkshopRequest::Job(job)),
+            None => Request::Rejected,
+        },
+        _ => Request::Unknown,
+    }
+}
+
 fn parse_set(cur: &mut Cursor<'_>) -> Request {
     // Missing key ⇒ C++ extracts "" ⇒ handleSet falls through the key table
     // ⇒ `error\n` (doc §4.6).
@@ -495,6 +561,7 @@ pub fn parse_request(line: &[u8]) -> Request {
         b"status" => Request::Status,
         // kirie extension (docs/compat-socket.md §11): optional screen token.
         b"list" => Request::List,
+        b"workshop" => parse_workshop(&mut cur),
         b"getproperties" => Request::GetProperties {
             screen: cur.token().map(|t| String::from_utf8_lossy(t).into_owned()),
         },

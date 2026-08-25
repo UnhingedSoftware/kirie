@@ -38,6 +38,16 @@ const READ_CHUNK: usize = 1024;
 /// scripts) send the whole line in one write and are unaffected.
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
+/// How long a `workshop` request may wait on the app before the client is told
+/// so (docs/compat-socket.md §13).
+///
+/// SPEC V4 asks for a bounded deadline on socket work, and this is the one
+/// verb family that needs one: the rest is bounded by the app's own progress,
+/// while a Workshop request waits on the Steam client and the network. Long
+/// enough for a cold query on a slow link, short enough that a wedged Steam
+/// answers rather than hangs the connection.
+const WORKSHOP_DEADLINE: Duration = Duration::from_secs(30);
+
 const RESP_PONG: &[u8] = b"pong\n";
 const RESP_OK: &[u8] = b"ok\n";
 const RESP_ERROR: &[u8] = b"error\n";
@@ -198,7 +208,33 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
         Some(i) => &buf[..i],
         None => &buf[..],
     };
-    if let Some(response) = respond(line, events) {
+    let request = parse_request(line);
+
+    // Workshop requests talk to Steam through a helper process, which takes
+    // seconds. Serving one inline would hold up every client behind it — a
+    // shell's `ping` health check included — so it gets its own thread, and
+    // the accept loop moves on. Compat verbs keep the C++ engine's strict
+    // accept-order serialisation (doc §5), including its unbounded blocking
+    // `bg`, because clients depend on that ordering.
+    if matches!(request, Request::Workshop(_)) {
+        let events = events.clone();
+        thread::Builder::new()
+            .name("kirie-ipc-workshop".to_owned())
+            .spawn(move || {
+                if let Some(response) = respond(request, &events)
+                    && let Err(e) = stream.write_all(&response)
+                {
+                    tracing::debug!(error = %e, "control-socket workshop response write failed");
+                }
+            })
+            .map_or_else(
+                |e| tracing::warn!(error = %e, "could not spawn a workshop responder"),
+                |_handle| (),
+            );
+        return;
+    }
+
+    if let Some(response) = respond(request, events) {
         // Single write, failure logged and ignored (doc §5); the C++ single
         // unlooped write() is upgraded to write_all (doc §10 short-write
         // open item resolved conservatively).
@@ -209,11 +245,11 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
     // Connection closed on drop; EOF signals end-of-response (doc §2 step 6).
 }
 
-/// Map one request line to its response bytes. `None` ⇒ close with zero
+/// Map one parsed request to its response bytes. `None` ⇒ close with zero
 /// response bytes (empty request, doc §2 step 5 — or the app is gone, which
 /// is exactly the protocol's dead-engine signal, doc §3).
-fn respond(line: &[u8], events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
-    match parse_request(line) {
+fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
+    match request {
         Request::Empty => None,
         Request::Ping => Some(RESP_PONG.to_vec()),
         Request::Unknown => Some(RESP_UNKNOWN.to_vec()),
@@ -239,6 +275,21 @@ fn respond(line: &[u8], events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             let (tx, rx) = bounded(1);
             events.send(IpcEvent::GetProperties { screen, reply: tx }).ok()?;
             let mut body = rx.recv().ok()?.into_bytes();
+            body.push(b'\n');
+            Some(body)
+        }
+        Request::Workshop(request) => {
+            // Same framing as `list`; the deadline is what makes this verb
+            // safe to answer at all. Everything else here is bounded by the
+            // app's own progress, but a Workshop request waits on Steam —
+            // another process, over the network — so it gets a hard cap
+            // instead of the protocol's "however long it takes".
+            let (tx, rx) = bounded(1);
+            events.send(IpcEvent::Workshop { request, reply: tx }).ok()?;
+            let mut body = rx
+                .recv_timeout(WORKSHOP_DEADLINE)
+                .unwrap_or_else(|_| r#"{"error":"the Workshop request did not finish in time"}"#.to_owned())
+                .into_bytes();
             body.push(b'\n');
             Some(body)
         }

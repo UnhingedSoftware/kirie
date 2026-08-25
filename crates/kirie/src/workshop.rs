@@ -157,16 +157,20 @@ fn mark_local(items: &mut [Item]) {
     for item in items {
         if let Some(dir) = installed.get(&item.id) {
             item.installed = true;
-            // `state` and `subscribe` ask Steam about one id and get no title
-            // back, so an installed item names itself from its own manifest
-            // rather than being reported as its own number.
-            if item.title == item.id
-                && let Ok(project) = kirie_formats::project::Project::from_path(dir.join("project.json"))
-                && !project.title.trim().is_empty()
-            {
-                item.title = project.title;
-            }
             item.dir = Some(dir.clone());
+            // Steam's tags are a guess about the files; the files themselves
+            // are not. Once an item is on disk, classify it the way the engine
+            // will when it loads it — which is also the only way `state` and
+            // `subscribe`, which get no tags back from Steam at all, can say
+            // anything about the wallpaper beyond its id.
+            if let Some(local) = crate::list::describe(dir) {
+                item.kind = local.kind;
+                item.renderable = local.renderable;
+                item.reason = local.reason;
+                if item.title == item.id {
+                    item.title = local.title;
+                }
+            }
         }
         if subscribed.contains(&item.id) {
             item.subscribed = true;
@@ -507,6 +511,252 @@ pub fn to_json(items: &[Item]) -> String {
     serde_json::Value::Array(values).to_string()
 }
 
+/// A subscription in flight, as `workshop job <n>` reports it.
+///
+/// The states are the ones a shell shows: Steam accepted it, the files are
+/// coming, they arrived, or it went wrong.
+#[derive(Debug, Clone)]
+pub struct Job {
+    /// The Workshop id being fetched.
+    pub id: String,
+    /// `subscribing` / `downloading` / `installed` / `error`.
+    pub state: &'static str,
+    /// Bytes fetched so far, while downloading.
+    pub bytes: u64,
+    /// Where the files landed, once they did.
+    pub dir: Option<PathBuf>,
+    /// What went wrong, when `state` is `error`.
+    pub error: Option<String>,
+}
+
+impl Job {
+    /// The job as the socket reports it — one line, no embedded newline.
+    #[must_use]
+    fn to_json(&self, job: u64) -> String {
+        serde_json::json!({
+            "job": job,
+            "id": self.id,
+            "state": self.state,
+            "bytes": self.bytes,
+            "dir": self.dir.as_ref().map(|d| d.to_string_lossy().into_owned()),
+            "error": self.error,
+        })
+        .to_string()
+    }
+}
+
+/// Subscriptions started over the control socket.
+///
+/// A download outlives the request that started it — the socket has no event
+/// stream and clients time out in seconds (docs/compat-socket.md §6) — so the
+/// subscription answers with a job id and the progress is left here for
+/// whoever asks next.
+#[derive(Debug, Default)]
+pub struct Jobs {
+    inner: std::sync::Mutex<JobTable>,
+}
+
+/// The job table itself: a counter and the jobs it has handed out.
+#[derive(Debug, Default)]
+struct JobTable {
+    next: u64,
+    jobs: std::collections::HashMap<u64, Job>,
+}
+
+impl Jobs {
+    /// Record a new job for an id, returning its number.
+    fn start(&self, id: &str) -> u64 {
+        let Ok(mut table) = self.inner.lock() else {
+            return 0;
+        };
+        table.next += 1;
+        let number = table.next;
+        // Keep the table from growing without bound over a long-lived daemon:
+        // a finished job is only interesting until someone reads it, and 64 is
+        // far more than any shell has in flight.
+        if table.jobs.len() >= 64
+            && let Some(oldest) = table
+                .jobs
+                .iter()
+                .filter(|(_, job)| job.state == "installed" || job.state == "error")
+                .map(|(n, _)| *n)
+                .min()
+        {
+            table.jobs.remove(&oldest);
+        }
+        table.jobs.insert(
+            number,
+            Job {
+                id: id.to_owned(),
+                state: "subscribing",
+                bytes: 0,
+                dir: None,
+                error: None,
+            },
+        );
+        number
+    }
+
+    /// Update one job in place. A poisoned lock is dropped silently: losing
+    /// progress is better than taking the daemon down with it (V9).
+    fn update(&self, number: u64, edit: impl FnOnce(&mut Job)) {
+        if let Ok(mut table) = self.inner.lock()
+            && let Some(job) = table.jobs.get_mut(&number)
+        {
+            edit(job);
+        }
+    }
+
+    /// One job, if it exists.
+    fn get(&self, number: u64) -> Option<Job> {
+        self.inner.lock().ok()?.jobs.get(&number).cloned()
+    }
+}
+
+/// Parse a `workshop search` argument line (`key=value`, space-separated).
+///
+/// `text=` takes the rest of the line, since a search phrase has spaces in it;
+/// everything before it is a filter. An unknown key is ignored rather than
+/// refused — a newer shell talking to an older engine should still search.
+#[must_use]
+pub fn query_from_args(line: &str) -> Query {
+    let mut query = Query {
+        sort: "popular".to_owned(),
+        page: 1,
+        ..Query::default()
+    };
+
+    let mut rest = line.trim();
+    while !rest.is_empty() {
+        let (token, tail) = match rest.split_once(char::is_whitespace) {
+            Some((token, tail)) => (token, tail.trim_start()),
+            None => (rest, ""),
+        };
+        let Some((key, value)) = token.split_once('=') else {
+            rest = tail;
+            continue;
+        };
+        match key {
+            // Everything after `text=` is the phrase, tail included.
+            "text" => {
+                let phrase = if tail.is_empty() {
+                    value.to_owned()
+                } else {
+                    format!("{value} {tail}")
+                };
+                query.text = Some(phrase.trim().to_owned());
+                return query;
+            }
+            "tag" => query.tags.push(value.to_owned()),
+            "nottag" => query.excluded_tags.push(value.to_owned()),
+            "anytag" => query.match_any_tag = value != "0",
+            "sort" => query.sort = value.to_owned(),
+            "days" => query.trend_days = value.parse().ok(),
+            "page" => query.page = value.parse().unwrap_or(1),
+            "limit" => query.limit = value.parse().ok(),
+            _ => {}
+        }
+        rest = tail;
+    }
+    query
+}
+
+/// Answer one control-socket `workshop` request.
+///
+/// Never blocks the caller: every verb that talks to Steam is run on its own
+/// thread and answers through `reply`, because the app loop it is called from
+/// also drives wallpaper swaps (SPEC V4). `subscribe` answers immediately with
+/// a job number and follows the download in the background.
+pub fn serve_socket(
+    jobs: &std::sync::Arc<Jobs>,
+    request: kirie_ipc::WorkshopRequest,
+    reply: crossbeam_channel::Sender<String>,
+) {
+    use kirie_ipc::WorkshopRequest as W;
+
+    /// An error the shell can show, in the same one-line JSON shape as a
+    /// result.
+    fn error(message: &str) -> String {
+        serde_json::json!({ "error": message }).to_string()
+    }
+
+    let jobs = std::sync::Arc::clone(jobs);
+    let spawned = std::thread::Builder::new()
+        .name("kirie-workshop".to_owned())
+        .spawn(move || match request {
+            W::Search(args) => {
+                let body = match search(&query_from_args(&args)) {
+                    Ok(items) => to_json(&items),
+                    Err(err) => error(&err.to_string()),
+                };
+                let _ = reply.send(body);
+            }
+            W::State(id) => {
+                let body = match state(&id) {
+                    Ok(item) => to_json(std::slice::from_ref(&item)),
+                    Err(err) => error(&err.to_string()),
+                };
+                let _ = reply.send(body);
+            }
+            W::Job(number) => {
+                let body = jobs
+                    .get(number)
+                    .map_or_else(|| error("no such job"), |job| job.to_json(number));
+                let _ = reply.send(body);
+            }
+            W::Subscribe(id) => {
+                let number = jobs.start(&id);
+                // Answer before the download, not after it: this is the whole
+                // reason subscriptions are jobs.
+                match subscribe(&id) {
+                    Ok(item) => {
+                        let _ = reply.send(serde_json::json!({ "job": number, "id": item.id }).to_string());
+                        follow_download(&jobs, number, &item);
+                    }
+                    Err(err) => {
+                        let message = err.to_string();
+                        jobs.update(number, |job| {
+                            job.state = "error";
+                            job.error = Some(message.clone());
+                        });
+                        let _ = reply.send(error(&message));
+                    }
+                }
+            }
+        });
+    if let Err(err) = spawned {
+        tracing::warn!(%err, "could not spawn a Workshop worker");
+    }
+}
+
+/// Follow a subscription's download to its end, recording progress on the job.
+///
+/// Filesystem-only, like [`wait_for_install`]: asking Steam would announce the
+/// daemon as playing Wallpaper Engine on every poll.
+fn follow_download(jobs: &Jobs, number: u64, item: &Item) {
+    if let Some(dir) = &item.dir {
+        jobs.update(number, |job| {
+            job.state = "installed";
+            job.dir = Some(dir.clone());
+        });
+        return;
+    }
+
+    jobs.update(number, |job| job.state = "downloading");
+    match wait_for_install(&item.id, WAIT_TIMEOUT, |bytes| {
+        jobs.update(number, |job| job.bytes = bytes);
+    }) {
+        Ok(dir) => jobs.update(number, |job| {
+            job.state = "installed";
+            job.dir = Some(dir);
+        }),
+        Err(err) => jobs.update(number, |job| {
+            job.state = "error";
+            job.error = Some(err.to_string());
+        }),
+    }
+}
+
 /// Run `kirie workshop search`.
 ///
 /// # Errors
@@ -631,10 +881,14 @@ pub fn run_state(id: &str, json: bool) -> Result<()> {
     }
 
     println!("{} {}", item.id, item.title);
+    println!("  type:       {}", item.kind);
     println!("  subscribed: {}", item.subscribed);
     println!("  installed:  {}", item.installed);
     if let Some(dir) = &item.dir {
         println!("  directory:  {}", dir.display());
+    }
+    if let Some(reason) = &item.reason {
+        println!("  cannot render: {reason}");
     }
     Ok(())
 }

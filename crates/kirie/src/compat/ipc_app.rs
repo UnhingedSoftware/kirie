@@ -62,6 +62,12 @@ struct AppState {
     /// Registered screens keyed lexicographically, matching the C++ `std::map`
     /// iteration order the `status` reply depends on (doc §4.2).
     screens: BTreeMap<String, ScreenEntry>,
+    /// Subscriptions started over the socket (docs/compat-socket.md §13).
+    ///
+    /// Shared with the worker threads that run them: a download outlives the
+    /// request that started it, so the progress has to live somewhere the next
+    /// `workshop job` request can read.
+    workshop_jobs: Arc<crate::workshop::Jobs>,
     /// Global playback speed, reported by `status` and forwarded to videos
     /// (doc §4.3).
     speed: f32,
@@ -124,6 +130,7 @@ impl IpcApp {
                 .into_iter()
                 .map(|(name, bg)| (name, ScreenEntry { bg, control: None }))
                 .collect(),
+            workshop_jobs: Arc::default(),
             speed,
             volume,
             muted,
@@ -225,6 +232,13 @@ fn handle_event(state: &mut AppState, event: IpcEvent) {
                     .collect(),
             };
             let _ = reply.send(snapshot);
+        }
+        IpcEvent::Workshop { request, reply } => {
+            // Steam lives behind a helper process and a download takes as long
+            // as it takes, so none of it may happen here: this loop also drives
+            // wallpaper swaps (SPEC V4). `serve_socket` answers from its own
+            // thread.
+            crate::workshop::serve_socket(&state.workshop_jobs, request, reply);
         }
         IpcEvent::List { reply } => {
             // Discovery lives in one place (`crate::list`), so the socket and

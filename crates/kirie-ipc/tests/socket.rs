@@ -50,6 +50,9 @@ impl Drop for TempDir {
 struct MockApp {
     screens: Vec<ScreenStatus>,
     on_command: Box<dyn FnMut(&Command) -> CommandOutcome + Send>,
+    /// How long the fake app takes to answer a `workshop` request — the real
+    /// one waits on Steam, so a test needs to be able to be slow.
+    workshop_delay: Duration,
 }
 
 impl MockApp {
@@ -72,6 +75,7 @@ impl MockApp {
                 Command::Screenshot { path } if path.as_os_str().is_empty() => CommandOutcome::Error,
                 _ => CommandOutcome::Ok,
             }),
+            workshop_delay: Duration::ZERO,
         }
     }
 
@@ -90,6 +94,20 @@ impl MockApp {
                     // fake app under test has nothing installed to report.
                     IpcEvent::List { reply } => {
                         let _ = reply.send("[]".to_owned());
+                    }
+                    // The Workshop surface is the app's, and the fake app has
+                    // no Steam: echoing the request back is what lets a test
+                    // assert the parse without a client.
+                    IpcEvent::Workshop { request, reply } => {
+                        // The real app hands this to a worker thread; so does
+                        // the fake one, because a test that asserts the socket
+                        // stays responsive must not have an app loop that is
+                        // itself blocked.
+                        let delay = self.workshop_delay;
+                        thread::spawn(move || {
+                            thread::sleep(delay);
+                            let _ = reply.send(format!(r#"{{"request":"{request:?}"}}"#));
+                        });
                     }
                     IpcEvent::Status { reply } => {
                         let _ = reply.send(StatusSnapshot {
@@ -350,6 +368,7 @@ fn status_multi_screen_ordering_and_empty_bg() {
     // Screens delivered unsorted; response must be lexicographic by key
     // bytes ("DP-10" < "DP-2" < "HDMI-A-1"), std::map order (doc §4.2).
     let mock = MockApp {
+        workshop_delay: Duration::ZERO,
         screens: vec![
             ScreenStatus {
                 screen: "HDMI-A-1".into(),
@@ -490,6 +509,7 @@ fn preload_replies_ok_even_when_the_app_fails() {
     // doc §4.8 / ControlSocket.cpp:128-132: ok\n unconditionally, failures
     // only logged. The mock reports Error; the wire must still say ok.
     let mock = MockApp {
+        workshop_delay: Duration::ZERO,
         screens: vec![],
         on_command: Box::new(|_| CommandOutcome::Error),
     };
@@ -777,4 +797,62 @@ fn shutdown_is_idempotent_and_unbinds() {
         ),
         Ok(_) => panic!("socket still accepting after shutdown"),
     }
+}
+
+#[test]
+fn workshop_verbs_parse_into_typed_requests() {
+    // docs/compat-socket.md §13. The app gets the query text verbatim; only
+    // the verb and its shape are the socket layer's business.
+    let s = Server::start("workshop-parse", MockApp::doc_semantics());
+
+    let reply = String::from_utf8(s.request(b"workshop search tag=Scene text=blue sky\n")).unwrap();
+    assert!(reply.ends_with('\n'), "framed like list/getproperties");
+    assert!(
+        reply.contains(r#"Search("tag=Scene text=blue sky")"#),
+        "the query reaches the app unparsed: {reply}"
+    );
+
+    let reply = String::from_utf8(s.request(b"workshop state 1388331347\n")).unwrap();
+    assert!(reply.contains(r#"State("1388331347")"#), "{reply}");
+
+    let reply = String::from_utf8(s.request(b"workshop subscribe 42\n")).unwrap();
+    assert!(reply.contains(r#"Subscribe("42")"#), "{reply}");
+
+    let reply = String::from_utf8(s.request(b"workshop job 7\n")).unwrap();
+    assert!(reply.contains("Job(7)"), "{reply}");
+
+    // A verb the engine does not know answers like any other unknown token,
+    // so a client can probe for the extension.
+    assert_eq!(s.request(b"workshop rummage\n"), b"unknown command\n");
+    assert_eq!(s.request(b"workshop\n"), b"unknown command\n");
+    // A verb that needs an argument and did not get one is a rejection, not a
+    // guess at which item was meant.
+    assert_eq!(s.request(b"workshop state\n"), b"error\n");
+    assert_eq!(s.request(b"workshop job notanumber\n"), b"error\n");
+}
+
+#[test]
+fn a_slow_workshop_request_does_not_stall_other_clients() {
+    // SPEC V4. Workshop requests wait on Steam, which is another process and a
+    // network away; served in accept order they would hold up every client
+    // behind them — a shell's health check included.
+    let mut mock = MockApp::doc_semantics();
+    mock.workshop_delay = Duration::from_millis(600);
+    let s = Server::start("workshop-slow", mock);
+
+    let sock = s.sock.clone();
+    let slow = thread::spawn(move || request_at(&sock, b"workshop search sort=popular\n"));
+    // Give the slow request time to be accepted and dispatched.
+    thread::sleep(Duration::from_millis(100));
+
+    let started = Instant::now();
+    assert_eq!(s.request(b"ping\n"), b"pong\n");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_millis(400),
+        "ping waited {waited:?} behind a slow workshop request"
+    );
+
+    let reply = slow.join().expect("the slow request still answers");
+    assert!(String::from_utf8_lossy(&reply).contains("Search("));
 }

@@ -102,7 +102,7 @@ pub fn scan(root: Option<&Path>) -> Vec<Item> {
 }
 
 /// Describe one item directory, or `None` when it is not a workshop item.
-fn describe(dir: &Path) -> Option<Item> {
+pub(crate) fn describe(dir: &Path) -> Option<Item> {
     let id = dir.file_name()?.to_string_lossy().into_owned();
     let project = kirie_formats::project::Project::from_path(dir.join("project.json")).ok();
 

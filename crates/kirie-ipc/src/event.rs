@@ -3,7 +3,7 @@
 
 use crossbeam_channel::Sender;
 
-use crate::command::Command;
+use crate::command::{Command, WorkshopRequest};
 use crate::status::StatusSnapshot;
 
 /// App-side outcome of a fallible command, mapped onto the wire vocabulary
@@ -44,6 +44,24 @@ pub enum IpcEvent {
     /// trailing `\n`, exactly as it does for `getproperties`.
     List {
         /// Reply channel; `bounded(1)`, send never blocks.
+        reply: Sender<String>,
+    },
+    /// `workshop …` request (docs/compat-socket.md §13, a kirie extension):
+    /// the app answers with a **single-line JSON** body, framed by the server
+    /// with one trailing `\n` exactly as `list` is.
+    ///
+    /// Unlike every other event here, the app must **not** do the work before
+    /// replying: a Workshop query talks to Steam through a helper process and
+    /// takes seconds, while a subscription takes as long as the download. The
+    /// app answers `search`/`state` from a worker thread and `subscribe` with
+    /// a job id straight away, so neither the app loop nor the socket thread
+    /// waits on Steam (SPEC V4).
+    Workshop {
+        /// Which Workshop request this is.
+        request: WorkshopRequest,
+        /// Reply channel carrying the JSON body; `bounded(1)`, send never
+        /// blocks. Dropping it without a reply ⇒ zero response bytes (the
+        /// dead-engine signal, doc §3).
         reply: Sender<String>,
     },
     /// `status` request (doc §4.2): the app answers with an immutable
