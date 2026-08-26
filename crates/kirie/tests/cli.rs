@@ -356,6 +356,13 @@ fn corpus_info_every_item_dir_succeeds() {
         dirs.len()
     );
     for dir in &dirs {
+        // Unsubscribing leaves the directory behind: Steam removes the files it
+        // owns, and kirie's own `.kirie-cache` keeps the directory itself
+        // alive. A workshop dir with no project.json is that leftover, not a
+        // broken item, and `kirie list` skips it for the same reason.
+        if !dir.join("project.json").is_file() {
+            continue;
+        }
         let out = run_kirie([OsStr::new("info"), dir.as_os_str()]);
         let stdout = assert_success(&out, &format!("info {}", dir.display()));
         assert!(
