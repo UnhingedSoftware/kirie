@@ -20,6 +20,11 @@ use std::path::PathBuf;
 
 fn main() {
     println!("cargo:rerun-if-env-changed=KIRIE_EMBED_WEBVIEWHOST");
+    // `update.rs` reads this through `option_env!`, which cargo does not track
+    // on its own: without this line a rebuild after the tag changed would keep
+    // the stale stamp, and `kirie update` would report the wrong version of
+    // itself forever.
+    println!("cargo:rerun-if-env-changed=KIRIE_RELEASE_TAG");
 
     let out_dir = PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     let blob = out_dir.join("webviewhost.bin");
