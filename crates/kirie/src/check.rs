@@ -142,7 +142,11 @@ fn check_workshop(r: &mut Report) {
             "workshop library",
             "Steam records no items for this app",
         );
-        r.hint("subscribe to wallpapers in Steam, or pass --dir to point at a folder.");
+        r.hint("subscribe to wallpapers in Steam, or browse from here: kirie workshop browse.");
+        // Whether browsing works is *more* interesting on a machine with
+        // nothing installed, not less — reporting it only for libraries that
+        // already have wallpapers left a fresh install with no answer at all.
+        check_workshop_browse(r);
         return;
     }
 

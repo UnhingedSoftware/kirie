@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod assets;
 pub mod check;
 pub mod compat;
 pub mod detect;
@@ -63,6 +64,12 @@ enum Command {
     },
     /// List the GPUs kirie can render on (values accepted by `--gpu`)
     Gpus {
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
+    },
+    /// Report where Wallpaper Engine's shared assets are, if installed
+    Assets {
         /// Emit JSON (for shells, panels and other tooling)
         #[arg(long)]
         json: bool,
@@ -235,7 +242,8 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
                 || sub == "list"
                 || sub == "gpus"
                 || sub == "workshop"
-                || sub == "update" =>
+                || sub == "update"
+                || sub == "assets" =>
         {
             run_subcommand(args)
         }
@@ -264,6 +272,17 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
     let cli = Cli::parse_from(args);
     // `check` owns its exit code: it reports prerequisites as a checklist and
     // exits nonzero when a required check failed (not via an error).
+    if let Command::Assets { json } = &cli.command {
+        return match assets::run(*json) {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) => ExitCode::FAILURE,
+            Err(err) => {
+                eprintln!("error: {}", render_chain(&err));
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if let Command::Check { path } = &cli.command {
         return match check::run(path.as_deref()) {
             Ok(true) => ExitCode::SUCCESS,
@@ -326,7 +345,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             #[cfg(feature = "tui")]
             WorkshopCommand::Browse => workshop::tui::run(),
         },
-        Command::Check { .. } => unreachable!("handled above"),
+        Command::Check { .. } | Command::Assets { .. } => unreachable!("handled above"),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
