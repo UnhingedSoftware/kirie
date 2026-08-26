@@ -308,7 +308,23 @@ jobs:
           if gh release view "$V" >/dev/null 2>&1; then
             echo "release $V exists — updating in place (not deleting)"
             gh release edit "$V" --draft --title "$V" --notes-file RELEASE_NOTES.md
-            gh release upload "$V" $files --clobber
+            # Clear each asset by name first. `--clobber` alone is not enough:
+            # a run cancelled mid-upload leaves a half-created asset, and the
+            # API then answers 400 for a fresh upload of that name rather than
+            # replacing it (hit on the 107 MB cef binary). Deleting is allowed
+            # to fail — usually it is simply not there.
+            for f in $files; do
+              gh release delete-asset "$V" "$f" --yes 2>/dev/null || true
+            done
+            # And retry: uploads this size cross a network, and one failure
+            # should not throw away a green build.
+            uploaded=0
+            for attempt in 1 2 3; do
+              if gh release upload "$V" $files --clobber; then uploaded=1; break; fi
+              echo "upload attempt $attempt failed; retrying in 20s"
+              sleep 20
+            done
+            [ "$uploaded" = 1 ] || { echo "::error::could not upload assets"; exit 1; }
           else
             echo "creating draft $V"
             gh release create "$V" --draft --title "$V" --target "$GITHUB_SHA" \
