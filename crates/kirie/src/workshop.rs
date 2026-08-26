@@ -663,24 +663,32 @@ pub fn query_from_args(line: &str) -> Query {
 
     let mut rest = line.trim();
     while !rest.is_empty() {
-        let (token, tail) = match rest.split_once(char::is_whitespace) {
-            Some((token, tail)) => (token, tail.trim_start()),
-            None => (rest, ""),
-        };
+        let (token, tail) = split_token(rest);
         let Some((key, value)) = token.split_once('=') else {
             rest = tail;
             continue;
         };
+        // A value may be quoted, because Workshop tags have spaces in them
+        // ("Audio responsive", "Puppet Warp"): unquoted, the tag was cut at
+        // the space and matched nothing at all.
+        let value = value
+            .strip_prefix('"')
+            .and_then(|v| v.strip_suffix('"'))
+            .unwrap_or(value);
         match key {
-            // Everything after `text=` is the phrase, tail included.
+            // A bare `text=` takes the rest of the line; a quoted one ends at
+            // its closing quote, so filters may follow it.
             "text" => {
-                let phrase = if tail.is_empty() {
+                let quoted = token.starts_with("text=\"");
+                let phrase = if quoted || tail.is_empty() {
                     value.to_owned()
                 } else {
                     format!("{value} {tail}")
                 };
                 query.text = Some(phrase.trim().to_owned());
-                return query;
+                if !quoted {
+                    return query;
+                }
             }
             "tag" => query.tags.push(value.to_owned()),
             "nottag" => query.excluded_tags.push(value.to_owned()),
@@ -694,6 +702,30 @@ pub fn query_from_args(line: &str) -> Query {
         rest = tail;
     }
     query
+}
+
+/// Split one `key=value` token off an argument line, honouring quotes.
+///
+/// Returns the token and whatever follows it. A quoted value runs to its
+/// closing quote (or the end of the line, for an unterminated one — a bad
+/// request must not lose the rest of the query, V9).
+fn split_token(rest: &str) -> (&str, &str) {
+    let quote_at = rest.find("=\"");
+    let end = match quote_at {
+        Some(open) => rest[open + 2..]
+            .find('"')
+            .map_or(rest.len(), |close| open + 2 + close + 1),
+        None => rest.len(),
+    };
+    // A quote that turns up after the first whitespace belongs to a later
+    // token, so it does not extend this one.
+    let space = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let cut = if quote_at.is_some_and(|at| at < space) {
+        end
+    } else {
+        space
+    };
+    (&rest[..cut], rest[cut..].trim_start())
 }
 
 /// Answer one control-socket `workshop` request.
@@ -951,6 +983,37 @@ fn human_size(bytes: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_quoted_tag_keeps_its_spaces() {
+        // Workshop tags have spaces in them; unquoted, "Audio responsive" was
+        // cut at the space and matched nothing.
+        let query = query_from_args(r#"tag="Audio responsive" tag=Scene sort=trend"#);
+        assert_eq!(query.tags, vec!["Audio responsive", "Scene"]);
+        assert_eq!(query.sort, "trend");
+    }
+
+    #[test]
+    fn a_quoted_phrase_lets_filters_follow_it() {
+        let query = query_from_args(r#"text="blue sky" tag=Scene"#);
+        assert_eq!(query.text.as_deref(), Some("blue sky"));
+        assert_eq!(query.tags, vec!["Scene"]);
+    }
+
+    #[test]
+    fn a_bare_phrase_still_takes_the_rest_of_the_line() {
+        let query = query_from_args("sort=recent text=blue sky at night");
+        assert_eq!(query.text.as_deref(), Some("blue sky at night"));
+        assert_eq!(query.sort, "recent");
+    }
+
+    #[test]
+    fn an_unterminated_quote_does_not_eat_the_query() {
+        // V9: malformed input answers something sane rather than dropping the
+        // rest of the request on the floor.
+        let query = query_from_args(r#"tag="Puppet Warp sort=trend"#);
+        assert_eq!(query.tags, vec![r#""Puppet Warp sort=trend"#]);
+    }
 
     #[test]
     fn reads_a_search_result() {
