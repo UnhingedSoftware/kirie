@@ -551,7 +551,14 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
         if expected_ids.iter().any(|e| e == id) {
             continue;
         }
-        Project::from_path(dir.join(id).join("project.json"))
+        // A directory with no project.json is not an item: unsubscribing
+        // leaves one behind, because Steam removes only the files it owns and
+        // kirie's own `.kirie-cache` keeps the directory alive.
+        let manifest = dir.join(id).join("project.json");
+        if !manifest.is_file() {
+            continue;
+        }
+        Project::from_path(manifest)
             .with_context(|| format!("newly installed corpus item {id}: project.json failed to parse"))?;
     }
 
