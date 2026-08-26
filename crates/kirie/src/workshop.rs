@@ -361,8 +361,19 @@ fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
     let output = command
         .output()
         .with_context(|| format!("could not run {}", helper.display()))?;
+    // The answer is the LAST line, not the whole of stdout: the Steam client
+    // library the helper dlopens prints banners of its own when it starts up,
+    // and a client still coming up put one in front of the reply — which read
+    // as "the helper did not answer with JSON" for as long as Steam took to
+    // finish launching.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let value: serde_json::Value = serde_json::from_str(stdout.trim())
+    let answer = stdout
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_str(answer)
         .with_context(|| "the Steam helper did not answer with JSON".to_owned())?;
 
     if let Some(message) = value.get("error").and_then(serde_json::Value::as_str) {
