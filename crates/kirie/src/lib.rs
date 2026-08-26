@@ -24,6 +24,7 @@ pub mod gpus;
 pub mod info;
 pub mod list;
 pub mod soak;
+pub mod update;
 pub mod workshop;
 
 use std::ffi::OsString;
@@ -65,6 +66,15 @@ enum Command {
         /// Emit JSON (for shells, panels and other tooling)
         #[arg(long)]
         json: bool,
+    },
+    /// Update this binary to the newest release
+    Update {
+        /// Only report whether a newer release exists
+        #[arg(long)]
+        check: bool,
+        /// Replace a locally built binary with the release anyway
+        #[arg(long)]
+        force: bool,
     },
     /// Browse the Steam Workshop, subscribe to items, and check their state
     Workshop {
@@ -197,6 +207,19 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // The Workshop bridge, run as this same binary under a hidden verb. Checked
+    // before anything else, exactly like the webview host: the helper must
+    // touch no engine setup, and its process has to stay short-lived — a held
+    // Steamworks session makes Steam count it as playing Wallpaper Engine.
+    if args.get(1).is_some_and(|a| a == kirie_steam_helper::HELPER_ARG) {
+        let rest: Vec<String> = args
+            .iter()
+            .skip(2)
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        return kirie_steam_helper::run(&rest);
+    }
+
     match args.get(1).map(|s| s.to_string_lossy()) {
         None => {
             // Bare `kirie`: keep the version probe (a real engine would error
@@ -211,7 +234,8 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
                 || sub == "check"
                 || sub == "list"
                 || sub == "gpus"
-                || sub == "workshop" =>
+                || sub == "workshop"
+                || sub == "update" =>
         {
             run_subcommand(args)
         }
@@ -259,6 +283,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
         } => extract::run(&path, &output, tex_to_png),
         Command::List { dir, json } => list::run(dir.as_deref(), json),
         Command::Gpus { json } => gpus::run(json),
+        Command::Update { check, force } => update::run(check, force),
         Command::Workshop { command } => match command {
             WorkshopCommand::Search {
                 text,

@@ -116,6 +116,10 @@ jobs:
   #    CEF-linked binaries. Both artifacts upload from here.
   build-linux:
     needs: [prepare, test]
+    env:
+      # Stamped into the binaries so `kirie update` can tell which
+      # release it is running; a local build carries no stamp.
+      V: ${{ needs.prepare.outputs.version }}
     # Local org runner, focal-based image = glibc 2.31 - the same portability
     # floor debian:11 gave us, without a container (the runners have no
     # docker). 5.5 cores + local disk vs the 2-core hosted VM.
@@ -143,7 +147,7 @@ jobs:
       - name: Build default (portable)
         run: |
           export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
-          cargo build --release -p kirie --features portable
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable
 
       # Guard: ffmpeg + shaderc must be static; the engine must never link
       # libcef (the browser stays out-of-process in kirie-webhost).
@@ -173,10 +177,10 @@ jobs:
       - name: Build web-cef (engine + helper + webhost)
         run: |
           export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
-          cargo build --release -p kirie --features portable,web-cef
-          cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
-          cargo build --release -p kirie-web --features cef --bin kirie-webhost
-          cargo build --release -p kirie-launcher
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable,web-cef
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie-web --features cef --bin kirie-cef-helper
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie-web --features cef --bin kirie-webhost
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie-launcher
 
       - name: Package web-cef single file
         run: |
@@ -198,6 +202,10 @@ jobs:
   # 3. webview variant: ubuntu:22.04 ships webkit2gtk-4.1 (debian:11 only 4.0).
   build-webview:
     needs: [prepare, test]
+    env:
+      # Stamped into the binaries so `kirie update` can tell which
+      # release it is running; a local build carries no stamp.
+      V: ${{ needs.prepare.outputs.version }}
     # Local org runner, jammy-based image (22.04): webkit2gtk-4.1 + the same
     # glibc 2.35 floor the ubuntu:22.04 container had.
     runs-on: [self-hosted, pipewire-jammy]
@@ -227,9 +235,9 @@ jobs:
           export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
           # The host links gtk; the engine must not. Build it separately and
           # embed it, so scene-only wallpapers never map the gtk chain.
-          cargo build --release -p kirie-web --features webview --bin kirie-webviewhost
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie-web --features webview --bin kirie-webviewhost
           KIRIE_EMBED_WEBVIEWHOST="$PWD/target/release/kirie-webviewhost" \
-            cargo build --release -p kirie --features portable,web-webview
+            KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable,web-webview
 
       - name: Verify static deps + engine stays webkit-free
         run: |
@@ -255,6 +263,7 @@ jobs:
           name: kirie-web-webview-linux-x86_64
           path: kirie-web-webview-linux-x86_64
           if-no-files-found: error
+
 
   # 4. Create/update the draft release once, with all built artifacts + notes.
   release:
@@ -291,6 +300,7 @@ jobs:
           | `kirie-linux-x86_64` | scenes + video + images |
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
+
           EOF
           echo "attaching:"; echo "$files"
           # No checkout here, so gh must stay API-only: GH_REPO gives the repo and

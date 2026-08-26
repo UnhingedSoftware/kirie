@@ -60,6 +60,10 @@ kirie-render = { path = "../kirie-render" }
 kirie-bake = { path = "../kirie-bake" }
 kirie-video = { path = "../kirie-video" }
 kirie-ipc = { path = "../kirie-ipc" }
+# The Workshop bridge. Linked in so the engine ships as ONE file and re-execs
+# itself to run it (`kirie __steamhelper …`); the unsafe stays inside that
+# crate, which is why kirie keeps `#![forbid(unsafe_code)]`.
+kirie-steam-helper = { path = "../kirie-steam-helper" }
 kirie-audio = { path = "../kirie-audio" }
 # Optional: only compiled when a `web-*` feature selects a backend. Keeping it
 # `optional` (rather than always-on) is what keeps the default build from

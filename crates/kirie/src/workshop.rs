@@ -356,14 +356,10 @@ pub fn apply(socket: &Path, screen: &str, dir: &Path) -> Result<()> {
 /// The helper reports failure as `{"error": "…"}` on stdout rather than by
 /// exit code alone, so that a caller always has something to show the user.
 fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
-    let helper = helper_path().ok_or_else(|| {
-        anyhow!(
-            "kirie-steam-helper was not found (it ships beside kirie; set \
-             KIRIE_STEAM_HELPER to point at it)"
-        )
-    })?;
+    let (helper, prefix) = helper_command()?;
 
     let mut command = std::process::Command::new(&helper);
+    command.args(prefix);
     command.args(args);
     for root in crate::compat::steam::libraries() {
         command.arg(root);
@@ -417,31 +413,32 @@ pub fn probe() -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// Where the helper binary is.
+/// How to run the Steam bridge: a program, and the arguments that come before
+/// the verb.
 ///
-/// `KIRIE_STEAM_HELPER` first (a packaging override, and what the tests use),
-/// then beside kirie itself — which is how it ships — and finally `PATH`, for
-/// a distribution that splits the two.
-#[must_use]
-pub fn helper_path() -> Option<PathBuf> {
-    const NAME: &str = "kirie-steam-helper";
-
+/// Normally this binary re-executing itself — kirie ships as one file, so the
+/// bridge is not a second executable beside it. `KIRIE_STEAM_HELPER` still
+/// points at a standalone build, which is how the crate's own binary is
+/// exercised by hand.
+fn helper_command() -> Result<(PathBuf, Vec<String>)> {
     if let Some(explicit) = std::env::var_os("KIRIE_STEAM_HELPER") {
         let path = PathBuf::from(explicit);
-        return path.is_file().then_some(path);
-    }
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let beside = dir.join(NAME);
-        if beside.is_file() {
-            return Some(beside);
+        if path.is_file() {
+            return Ok((path, Vec::new()));
         }
     }
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join(NAME))
-        .find(|candidate| candidate.is_file())
+    let exe = std::env::current_exe().context("could not find this binary")?;
+    Ok((exe, vec![kirie_steam_helper::HELPER_ARG.to_owned()]))
+}
+
+/// Whether the Steam bridge can be run at all.
+///
+/// Always, now that it is carried inside the engine — kept as a function
+/// because `kirie check` reports it, and because an install can still point
+/// `KIRIE_STEAM_HELPER` at something that is not there.
+#[must_use]
+pub fn helper_path() -> Option<PathBuf> {
+    helper_command().ok().map(|(program, _)| program)
 }
 
 /// Build an [`Item`] from one helper result.

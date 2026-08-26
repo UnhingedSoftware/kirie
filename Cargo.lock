@@ -2322,6 +2322,7 @@ dependencies = [
  "kirie-ipc",
  "kirie-platform",
  "kirie-render",
+ "kirie-steam-helper",
  "kirie-video",
  "kirie-web",
  "pollster",
