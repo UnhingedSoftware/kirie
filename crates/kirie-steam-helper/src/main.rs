@@ -22,6 +22,7 @@
 //! kirie-steam-helper search [key=value]... [steam-root]...
 //! kirie-steam-helper state <id> [steam-root]...
 //! kirie-steam-helper subscribe <id> [steam-root]...
+//! kirie-steam-helper unsubscribe <id> [steam-root]...
 //! ```
 
 mod steam;
@@ -48,6 +49,7 @@ fn main() -> std::process::ExitCode {
         "search" => search(rest),
         "state" => state(rest),
         "subscribe" => subscribe(rest),
+        "unsubscribe" => unsubscribe(rest),
         other => {
             emit_error(&format!("unknown verb {other:?}"));
             std::process::ExitCode::FAILURE
@@ -236,6 +238,31 @@ fn subscribe(args: &[String]) -> std::process::ExitCode {
     };
 
     if let Err(err) = session.subscribe(id, CALL_TIMEOUT) {
+        emit_error(&err.to_string());
+        return std::process::ExitCode::FAILURE;
+    }
+
+    println!("{}", item_json(&session, id));
+    std::process::ExitCode::SUCCESS
+}
+
+/// Drop a subscription. Steam deletes the files on its own schedule, so the
+/// answer is the item's state rather than a promise that they are gone.
+fn unsubscribe(args: &[String]) -> std::process::ExitCode {
+    let Some((id, roots)) = id_and_roots(args) else {
+        emit_error("usage: kirie-steam-helper unsubscribe <id> [steam-root]…");
+        return std::process::ExitCode::FAILURE;
+    };
+
+    let session = match Session::open(&roots) {
+        Ok(session) => session,
+        Err(err) => {
+            emit_error(&err.to_string());
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    if let Err(err) = session.unsubscribe(id, CALL_TIMEOUT) {
         emit_error(&err.to_string());
         return std::process::ExitCode::FAILURE;
     }

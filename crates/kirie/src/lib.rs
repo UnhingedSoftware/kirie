@@ -149,6 +149,14 @@ enum WorkshopCommand {
     /// Browse the Workshop interactively
     #[cfg(feature = "tui")]
     Browse,
+    /// Drop a subscription; Steam removes the files on its own schedule
+    Unsubscribe {
+        /// Workshop id
+        id: String,
+        /// Emit JSON (for shells, panels and other tooling)
+        #[arg(long)]
+        json: bool,
+    },
     /// Report whether an item is subscribed, installed or downloading
     State {
         /// Workshop id
@@ -288,6 +296,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
                 &socket.unwrap_or_else(default_control_socket),
                 json,
             ),
+            WorkshopCommand::Unsubscribe { id, json } => workshop::run_unsubscribe(&id, json),
             WorkshopCommand::State { id, json } => workshop::run_state(&id, json),
             #[cfg(feature = "tui")]
             WorkshopCommand::Browse => workshop::tui::run(),

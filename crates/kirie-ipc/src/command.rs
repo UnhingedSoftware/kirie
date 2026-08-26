@@ -85,6 +85,10 @@ pub enum WorkshopRequest {
     /// (doc §6) and clients set short timeouts, so a reply held for the length
     /// of a download would simply time out.
     Subscribe(String),
+    /// `workshop unsubscribe <id>` — drop the subscription. Steam deletes the
+    /// files on its own schedule, so the reply reports state rather than
+    /// claiming they are gone.
+    Unsubscribe(String),
     /// `workshop job <n>` — how a subscription started earlier is going.
     Job(u64),
 }
@@ -499,6 +503,12 @@ fn parse_workshop(cur: &mut Cursor<'_>) -> Request {
         b"search" => Request::Workshop(WorkshopRequest::Search(rest_string(cur))),
         b"state" => match cur.token() {
             Some(id) => Request::Workshop(WorkshopRequest::State(String::from_utf8_lossy(id).into_owned())),
+            None => Request::Rejected,
+        },
+        b"unsubscribe" => match cur.token() {
+            Some(id) => Request::Workshop(WorkshopRequest::Unsubscribe(
+                String::from_utf8_lossy(id).into_owned(),
+            )),
             None => Request::Rejected,
         },
         b"subscribe" => match cur.token() {

@@ -197,6 +197,20 @@ pub fn subscribe(id: &str) -> Result<Item> {
     Ok(item)
 }
 
+/// Drop this account's subscription to an item.
+///
+/// Steam removes the files on its own schedule, so the returned item may still
+/// report a directory: the subscription is what changed.
+///
+/// # Errors
+/// As [`search`], plus Steam refusing the unsubscribe itself.
+pub fn unsubscribe(id: &str) -> Result<Item> {
+    let answer = ask_helper(&["unsubscribe".to_owned(), id.to_owned()])?;
+    let mut item = item_from(&answer)?;
+    mark_local(std::slice::from_mut(&mut item));
+    Ok(item)
+}
+
 /// Report what Steam knows about one item without changing anything.
 ///
 /// # Errors
@@ -758,6 +772,13 @@ pub fn serve_socket(
                 };
                 let _ = reply.send(body);
             }
+            W::Unsubscribe(id) => {
+                let body = match unsubscribe(&id) {
+                    Ok(item) => to_json(std::slice::from_ref(&item)),
+                    Err(err) => error(&err.to_string()),
+                };
+                let _ = reply.send(body);
+            }
             W::State(id) => {
                 let body = match state(&id) {
                     Ok(item) => to_json(std::slice::from_ref(&item)),
@@ -932,6 +953,24 @@ pub fn run_subscribe(id: &str, wait: bool, apply_to: Option<&str>, socket: &Path
     if let Some(screen) = apply_to {
         apply(socket, screen, &dir)?;
         println!("applied to {screen}");
+    }
+    Ok(())
+}
+
+/// Run `kirie workshop unsubscribe`.
+///
+/// # Errors
+/// As [`unsubscribe`].
+pub fn run_unsubscribe(id: &str, json: bool) -> Result<()> {
+    let item = unsubscribe(id)?;
+    if json {
+        println!("{}", to_json(std::slice::from_ref(&item)));
+        return Ok(());
+    }
+
+    println!("unsubscribed from {} ({})", item.id, item.title);
+    if item.installed {
+        println!("Steam removes the files when it next runs");
     }
     Ok(())
 }

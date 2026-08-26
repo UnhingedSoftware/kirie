@@ -100,6 +100,7 @@ pub struct Session {
     get_tag: unsafe extern "C" fn(*mut c_void, u64, u32, u32, *mut c_char, u32) -> bool,
     release_query: unsafe extern "C" fn(*mut c_void, u64) -> bool,
     subscribe_item: unsafe extern "C" fn(*mut c_void, u64) -> u64,
+    unsubscribe_item: unsafe extern "C" fn(*mut c_void, u64) -> u64,
     download_item: unsafe extern "C" fn(*mut c_void, u64, bool) -> bool,
     get_item_state: unsafe extern "C" fn(*mut c_void, u64) -> u32,
     get_item_install_info:
@@ -217,6 +218,8 @@ impl Session {
                 std::mem::transmute(sym(b"SteamAPI_ISteamUGC_ReleaseQueryUGCRequest\0")?);
             let subscribe_item: unsafe extern "C" fn(*mut c_void, u64) -> u64 =
                 std::mem::transmute(sym(b"SteamAPI_ISteamUGC_SubscribeItem\0")?);
+            let unsubscribe_item: unsafe extern "C" fn(*mut c_void, u64) -> u64 =
+                std::mem::transmute(sym(b"SteamAPI_ISteamUGC_UnsubscribeItem\0")?);
             let download_item: unsafe extern "C" fn(*mut c_void, u64, bool) -> bool =
                 std::mem::transmute(sym(b"SteamAPI_ISteamUGC_DownloadItem\0")?);
             let get_item_state: unsafe extern "C" fn(*mut c_void, u64) -> u32 =
@@ -280,6 +283,7 @@ impl Session {
                 get_tag,
                 release_query,
                 subscribe_item,
+                unsubscribe_item,
                 download_item,
                 get_item_state,
                 get_item_install_info,
@@ -704,6 +708,28 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Drop this account's subscription to an item.
+    ///
+    /// Steam removes the files itself, on its own schedule — this reports the
+    /// item's state once it has accepted, which is the honest answer: the
+    /// directory may still be on disk for a while.
+    ///
+    /// Unlike [`Self::subscribe`], the call result is not read back: the
+    /// completion is enough, and the item's own state says what happened
+    /// without depending on a callback id staying put across SDK versions.
+    pub fn unsubscribe(&self, id: u64, timeout: std::time::Duration) -> Result<ItemState, SteamError> {
+        // SAFETY: the interface pointer Steam returned plus a plain integer.
+        let call = unsafe { (self.unsubscribe_item)(self.ugc, id) };
+        if call == 0 {
+            return Err(SteamError::InitFailed(
+                "Steam did not accept the unsubscribe".to_owned(),
+            ));
+        }
+        // SAFETY: `call` is the handle Steam just returned.
+        unsafe { self.await_call(call, timeout) }?;
+        Ok(self.item_state(id))
     }
 
     /// Block until an async call completes, or `timeout` elapses.
