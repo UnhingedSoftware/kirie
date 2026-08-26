@@ -22,7 +22,13 @@ if ! ./target/release/kirie check 2>/dev/null | grep -q "web backend (webview)";
     exit 1
 fi
 
+# The Workshop surface shells out to this, and looks for it beside the engine
+# first: an install with the engine but not the helper answers every browse
+# with "kirie-steam-helper was not found".
+cargo build --release -p kirie-steam-helper
+
 install -m 755 target/release/kirie "$HOME/.local/bin/kirie"
+install -m 755 target/release/kirie-steam-helper "$HOME/.local/bin/kirie-steam-helper"
 # An older split install leaves a sibling host that is now dead weight; the
 # engine ignores it, but keeping it around invites confusion.
 rm -f "$HOME/.local/bin/kirie-webviewhost"
