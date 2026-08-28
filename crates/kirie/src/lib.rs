@@ -24,6 +24,8 @@ pub mod extract;
 pub mod gpus;
 pub mod info;
 pub mod list;
+pub mod preview;
+mod preview_render;
 pub mod soak;
 pub mod update;
 pub mod workshop;
@@ -97,6 +99,25 @@ enum Command {
         /// Emit JSON (for shells, panels and other tooling)
         #[arg(long)]
         json: bool,
+    },
+    /// Render a wallpaper into a socket instead of onto a screen
+    ///
+    /// Streams frames to whoever connects and takes property changes back on
+    /// the same connection. Touches nothing on the desktop: no surface, no
+    /// layer shell, and no contact with a running engine.
+    Preview {
+        /// Where to listen
+        #[arg(long)]
+        socket: PathBuf,
+        /// The wallpaper to render: a Workshop id or a directory
+        #[arg(long = "bg")]
+        background: String,
+        /// Frames a second, 1..=120
+        #[arg(long)]
+        fps: Option<u32>,
+        /// Longest edge of the rendered frame, in pixels
+        #[arg(long)]
+        size: Option<u32>,
     },
     /// Extract a scene.pkg's entries, or decode a .tex to PNG(s)
     Extract {
@@ -243,6 +264,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
                 || sub == "gpus"
                 || sub == "workshop"
                 || sub == "update"
+                || sub == "preview"
                 || sub == "assets" =>
         {
             run_subcommand(args)
@@ -295,6 +317,13 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
     }
     let result = match cli.command {
         Command::Info { path } => info::run(&path),
+        Command::Preview {
+            socket,
+            background,
+            fps,
+            size,
+        } => preview::check_socket(&socket)
+            .and_then(|()| preview::run(&socket, std::path::Path::new(&background), fps, size)),
         Command::Extract {
             path,
             output,

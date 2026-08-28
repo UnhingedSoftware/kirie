@@ -12,8 +12,11 @@ use crate::compat::resolve;
 
 /// Run `kirie assets`.
 ///
-/// Exits non-zero when the directory is not found, so a script can branch on
-/// the status alone.
+/// `--json` always succeeds: the answer is in the payload, and a caller that
+/// cannot parse the output learns something useful from that — an engine too
+/// old to know this subcommand treats `assets` as a wallpaper path and says so
+/// in prose. Without `--json` the exit status carries the answer, so a script
+/// can branch on it alone.
 ///
 /// # Errors
 /// Only a write failure to stdout.
@@ -35,5 +38,5 @@ pub fn run(json: bool) -> Result<bool> {
         println!("(install Wallpaper Engine via Steam, or set KIRIE_WE_ASSETS)");
     }
 
-    Ok(dir.is_some())
+    Ok(json || dir.is_some())
 }

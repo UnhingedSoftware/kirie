@@ -100,7 +100,7 @@ fn scene_projection_dims(scene_json: &[u8]) -> Option<(u32, u32)> {
 
 /// Read the projection dims straight out of a scene's `scene.pkg` (`scene.json`
 /// entry). Best-effort: any read/parse failure ⇒ `None` (default canvas).
-fn read_scene_projection(dir: &Path) -> Option<(u32, u32)> {
+pub(crate) fn scene_projection(dir: &Path) -> Option<(u32, u32)> {
     let pkg = kirie_formats::pkg::OwnedPkg::from_path(dir.join("scene.pkg")).ok()?;
     let bytes = pkg.read_name(b"scene.json").ok()?;
     scene_projection_dims(bytes)
@@ -109,7 +109,7 @@ fn read_scene_projection(dir: &Path) -> Option<(u32, u32)> {
 /// Scale `w×h` so its longest edge is at most `max_edge`, preserving aspect
 /// (never upscales — small projections are kept verbatim). Each result dim is
 /// clamped to ≥ 1 so a degenerate projection still yields a valid target.
-fn fit_aspect(w: u32, h: u32, max_edge: u32) -> SurfaceSize {
+pub(crate) fn fit_aspect(w: u32, h: u32, max_edge: u32) -> SurfaceSize {
     let max_edge = max_edge.max(1);
     let longest = w.max(h);
     if longest <= max_edge {
@@ -146,7 +146,7 @@ fn resolve_capture_size_with(override_size: Option<SurfaceSize>, wallpaper: &Wal
         return sz;
     }
     if let Wallpaper::Scene { dir } = wallpaper
-        && let Some((w, h)) = read_scene_projection(dir)
+        && let Some((w, h)) = scene_projection(dir)
     {
         return fit_aspect(w, h, CAPTURE_MAX_EDGE);
     }
@@ -613,7 +613,7 @@ fn capture_budget(wallpaper: &Wallpaper) -> Duration {
 /// Copy the target texture to a mappable buffer and return tightly packed
 /// RGBA8/BGRA8 (`width·height·4` bytes, row padding stripped) — the byte order
 /// is the texture's own (the caller reorders per format).
-fn readback(
+pub(crate) fn readback(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
