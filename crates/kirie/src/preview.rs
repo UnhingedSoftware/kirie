@@ -180,6 +180,14 @@ pub fn parse(line: &str) -> Option<Command> {
 /// How fast to render when nobody says.
 const DEFAULT_FPS: u32 = 30;
 
+/// How long to wait for a client before giving up and exiting.
+///
+/// A preview server is started by an editor and belongs to it. If that editor
+/// is killed rather than closed, nothing runs its cleanup — and without this
+/// the renderer outlives it, holding a wallpaper's textures for a window that
+/// no longer exists. Measured on this machine: 876 MB, indefinitely.
+const IDLE_EXIT: Duration = Duration::from_secs(30);
+
 /// The widest a preview is rendered by default.
 ///
 /// A preview is a panel, not a wallpaper: 960 across is more than any of them
@@ -213,21 +221,45 @@ pub fn run(socket: &Path, background: &Path, fps: Option<u32>, edge: Option<u32>
     // reconnect instant instead of another engine start.
     let mut engine: Option<crate::preview_render::Engine> = None;
 
-    for incoming in listener.incoming() {
-        let stream = match incoming {
-            Ok(stream) => stream,
+    // Non-blocking so the accept loop can give up: a blocking accept would
+    // wait for a client that is never coming.
+    listener
+        .set_nonblocking(true)
+        .context("preview socket nonblocking")?;
+
+    let mut waiting_since = Instant::now();
+    loop {
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                if waiting_since.elapsed() >= IDLE_EXIT {
+                    tracing::info!("no preview client; exiting");
+                    let _ = std::fs::remove_file(socket);
+                    return Ok(());
+                }
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "preview accept failed");
                 continue;
             }
         };
+        // Serving is blocking, and the client needs it that way.
+        stream.set_nonblocking(false).context("preview client blocking")?;
         // One client at a time, and a client going away is not an error: the
         // window closed.
         if let Err(error) = serve(stream, background, requested_fps, edge, &mut engine) {
             tracing::info!(%error, "preview client finished");
         }
+        // Nobody is watching, so nothing needs to be resident. The next client
+        // pays a rebuild — about a second — rather than this process holding a
+        // wallpaper's textures until it is killed.
+        if let Some(engine) = engine.as_mut() {
+            engine.release_scene();
+        }
+        waiting_since = Instant::now();
     }
-    Ok(())
 }
 
 /// Serve one connected client until it leaves.

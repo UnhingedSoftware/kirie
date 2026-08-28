@@ -49,6 +49,7 @@ impl Engine {
         let size = size_for(&wallpaper, background, edge);
         let (target, view) = make_target(&gpu.device, size);
         let renderer = build(&gpu, &view_target(&gpu, size), &wallpaper, size, &[])?;
+        settle();
 
         Ok(Self {
             pixels: Vec::with_capacity((size.width * size.height * 4) as usize),
@@ -81,9 +82,12 @@ impl Engine {
             self.pixels = Vec::with_capacity((size.width * size.height * 4) as usize);
         }
 
-        // The old renderer is dropped before the new one is built, so two
-        // scenes' worth of textures are never resident at once — which on a
-        // large scene is hundreds of megabytes.
+        // Dropped before the new one is built, and it takes saying so: an
+        // assignment evaluates its right-hand side first, so `self.renderer =
+        // build(..)` holds two scenes' worth of textures at once — hundreds of
+        // megabytes on a large scene, at the exact moment the second one is
+        // allocating.
+        self.renderer = build_placeholder();
         self.renderer = build(
             &self.gpu,
             &view_target(&self.gpu, size),
@@ -91,7 +95,21 @@ impl Engine {
             size,
             properties,
         )?;
+        settle();
         Ok(())
+    }
+
+    /// Drop the scene, keep the device.
+    ///
+    /// A wallpaper's decoded textures are most of what a preview costs — 374 MB
+    /// of the 532 MB a large scene peaks at, against a 158 MB floor for the
+    /// device itself. Holding them while no one is connected is holding them
+    /// for nobody. The device stays because it is what cannot be rebuilt: the
+    /// driver pipeline cache attaches to the first one made in the process.
+    pub(crate) fn release_scene(&mut self) {
+        self.renderer = build_placeholder();
+        self.pixels = Vec::new();
+        settle();
     }
 
     /// Render one frame and read it back.
@@ -155,6 +173,31 @@ fn view_target<'a>(gpu: &'a Headless, size: SurfaceSize) -> RenderTarget<'a> {
         output_name: "preview",
         size: (size.width, size.height),
     }
+}
+
+/// Give back what building a scene borrowed.
+///
+/// Decoding a scene's textures allocates far more than the scene keeps —
+/// the decode buffers are freed on the spot, but glibc holds the pages
+/// against the next allocation, and a preview's next allocation may be
+/// minutes away. The engine's own loop does exactly this after a build; the
+/// preview path bypasses that loop and so has to say it itself.
+fn settle() {
+    kirie_bake::trim_heap();
+    kirie_bake::pageout_cold_libs();
+}
+
+/// A renderer that owns nothing, to hold the slot while the old one is freed.
+///
+/// Cheaper than an `Option` around the field: every frame would otherwise have
+/// to consider a state that only exists for the length of a rebuild.
+fn build_placeholder() -> Box<dyn Renderer> {
+    /// Draws nothing, holds nothing.
+    struct Empty;
+    impl Renderer for Empty {
+        fn render(&mut self, _view: &wgpu::TextureView, _size: SurfaceSize, _dt: f32) {}
+    }
+    Box::new(Empty)
 }
 
 /// Build a renderer for the wallpaper on this device.
