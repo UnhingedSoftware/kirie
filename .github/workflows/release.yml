@@ -89,6 +89,7 @@ jobs:
           name: release-notes
           path: RELEASE_NOTES.md
           if-no-files-found: error
+          retention-days: 1
 
   # 1b. Test gate: no artifact ships from a tree with failing tests. This is
   #     the full `cargo test --workspace` (per-commit CI is lint-only).
@@ -193,11 +194,13 @@ jobs:
           name: kirie-linux-x86_64
           path: kirie-linux-x86_64
           if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@v4
         with:
           name: kirie-web-cef-linux-x86_64
           path: kirie-web-cef-linux-x86_64
           if-no-files-found: error
+          retention-days: 1
 
   # 3. webview variant: ubuntu:22.04 ships webkit2gtk-4.1 (debian:11 only 4.0).
   build-webview:
@@ -263,6 +266,7 @@ jobs:
           name: kirie-web-webview-linux-x86_64
           path: kirie-web-webview-linux-x86_64
           if-no-files-found: error
+          retention-days: 1
 
 
   # 4. Create/update the draft release once, with all built artifacts + notes.
@@ -331,3 +335,18 @@ jobs:
               --notes-file RELEASE_NOTES.md $files
           fi
           echo "Draft $V ready with all artifacts attached."
+
+      # The binaries now live on the release, so the copies that carried them
+      # between jobs are dead weight — and not free: 60 of them, 1.85 GB, once
+      # filled the account's artifact storage and failed an unrelated repo's
+      # first release run. retention-days is the backstop; this is the fix.
+      - name: Drop this run's artifacts
+        if: always()
+        run: |
+          set -uo pipefail
+          gh api "/repos/$GH_REPO/actions/runs/$GITHUB_RUN_ID/artifacts" \
+            --jq '.artifacts[].id' | while read -r id; do
+            gh api -X DELETE "/repos/$GH_REPO/actions/artifacts/$id" >/dev/null 2>&1 \
+              && echo "deleted artifact $id" \
+              || echo "could not delete artifact $id (leaving it)"
+          done
