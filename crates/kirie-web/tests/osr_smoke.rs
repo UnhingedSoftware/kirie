@@ -1,21 +1,3 @@
-//! CEF off-screen-rendering smoke test (feature `cef` only).
-//!
-//! Drives a real windowless CEF browser over one corpus web wallpaper's
-//! `index.html`, pumps its message loop until a non-blank frame is painted,
-//! and writes it to a PNG for inspection. This is the end-to-end proof that
-//! the OSR paint path (docs/subsystems-misc.md §3.5) actually renders.
-//!
-//! Requires the CEF runtime files next to the test binary (the `cef-dll-sys`
-//! build script copies them into `target/<profile>/`) and `libcef.so` on the
-//! loader path — run with:
-//!
-//! ```text
-//! LD_LIBRARY_PATH=target/debug \
-//!   cargo test -p kirie-web --features cef --test osr_smoke -- --nocapture --ignored
-//! ```
-//!
-//! Marked `#[ignore]` so the default `cargo test` (which cannot link libcef on
-//! a box without it) never runs it.
 #![cfg(feature = "cef")]
 
 use std::time::{Duration, Instant};
@@ -37,7 +19,6 @@ fn osr_renders_corpus_index() {
 
     let mut backend = CefBackend::new(&url, size).expect("create CEF backend");
 
-    // Pump for up to ~12s waiting for a non-blank paint.
     let deadline = Instant::now() + Duration::from_secs(12);
     let mut best: Option<(Vec<u8>, u32, u32)> = None;
     let mut non_blank = false;
@@ -50,7 +31,6 @@ fn osr_renders_corpus_index() {
             best = Some((owned, frame.width, frame.height));
             if !blank {
                 non_blank = true;
-                // Keep pumping a little longer so animations settle, then stop.
                 break;
             }
         }
@@ -61,7 +41,6 @@ fn osr_renders_corpus_index() {
 
     let (data, w, h) = best.expect("no frame was ever painted");
 
-    // Convert BGRA (CEF native) -> RGBA for PNG.
     let mut rgba = data.clone();
     for px in rgba.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
@@ -77,8 +56,6 @@ fn osr_renders_corpus_index() {
     );
 }
 
-/// Two backends share one CEF context: both paint concurrently (the
-/// multi-monitor web case), and closing one leaves the other painting.
 #[test]
 #[ignore = "needs libcef runtime; run explicitly with LD_LIBRARY_PATH set"]
 fn osr_two_browsers_share_one_context() {
@@ -93,8 +70,6 @@ fn osr_two_browsers_share_one_context() {
     };
 
     let mut a = CefBackend::new(&url, size_a).expect("create first CEF backend");
-    // The second backend must join the same context instead of failing on the
-    // old process-singleton gate.
     let mut b = CefBackend::new(&url, size_b).expect("create second CEF backend");
 
     let deadline = Instant::now() + Duration::from_secs(12);
@@ -115,7 +90,6 @@ fn osr_two_browsers_share_one_context() {
     assert!(a_painted, "first browser never painted a non-blank frame");
     assert!(b_painted, "second browser never painted a non-blank frame");
 
-    // Closing A must not tear the shared context down: B keeps painting.
     a.shutdown();
     let mut b_after = false;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -133,8 +107,6 @@ fn osr_two_browsers_share_one_context() {
     b.shutdown();
 }
 
-/// A frame is "blank" if every pixel is identical (uniform colour, e.g. the
-/// transparent/white default before the page renders anything).
 fn is_blank(data: &[u8]) -> bool {
     if data.len() < 8 {
         return true;

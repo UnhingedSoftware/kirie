@@ -1,19 +1,3 @@
-//! The control-socket application thread (docs/compat-socket.md §4-§5).
-//!
-//! `kirie-ipc` owns the socket thread and delivers typed [`IpcEvent`]s over a
-//! channel; this module owns the thread that *applies* them. Keeping a
-//! dedicated applier thread (rather than touching the render thread) is the
-//! SPEC V3/V4 shape: the applier solely owns the screen registry and the live
-//! [`VideoControl`] handles, everything crosses threads by channel, and the
-//! render thread is never blocked on a socket client.
-//!
-//! Live effects are applied where kirie has a handle: `speed`/`volume`/`mute`/
-//! `scaling` reach video wallpapers through [`VideoControl`]; `status` is
-//! answered from the owned registry; commands that need a render-thread
-//! rebuild kirie cannot do live in P3 (`bg`, structural `property`, socket
-//! `screenshot`) reply `error\n` honestly. `preload` and recognized `set`
-//! keys reply `ok\n` per the protocol (doc §4.6, §4.8).
-
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -28,94 +12,34 @@ use kirie_ipc::{
 };
 use kirie_video::{ScalingMode as VideoScaling, VideoControl};
 
-/// A live-control handle registered by the render factory as each wallpaper is
-/// built, sent to the applier over the register channel.
 pub enum Register {
-    /// A video wallpaper became live on `screen`; its control handle drives
-    /// speed/volume/mute/scaling.
-    Video {
-        /// The screen the wallpaper is registered under.
-        screen: String,
-        /// Its live-control handle.
-        control: VideoControl,
-    },
-    /// The engine swapped `screen`'s background itself (playlist rotation), so
-    /// `status` must report the on-screen path — the reference's
-    /// `setBackground` updates `screenBackgrounds` the same way
-    /// (WallpaperApplication.cpp:1050).
-    Background {
-        /// The screen whose background changed.
-        screen: String,
-        /// The new background path.
-        bg: PathBuf,
-    },
+    Video { screen: String, control: VideoControl },
+    Background { screen: String, bg: PathBuf },
 }
 
-/// One registered background the socket reports and drives (doc §4.2, §4.7).
 struct ScreenEntry {
     bg: Option<PathBuf>,
     control: Option<VideoControl>,
 }
 
-/// The applier's owned state (SPEC V3: sole owner, nothing shared).
 struct AppState {
-    /// Registered screens keyed lexicographically, matching the C++ `std::map`
-    /// iteration order the `status` reply depends on (doc §4.2).
     screens: BTreeMap<String, ScreenEntry>,
-    /// Subscriptions started over the socket (docs/compat-socket.md §13).
-    ///
-    /// Shared with the worker threads that run them: a download outlives the
-    /// request that started it, so the progress has to live somewhere the next
-    /// `workshop job` request can read.
     workshop_jobs: Arc<crate::workshop::Jobs>,
-    /// Global playback speed, reported by `status` and forwarded to videos
-    /// (doc §4.3).
     speed: f32,
-    /// Current volume 0-128 (doc §4.4). Forwarded to videos as 0-100.
     volume: i32,
-    /// Mute gate (doc §4.5).
     muted: bool,
-    /// Stored per-key property overrides (doc §4.9: recorded even when not
-    /// live-applicable; "applies in P4/P5"). These belong to the wallpaper
-    /// currently shown — see `staged` for why the distinction matters.
     properties: BTreeMap<String, String>,
-    /// Overrides staged for the NEXT wallpaper (`stage` commands, sent by the
-    /// daemon before `bg`). A swap replaces `properties` with this table
-    /// wholesale: overrides are per-wallpaper, and merging them across a swap
-    /// leaks one wallpaper's settings into another — a scheme color saved for
-    /// one background repainted the next one's black sky light blue.
     staged: BTreeMap<String, String>,
-    /// Live-swap context (render-command sender + build params), set once the
-    /// platform is up. `None` until then (and on X11) → `bg`/`preload` error.
     swap: Arc<Mutex<Option<SwapCtx>>>,
-    /// Debounce generation for property-triggered rebuild-swaps: each live
-    /// `property` bumps it; a scheduled rebuild only fires if it is still the
-    /// newest, so a slider drag coalesces into one rebuild (doc §4.9 — the C++
-    /// engine reloads the wallpaper on `setProperty`; the rebuild-swap is the
-    /// no-black equivalent).
     prop_gen: Arc<std::sync::atomic::AtomicU64>,
 }
 
-/// Handle to the running applier thread.
-///
-/// The thread is detached: it exits on its own once the socket's event channel
-/// closes (the [`kirie_ipc::ControlSocket`] was dropped). Dropping `IpcApp`
-/// closes the register channel; the applier then serves the socket until it
-/// too closes — so drop *ordering* between the socket and this handle is
-/// irrelevant (no join, no deadlock).
 pub struct IpcApp {
     register: Sender<Register>,
-    /// Shared slot the run loop fills after the platform is up, so `bg`/`preload`
-    /// can build off-thread and swap on the render thread.
     swap: Arc<Mutex<Option<SwapCtx>>>,
 }
 
 impl IpcApp {
-    /// Spawn the applier thread, seeded with the parsed screen→background map
-    /// (so `status` is correct from the first request, before the renderers
-    /// attach their control handles) and the initial speed/volume/mute.
-    ///
-    /// `events` is the [`kirie_ipc::ControlSocket`] event receiver.
     pub fn spawn(
         events: Receiver<IpcEvent>,
         seed_screens: Vec<(String, Option<PathBuf>)>,
@@ -149,29 +73,23 @@ impl IpcApp {
         }
     }
 
-    /// A sender the render factory clones to register live controls.
     #[must_use]
     pub fn registrar(&self) -> Sender<Register> {
         self.register.clone()
     }
 
-    /// The shared live-swap slot; the run loop fills it once the platform's
-    /// command channel exists, enabling live `bg`/`preload` swaps.
     #[must_use]
     pub(crate) fn swap_slot(&self) -> Arc<Mutex<Option<SwapCtx>>> {
         self.swap.clone()
     }
 }
 
-/// The applier loop: serve socket events and control registrations until both
-/// channels close (SPEC V4: never blocks the render thread).
 fn run(state: &mut AppState, events: &Receiver<IpcEvent>, register: &Receiver<Register>) {
     loop {
         select! {
             recv(events) -> msg => match msg {
                 Ok(event) => handle_event(state, event),
                 Err(_) => {
-                    // Socket thread gone; drain any last registrations then stop.
                     while register.try_recv().is_ok() {}
                     return;
                 }
@@ -179,8 +97,6 @@ fn run(state: &mut AppState, events: &Receiver<IpcEvent>, register: &Receiver<Re
             recv(register) -> msg => match msg {
                 Ok(reg) => handle_register(state, reg),
                 Err(_) => {
-                    // Factory side gone; keep serving the socket until it too
-                    // closes, then stop.
                     while let Ok(event) = events.recv() {
                         handle_event(state, event);
                     }
@@ -191,12 +107,9 @@ fn run(state: &mut AppState, events: &Receiver<IpcEvent>, register: &Receiver<Re
     }
 }
 
-/// Attach a newly built wallpaper's live control to its screen entry.
 fn handle_register(state: &mut AppState, reg: Register) {
     match reg {
         Register::Video { screen, control } => {
-            // Apply the current global state to the freshly bound wallpaper
-            // (doc §4.7: current volume/mute/speed re-applied to new loads).
             control.set_speed(f64::from(state.speed));
             control.set_volume(f64::from(state.volume) * 100.0 / 128.0);
             control.set_mute(state.muted);
@@ -216,7 +129,6 @@ fn handle_register(state: &mut AppState, reg: Register) {
     }
 }
 
-/// Dispatch one socket event (doc §4 command table).
 fn handle_event(state: &mut AppState, event: IpcEvent) {
     match event {
         IpcEvent::Status { reply } => {
@@ -234,22 +146,12 @@ fn handle_event(state: &mut AppState, event: IpcEvent) {
             let _ = reply.send(snapshot);
         }
         IpcEvent::Workshop { request, reply } => {
-            // Steam lives behind a helper process and a download takes as long
-            // as it takes, so none of it may happen here: this loop also drives
-            // wallpaper swaps (SPEC V4). `serve_socket` answers from its own
-            // thread.
             crate::workshop::serve_socket(&state.workshop_jobs, request, reply);
         }
         IpcEvent::List { reply } => {
-            // Discovery lives in one place (`crate::list`), so the socket and
-            // `kirie list` can never disagree about what is installed.
             let _ = reply.send(crate::list::to_json(&crate::list::scan(None)));
         }
         IpcEvent::GetProperties { screen, reply } => {
-            // kirie extension (docs/compat-socket.md §11): report the selected
-            // screen's property schema with the recorded overrides folded into
-            // each `value`. The screen's background path is the workshop dir
-            // that holds `project.json`; `None` ⇒ the first registered screen.
             let source = match &screen {
                 Some(name) => state.screens.get(name).and_then(|e| e.bg.clone()),
                 None => state.screens.values().find_map(|e| e.bg.clone()),
@@ -267,9 +169,6 @@ fn handle_event(state: &mut AppState, event: IpcEvent) {
     }
 }
 
-/// Apply one command, returning the wire outcome (doc §4). For the always-ok
-/// commands the server ignores the value, but a reply is still the completion
-/// ack (kirie-ipc `IpcEvent` contract).
 fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
     match command {
         Command::Speed(s) => {
@@ -279,8 +178,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     c.set_speed(f64::from(s));
                 }
             }
-            // Scenes: scale the render clock (the reference multiplies g_Time
-            // by playbackSpeed, WallpaperApplication.cpp:908).
             if let Some(cmd_tx) = cmd_sender(state) {
                 let _ = cmd_tx.send(RenderCommand::SetSpeed(s));
             }
@@ -305,11 +202,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             }
             CommandOutcome::Ok
         }
-        // Recognized `set` keys always ack (doc §4.6). Live effects mirror the
-        // reference's setOption (WallpaperApplication.cpp:1318-1358): fps
-        // retargets the pacing cap; renderscale/disableparallax update the
-        // engine-global and rebuild the on-screen wallpapers (FBO sizes /
-        // parallax gates are baked at build time there too).
         Command::Set(opt) => {
             match opt {
                 SetOption::Fps(n) => {
@@ -326,35 +218,18 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     }
                 }
                 SetOption::BatteryFps(n) => {
-                    // The watcher reads this on its next poll; if the profile
-                    // is active it re-applies with the new cap then.
                     super::run::battery_fps_target().store(n, std::sync::atomic::Ordering::Relaxed);
                 }
                 SetOption::DisableParallax(on) if on != super::run::disable_parallax() => {
                     super::run::set_disable_parallax(on);
                     rebuild_current(state);
                 }
-                // noautomute/disablemouse/nofullscreenpause/audiodevice: ack
-                // only for now (follow-up: live audio-device re-init).
                 _ => {}
             }
             CommandOutcome::Ok
         }
-        // Live wallpaper swap (doc §4.7): build the new wallpaper off the render
-        // thread and swap it in — instant if it was `preload`ed, otherwise the
-        // old wallpaper keeps rendering until the build finishes. Errors only if
-        // the platform has no command channel (X11 / not up) or the path isn't a
-        // runnable non-web wallpaper.
         Command::Bg { screen, path } => {
-            // A pending debounced property-rebuild captured the PREVIOUS
-            // wallpaper's path at schedule time; firing after this switch would
-            // swap the old wallpaper back in. Invalidate it.
             state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            // Overrides are per-wallpaper: the staged table (this wallpaper's
-            // saved settings, sent via `stage` just before this command)
-            // replaces the previous wallpaper's outright. No staging ⇒ the new
-            // wallpaper runs on its project defaults, which is what an absent
-            // config means.
             state.properties = std::mem::take(&mut state.staged);
             let sc = state
                 .swap
@@ -371,8 +246,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 .collect();
             #[cfg(any(feature = "web-cef", feature = "web-webview"))]
             let props_web = props.clone();
-            // Non-web (video/image/scene): build off the render thread and swap
-            // (instant if it was preloaded).
             if let Some(build) = build_ctx.build_fn(screen.clone(), &path, props) {
                 let _ = cmd_tx.send(RenderCommand::Swap {
                     screen: screen.clone(),
@@ -389,11 +262,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     .bg = Some(path);
                 return CommandOutcome::Ok;
             }
-            // Web: built on the render thread and swapped in place — a brief
-            // hitch while the browser initializes, then the web wallpaper
-            // appears, no relaunch. Only reachable in a web-capable build;
-            // otherwise falls through to error (the daemon then shows a
-            // static preview).
             #[cfg(any(feature = "web-cef", feature = "web-webview"))]
             if let Some(build_local) = build_ctx.build_local_fn(screen.clone(), &path, props_web) {
                 let _ = cmd_tx.send(RenderCommand::SwapLocal {
@@ -412,9 +280,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             }
             CommandOutcome::Error
         }
-        // Warm-cache preload (doc §4.8, always acks): build the wallpaper off the
-        // render thread now and stash it, so a later `bg` for the same path is an
-        // instant pointer swap. Targets the primary output (`"*"` = first).
         Command::Preload { path } => {
             if let Some((cmd_tx, build_ctx)) = state
                 .swap
@@ -438,32 +303,17 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             CommandOutcome::Ok
         }
         Command::Property { screen, key, value } => {
-            // doc §4.9: error if the screen has no registered background. The
-            // override is recorded regardless (stored-before-validation) so a
-            // later swap/reload picks it up...
-            //
-            // `stage` (empty screen) records for the NEXT wallpaper only: the
-            // daemon stages the incoming wallpaper's saved overrides before
-            // `bg`, and the swap replaces the active table with the staged
-            // one. A live `property` targets the wallpaper on screen now.
             if screen.is_empty() {
                 state.staged.insert(key.clone(), value.clone());
                 return CommandOutcome::Ok;
             }
             state.properties.insert(key.clone(), value.clone());
-            // ...and applied LIVE to the running renderer on `screen` (a real
-            // monitor). `stage` maps here with an empty screen, which targets no
-            // output, so it only records (no live effect) — exactly its role.
             let sc = state
                 .swap
                 .lock()
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
             if let Some((cmd_tx, build_ctx)) = sc {
-                // Impact slot: starts `true` (assume structural); the render
-                // thread clears it when the renderer applied the change fully
-                // live (visibility flips, material constants, camera, general,
-                // script handlers — the overwhelming majority).
                 let structural = Arc::new(std::sync::atomic::AtomicBool::new(true));
                 let _ = cmd_tx.send(RenderCommand::SetProperty {
                     screen: screen.clone(),
@@ -471,14 +321,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     value,
                     structural: structural.clone(),
                 });
-                // Structural properties (vertex-baked transforms, effect
-                // visibility rewiring the pass chain, particle sims) still
-                // need the reference's reload semantics — a DEBOUNCED
-                // rebuild-swap (no relaunch, no black gap, slider drags
-                // coalesce). The render thread's impact verdict gates it: a
-                // fully-live change skips the rebuild entirely. Skipped for
-                // `stage` (empty screen: record-only) and web (no build_fn —
-                // the reference itself crashes CEF reloading web on property).
                 if !screen.is_empty()
                     && let Some(path) = state.screens.get(&screen).and_then(|e| e.bg.clone())
                 {
@@ -494,14 +336,12 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     std::thread::spawn(move || {
                         std::thread::sleep(std::time::Duration::from_millis(350));
                         if gen_slot.load(Ordering::SeqCst) != generation {
-                            return; // superseded by a newer property change
+                            return;
                         }
                         if !structural.load(Ordering::SeqCst) {
-                            return; // applied fully live — no rebuild needed
+                            return;
                         }
                         if let Some(build) = build_ctx.build_fn(screen_c.clone(), &path, props) {
-                            // Distinct key: a preload stashed under the plain path
-                            // was built with the OLD props — never serve it here.
                             let key = format!("{}#props", path.to_string_lossy());
                             let _ = cmd_tx.send(RenderCommand::Swap {
                                 screen: screen_c,
@@ -518,55 +358,32 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 CommandOutcome::Error
             }
         }
-        Command::Scaling { screen, mode } => {
-            // doc §4.10: mode already validated by the parser; error only if
-            // the screen has no recorded background. Videos retarget live via
-            // their control; scenes/images bake scaling at build time, so
-            // retarget the build params and rebuild — the reference's
-            // setScreenScaling invalidates + setBackground the same way
-            // (WallpaperApplication.cpp:1237-1259).
-            match state.screens.get(&screen) {
-                Some(entry) if entry.bg.is_some() => {
-                    if let Some(c) = &entry.control {
-                        c.set_scaling(map_scaling(mode));
-                    }
-                    if let Some((_, build_ctx)) = swap_parts(state)
-                        && build_ctx.set_scaling(scaling_to_args(mode))
-                    {
-                        rebuild_current(state);
-                    }
-                    CommandOutcome::Ok
+        Command::Scaling { screen, mode } => match state.screens.get(&screen) {
+            Some(entry) if entry.bg.is_some() => {
+                if let Some(c) = &entry.control {
+                    c.set_scaling(map_scaling(mode));
                 }
-                _ => CommandOutcome::Error,
-            }
-        }
-        Command::Clamp { screen, mode } => {
-            // Same error semantics as scaling (doc §4.11); clamp is baked at
-            // build time for every type, so retarget + rebuild
-            // (WallpaperApplication.cpp:1261-1276).
-            match state.screens.get(&screen) {
-                Some(entry) if entry.bg.is_some() => {
-                    if let Some((_, build_ctx)) = swap_parts(state)
-                        && build_ctx.set_clamp(clamp_to_args(mode))
-                    {
-                        rebuild_current(state);
-                    }
-                    CommandOutcome::Ok
+                if let Some((_, build_ctx)) = swap_parts(state)
+                    && build_ctx.set_scaling(scaling_to_args(mode))
+                {
+                    rebuild_current(state);
                 }
-                _ => CommandOutcome::Error,
+                CommandOutcome::Ok
             }
-        }
-        // Socket `screenshot` captures the *currently rendered* frame (doc
-        // §4.12). The applier can't touch the surface, so it hands the render
-        // thread a capture closure that re-renders the warm renderer's current
-        // state into an offscreen texture and writes `path`. The daemon polls
-        // for the file and ignores this reply, so acking before the write lands
-        // is fine; only a missing command channel (X11 / platform not up) errors.
+            _ => CommandOutcome::Error,
+        },
+        Command::Clamp { screen, mode } => match state.screens.get(&screen) {
+            Some(entry) if entry.bg.is_some() => {
+                if let Some((_, build_ctx)) = swap_parts(state)
+                    && build_ctx.set_clamp(clamp_to_args(mode))
+                {
+                    rebuild_current(state);
+                }
+                CommandOutcome::Ok
+            }
+            _ => CommandOutcome::Error,
+        },
         Command::Screenshot { path } => {
-            // Webview-only build: a web wallpaper renders in the out-of-process
-            // host's own background-layer window, so the engine's frame is
-            // black. Refuse the capture — the daemon's theming then falls back
-            // to the workshop preview instead of a black palette.
             #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
             {
                 let web_active = state.screens.values().any(|e| {
@@ -604,8 +421,6 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
     }
 }
 
-/// The live-swap parts (render-command sender + build params), if the platform
-/// is up.
 fn swap_parts(state: &AppState) -> Option<(kirie_platform::CommandSender, Arc<super::run::BuildContext>)> {
     state
         .swap
@@ -614,21 +429,14 @@ fn swap_parts(state: &AppState) -> Option<(kirie_platform::CommandSender, Arc<su
         .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())))
 }
 
-/// Just the render-command sender.
 fn cmd_sender(state: &AppState) -> Option<kirie_platform::CommandSender> {
     swap_parts(state).map(|(tx, _)| tx)
 }
 
-/// Rebuild every screen's current wallpaper with the present build params —
-/// the reference's rebuild-after-set (renderscale/scaling/clamp all invalidate
-/// the cached build and call setBackground again,
-/// WallpaperApplication.cpp:1237-1355). Deliberately bypasses the preload
-/// stash: anything stashed was built with the old params.
 fn rebuild_current(state: &mut AppState) {
     let Some((cmd_tx, build_ctx)) = swap_parts(state) else {
         return;
     };
-    // A rebuild swap supersedes any pending debounced property-rebuild.
     state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let props: Vec<(String, String)> = state
         .properties
@@ -658,7 +466,6 @@ fn rebuild_current(state: &mut AppState) {
     }
 }
 
-/// Map the IPC scaling enum to the compat CLI's (shared arg surface).
 fn scaling_to_args(mode: IpcScaling) -> super::args::ScalingMode {
     match mode {
         IpcScaling::Stretch => super::args::ScalingMode::Stretch,
@@ -668,7 +475,6 @@ fn scaling_to_args(mode: IpcScaling) -> super::args::ScalingMode {
     }
 }
 
-/// Map the IPC clamp enum to the compat CLI's.
 fn clamp_to_args(mode: IpcClamp) -> super::args::ClampMode {
     match mode {
         IpcClamp::Clamp => super::args::ClampMode::Clamp,
@@ -677,7 +483,6 @@ fn clamp_to_args(mode: IpcClamp) -> super::args::ClampMode {
     }
 }
 
-/// Map the IPC scaling enum to kirie-video's (doc §4.10 mode table).
 fn map_scaling(mode: IpcScaling) -> VideoScaling {
     match mode {
         IpcScaling::Stretch => VideoScaling::Stretch,

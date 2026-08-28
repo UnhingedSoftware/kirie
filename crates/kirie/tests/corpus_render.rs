@@ -1,35 +1,11 @@
-//! P4 corpus **render gate** as a cargo test (docs/corpus.md; SPEC.md §V9).
-//!
-//! Drives the built `kirie` binary's offscreen `--screenshot` path over EVERY
-//! `scene`-type workshop item (a directory holding `scene.pkg`) and asserts each
-//! one renders: exit 0, a decodable PNG, and >5% non-black pixels. This is the
-//! all-scenes-render exit gate — a scene that cannot render a feature must still
-//! degrade to best-effort output (its clear color) rather than crash or go black
-//! (kirie-render's `load_workshop_scene` fallback).
-//!
-//! Gated on the workshop corpus being installed *and* a wgpu adapter being
-//! present, so it is inert in CI (no corpus, no GPU) and live on the RTX 4080.
-//! SSIM comparison against the C++ oracle is tracked separately, not gated here.
-
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// Default corpus location (docs/corpus.md); override with `KIRIE_CORPUS`.
 const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
-/// Per-item screenshot budget: shader translation + GPU bring-up on the first
-/// item is the slow path; steady-state items are a few seconds.
 const ITEM_TIMEOUT: Duration = Duration::from_secs(180);
-/// Frames to advance before the readback (matches the script default).
 const SCREENSHOT_DELAY: &str = "3";
 
-/// Scenes whose *only* drawable content is a 3D `.mdl` model (planets, figure,
-/// ripples — all mesh geometry) composited through fullscreen effect layers.
-/// Model rendering is a separate task, so these correctly render near-black
-/// (the effect layers over an empty scene) until it lands — matching the
-/// C++ oracle's dark background. They must still render cleanly (exit 0,
-/// decodable PNG), just not the >5% non-black heuristic (which this scene used
-/// to pass only by emitting a *wrong* solid-white frame). See docs §7.2.
 const MODEL_ONLY_SCENES: &[&str] = &["3047596375"];
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -39,8 +15,6 @@ fn corpus_dir() -> Option<PathBuf> {
     dir.is_dir().then_some(dir)
 }
 
-/// Whether a wgpu adapter is reachable — the offscreen screenshot needs one.
-/// Absent in CI, present on the target box.
 fn have_gpu() -> bool {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
@@ -49,8 +23,6 @@ fn have_gpu() -> bool {
     pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).is_ok()
 }
 
-/// Wait up to `timeout` for `child`; kill it on overrun. Returns the status, or
-/// `None` if it had to be killed.
 fn wait_or_kill(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -67,8 +39,6 @@ fn wait_or_kill(child: &mut Child, timeout: Duration) -> Option<std::process::Ex
     }
 }
 
-/// Fraction (percent) of non-black pixels — the same >8/channel threshold the
-/// screenshot path and `img_metrics.py` use.
 fn nonblack_percent(path: &std::path::Path) -> Result<f32, String> {
     let img = image::open(path)
         .map_err(|e| format!("decode {}: {e}", path.display()))?
@@ -132,8 +102,6 @@ fn corpus_scenes_all_render_non_black() {
         let model_only = MODEL_ONLY_SCENES.contains(&id.as_str());
         match wait_or_kill(&mut child, ITEM_TIMEOUT) {
             Some(status) if status.success() => match nonblack_percent(&png) {
-                // Model-only scenes render near-black by design (their content is
-                // the unimplemented 3D model); require only a clean decodable PNG.
                 Ok(pct) if model_only => lines.push(format!(
                     "  {id:<14} OK    {pct:.1}% non-black (model-only, near-black OK)"
                 )),

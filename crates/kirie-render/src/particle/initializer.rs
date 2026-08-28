@@ -1,8 +1,3 @@
-//! Particle initializers — run once per particle at spawn, in declaration order
-//! (docs/render-architecture.md §7.3 initializer table; behavior
-//! `CParticle.cpp:725-1020`). Parameter names and per-name defaults match the
-//! spec table exactly (SPEC §V10).
-
 use kirie_scene::particle::NamedStage;
 use kirie_scene::value::Vec3;
 
@@ -12,19 +7,12 @@ use super::param::Params;
 use super::rng::Rng;
 use super::state::{Overrides, Particle};
 
-/// Context threaded into every initializer at spawn time.
 pub struct SpawnCtx<'a> {
-    /// The scene-object instance overrides.
     pub overrides: &'a Overrides,
-    /// The particle system's `flags & 4` (perspective / 3D) bit
-    /// (docs/render-architecture.md §7.3): controls whether Z is kept.
     pub perspective: bool,
-    /// Control-point positions in system-local space (index 0 = CP0).
     pub control_points: &'a [Vec3],
 }
 
-/// A compiled initializer with resolved parameters. Variant field names mirror
-/// the JSON parameter names in the docs §7.3 initializer table.
 #[derive(Clone, Debug)]
 #[allow(missing_docs)]
 pub enum Initializer {
@@ -73,12 +61,8 @@ pub enum Initializer {
         count: i64,
         speedmin: Vec3,
         speedmax: Vec3,
-        /// Round-robin spawn counter (advances every spawn).
         counter: i64,
     },
-    /// An initializer whose `name` the reference does not implement — preserved
-    /// but a no-op (docs/render-architecture.md §7.3: unknown names logged and
-    /// ignored). Carries the name for diagnostics.
     Unknown(String),
 }
 
@@ -88,7 +72,6 @@ fn biased(rng: &mut Rng, min: f32, max: f32, exponent: f32) -> f32 {
 }
 
 impl Initializer {
-    /// Compile one scene [`NamedStage`] into a typed initializer.
     #[must_use]
     pub fn compile(stage: &NamedStage) -> Self {
         let p = Params::new(stage);
@@ -144,7 +127,6 @@ impl Initializer {
         }
     }
 
-    /// Apply this initializer to a freshly spawned particle.
     pub fn apply(&mut self, pt: &mut Particle, ctx: &SpawnCtx<'_>, rng: &mut Rng) {
         let o = ctx.overrides;
         match self {
@@ -200,9 +182,6 @@ impl Initializer {
                 phasemin,
                 phasemax,
             } => {
-                // UNVERIFIED noise basis (docs/render-architecture.md §7.3): a
-                // curl-noise direction cone-limited toward `forward` by `scale/2`
-                // and tilted by `offset` around `right`, z zeroed for ortho.
                 let phase = rng.range(*phasemin, *phasemax);
                 let sample = noise::curl(math::mul(math::add(pt.position, [phase; 3]), 0.01));
                 let mut dir = math::add(*forward, math::mul(sample, *scale * 0.5));

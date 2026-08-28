@@ -1,30 +1,3 @@
-//! kirie-audio — system audio capture + real-FFT spectrum for audio-reactive
-//! wallpapers.
-//!
-//! Pipeline (docs/subsystems-misc.md §1.3, "Visualizer capture path"):
-//!
-//! ```text
-//! PulseAudio monitor (U8 / 44100 / mono)          capture thread
-//!        │  pa_stream_read → raw bytes
-//!        ▼
-//!   ringbuf SPSC (lock-free, V3)
-//!        │  pop 1024-sample frames
-//!        ▼
-//!   real FFT (rustfft) → band reduction            FFT worker thread
-//!   → noise gate → move_towards smoothing
-//!        │  immutable AudioSpectrum
-//!        ▼
-//!   arc-swap  ──latest_spectrum()──►  render / uniform packer (never blocks, V4)
-//! ```
-//!
-//! The exact numeric constants (1024-sample window, 0.35·log10 band gain,
-//! `boost(x)=2-e^((1-x)-0.5)`, 0.3/frame smoothing, RMS gate 10.0) live in
-//! [`dsp`] and are a 1:1 port of the C++ reference — see that module for
-//! citations.
-//!
-//! Failure is never fatal (V9): a missing PulseAudio server, missing monitor
-//! source, or `--no-audio-processing` all resolve to a silent (all-zero)
-//! spectrum with no panic.
 #![forbid(unsafe_code)]
 
 mod automute;
@@ -48,47 +21,25 @@ pub use dsp::{
 };
 pub use spectrum::AudioSpectrum;
 
-/// Ring capacity: ~0.25 s of U8/44100/mono audio. Comfortably absorbs the
-/// worker's tick jitter without dropping frames; overflow (worker stalled)
-/// simply drops the oldest bytes, underflow yields zero-length drains.
 const RING_CAPACITY: usize = SAMPLE_RATE as usize / 4;
 
-/// Errors the capture thread can hit while opening the PulseAudio stream. These
-/// are reported (via `status`/tracing) but never propagated as a panic — the
-/// spectrum stays silent (V9).
 #[derive(Debug, thiserror::Error)]
 pub enum AudioError {
-    /// The PulseAudio/PipeWire context failed to connect (no server running).
     #[error("failed to connect to PulseAudio server: {0}")]
     Connect(String),
-    /// No capture source could be resolved (no default sink monitor and no
-    /// `--audio-device` given).
     #[error("no monitor source available")]
     NoMonitor,
-    /// The record stream failed to connect to the source.
     #[error("failed to connect record stream to source {source_name:?}: {reason}")]
-    StreamConnect {
-        /// The source name we tried to record from.
-        source_name: String,
-        /// Human-readable failure reason.
-        reason: String,
-    },
-    /// The PulseAudio mainloop returned a fatal error while iterating.
+    StreamConnect { source_name: String, reason: String },
     #[error("PulseAudio mainloop error")]
     Mainloop,
 }
 
-/// Coarse capture state, published lock-free for callers/tests to poll.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureStatus {
-    /// Audio processing disabled (`--no-audio-processing`) — spectrum is always
-    /// silent, no threads spawned.
     Disabled,
-    /// Threads spawned, stream not yet confirmed connected.
     Starting,
-    /// Recording from a monitor source; spectrum is live.
     Running,
-    /// Capture failed (see logs); spectrum is silent but the handle is valid.
     Failed,
 }
 
@@ -111,25 +62,12 @@ impl CaptureStatus {
     }
 }
 
-/// Configuration for [`AudioCapture::start`]. Mirrors the parsed CLI knobs
-/// (`--no-audio-processing`, `--audio-device`).
 #[derive(Clone, Debug)]
 pub struct AudioConfig {
-    /// `settings.audio.audioprocessing` — `false` when `--no-audio-processing`
-    /// is passed. Disabled → permanent silent spectrum, no threads.
     pub enabled: bool,
-    /// `settings.audio.device` — a PulseAudio/PipeWire *source* name. `None`
-    /// (or empty) selects the default sink's `<sink>.monitor` (cpp:121-128).
     pub device: Option<String>,
-    /// Noise-gate RMS threshold. `None` reads `WPE_AUDIO_GATE` (env) falling
-    /// back to [`DEFAULT_GATE`]; `Some(0.0)` disables the gate.
     pub gate: Option<f32>,
-    /// Smoother/publish cadence. Defaults to 16 ms (~60 Hz) to mirror the C++
-    /// per-render-frame `update()` at which `move_towards` slews.
     pub tick: Duration,
-    /// On-battery flag (engine's power watcher): while set, the publish
-    /// cadence doubles — half the wakes, still ~30 Hz, imperceptible on a
-    /// smoothed spectrum. `None` = never power-save.
     pub power_save: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -146,7 +84,6 @@ impl Default for AudioConfig {
 }
 
 impl AudioConfig {
-    /// Enabled capture on the given device (`None` = default monitor).
     #[must_use]
     pub fn with_device(device: Option<String>) -> Self {
         Self {
@@ -155,7 +92,6 @@ impl AudioConfig {
         }
     }
 
-    /// The disabled configuration (`--no-audio-processing`): always silent.
     #[must_use]
     pub fn disabled() -> Self {
         Self {
@@ -164,7 +100,6 @@ impl AudioConfig {
         }
     }
 
-    /// Resolve the effective gate threshold from `gate`/`WPE_AUDIO_GATE`.
     fn resolved_gate(&self) -> f32 {
         if let Some(g) = self.gate {
             return g;
@@ -176,25 +111,13 @@ impl AudioConfig {
     }
 }
 
-/// Who is playing, as far as choosing a capture device is concerned.
-///
-/// Both fields are hints, not guarantees: PipeWire does not always publish a
-/// stream's PID (Spotify's, for one, carries none), and a player's D-Bus name
-/// does not always equal the name on its audio stream. Carrying both lets the
-/// match succeed on whichever the session manager happened to fill in.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PlayerHint {
-    /// PID behind the player's D-Bus name, when the bus reported one.
     pub pid: Option<u32>,
-    /// Short player identity, lowercased — the tail of an MPRIS bus name
-    /// (`org.mpris.MediaPlayer2.spotify` → `spotify`), which is what PipeWire
-    /// tends to use for `node.name`.
     pub name: Option<String>,
 }
 
 impl PlayerHint {
-    /// Build from an MPRIS bus name, keeping the part that identifies the
-    /// application: `org.mpris.MediaPlayer2.brave.instance1234` → `brave`.
     #[must_use]
     pub fn from_bus_name(bus_name: &str, pid: Option<u32>) -> Self {
         let name = bus_name
@@ -206,29 +129,19 @@ impl PlayerHint {
     }
 }
 
-/// Shared slot the engine writes the current player into.
 pub(crate) type PlayerSlot = Arc<arc_swap::ArcSwapOption<PlayerHint>>;
 
-/// Live handle to the audio pipeline. Holds the latest published spectrum and
-/// owns the capture + FFT worker threads (joined on drop).
 pub struct AudioCapture {
     shared: Arc<ArcSwap<AudioSpectrum>>,
     status: Arc<AtomicU8>,
     shutdown: Arc<AtomicBool>,
     device: Option<String>,
-    /// Which media player's output the capture should follow, or `None` when
-    /// no player is known. Written by the engine as MPRIS adopts a player, read
-    /// by the capture thread when it picks a monitor. See
-    /// [`Self::set_player`].
     player: PlayerSlot,
     capture_thread: Option<JoinHandle<()>>,
     worker_thread: Option<JoinHandle<()>>,
 }
 
 impl AudioCapture {
-    /// Start the pipeline. Never fails: a disabled config or any capture error
-    /// yields a valid handle whose spectrum stays silent (V9). Returns
-    /// immediately — the PulseAudio connection is established off-thread.
     #[must_use]
     pub fn start(config: AudioConfig) -> Self {
         let shared = Arc::new(ArcSwap::from_pointee(AudioSpectrum::silent()));
@@ -251,10 +164,6 @@ impl AudioCapture {
         let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
         let device = config.device.clone();
         let gate = config.resolved_gate();
-        // Linear on-screen level (KIRIE_AUDIO_BOOST): applied to the band
-        // values after the FFT, where scaling actually moves the bars — the
-        // bands are logarithmic in sample amplitude, so scaling samples
-        // instead compresses to nearly nothing (and clips if raised).
         let level: f32 = std::env::var("KIRIE_AUDIO_BOOST")
             .ok()
             .and_then(|v| v.trim().parse().ok())
@@ -264,7 +173,6 @@ impl AudioCapture {
         let tick = config.tick;
         let power_save = config.power_save.clone();
 
-        // SPSC ring: producer → capture thread, consumer → worker thread (V3).
         let (prod, cons) = HeapRb::<u8>::new(RING_CAPACITY).split();
 
         let worker_thread = {
@@ -319,43 +227,25 @@ impl AudioCapture {
         }
     }
 
-    /// Tell the capture which player is producing the audio worth reacting to.
-    ///
-    /// Without this the capture can only fall back to the server's *default
-    /// sink*, which is the right guess on a plain setup and the wrong one on any
-    /// machine with a virtual mixer: there the default sink is typically an
-    /// input strip nothing plays to directly, so its monitor stays silent while
-    /// music plays a few nodes away. The engine learns the player from MPRIS and
-    /// passes it here; the capture then follows that player's own output.
-    /// `None` clears the hint.
-    ///
-    /// Ignored entirely when `--audio-device` named a source: an explicit choice
-    /// is never second-guessed.
     pub fn set_player(&self, hint: Option<PlayerHint>) {
         self.player.store(hint.map(Arc::new));
     }
 
-    /// A disabled handle (always-silent) — convenience for the
-    /// `--no-audio-processing` path.
     #[must_use]
     pub fn disabled() -> Self {
         Self::start(AudioConfig::disabled())
     }
 
-    /// The latest published spectrum. Lock-free, never blocks the render thread
-    /// (V4). Returns a shared `Arc` snapshot.
     #[must_use]
     pub fn latest_spectrum(&self) -> Arc<AudioSpectrum> {
         self.shared.load_full()
     }
 
-    /// Current coarse capture state.
     #[must_use]
     pub fn status(&self) -> CaptureStatus {
         CaptureStatus::from_u8(self.status.load(Ordering::Relaxed))
     }
 
-    /// The configured device (`None` = default sink monitor).
     #[must_use]
     pub fn device(&self) -> Option<&str> {
         self.device.as_deref()

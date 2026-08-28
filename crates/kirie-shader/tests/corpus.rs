@@ -1,12 +1,3 @@
-//! Corpus-gated empirical test (SPEC.md §V11, task exit criterion): translate a
-//! large sample of REAL workshop shaders and, for each success, create an actual
-//! `wgpu::ShaderModule` on the live GPU. Reports pass/fail counts and asserts the
-//! achievable fraction. Skipped (not failed) when the corpus or a GPU is absent.
-//!
-//! Corpus: `~/.steam/steam/steamapps/workshop/content/431960` (SPEC.md §C).
-//! Includes resolve from the stock assets `shaders/` dir (docs/shader-pipeline.md
-//! §1.1 mount order); workshop-local `.h` headers (if any) take precedence.
-
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -17,11 +8,6 @@ use kirie_shader::{FsIncludeResolver, MapIncludeResolver, ShaderInputs, Stage, T
 const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
 const STOCK_SHADERS: &str = "/home/aiko/.steam/steam/steamapps/common/wallpaper_engine/assets/shaders";
 
-/// The fraction of corpus shaders that must translate to a GPU-loadable module.
-/// Empirically ~0.93 is achievable; the remainder are the patched-glslang
-/// leniencies (docs/shader-pipeline.md §7) and dynamic array varyings that stock
-/// glslang / wgpu cannot express (see the printed failure list). We gate a hair
-/// below the measured value to stay robust to driver/toolchain drift.
 const REQUIRED_PASS_FRACTION: f64 = 0.90;
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -45,13 +31,10 @@ impl GpuHarness {
             pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).ok()?;
         let (device, _queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default())).ok()?;
-        // Capture validation errors instead of aborting the run.
         device.on_uncaptured_error(std::sync::Arc::new(|e| eprintln!("wgpu uncaptured: {e}")));
         Some(Self { device })
     }
 
-    /// Create a shader module from a naga IR module; returns whether the device
-    /// accepted it (no validation error raised).
     fn accepts(&self, module: naga::Module) -> bool {
         let guard = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
         let _sm = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -62,8 +45,6 @@ impl GpuHarness {
     }
 }
 
-/// Build an include resolver for a pkg: pkg-local `.h` headers (keyed by their
-/// name below `shaders/`) shadow the stock-assets fallback.
 fn resolver_for(pkg: &OwnedPkg) -> MapIncludeResolver {
     let mut headers = BTreeMap::new();
     for entry in pkg.entries() {
@@ -127,7 +108,6 @@ fn corpus_translates_and_loads_on_gpu() {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_default();
 
-        // Collect shader entries first (borrow of pkg for reads is fine).
         let shaders: Vec<(String, Stage, Vec<u8>)> = pkg
             .entries()
             .filter_map(|e| {
@@ -164,7 +144,6 @@ fn corpus_translates_and_loads_on_gpu() {
                     }
                 }
                 Err(e) => {
-                    // One-line diagnostic.
                     let msg = e.to_string();
                     let line = msg.lines().find(|l| l.contains("error")).unwrap_or(&msg);
                     failures.push(format!("XLATE {label}: {}", line.trim()));

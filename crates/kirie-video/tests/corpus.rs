@@ -1,18 +1,10 @@
-//! Corpus-gated integration test: decode the real workshop video
-//! (item 3600453929, the corpus's single `"type":"video"` wallpaper —
-//! docs/subsystems-misc.md header) and validate the first 30 frames.
-//!
-//! Skips (passing) when the Steam corpus is not installed.
-
 use std::path::PathBuf;
 use std::time::Duration;
 
 use kirie_video::{VideoOptions, VideoPlayer};
 
-/// The corpus video wallpaper directory (SPEC §C corpus).
 const CORPUS_ITEM: &str = ".steam/steam/steamapps/workshop/content/431960/3600453929";
 
-/// First `.mp4` inside the corpus item, if installed.
 fn corpus_video() -> Option<PathBuf> {
     let dir = std::env::home_dir()?.join(CORPUS_ITEM);
     let entries = std::fs::read_dir(dir).ok()?;
@@ -29,9 +21,6 @@ fn corpus_video_first_30_frames_decode() {
         return;
     };
 
-    // Audio disabled: don't touch the audio device from tests; the frame
-    // pipeline under test is identical (docs/subsystems-misc.md §2.1
-    // pacing then falls back to wall clock).
     let options = VideoOptions {
         enable_audio: false,
         ..VideoOptions::default()
@@ -67,14 +56,12 @@ fn corpus_video_first_30_frames_decode() {
             frame.play_pts
         );
         last_pts = frame.play_pts;
-        // Exercise the recycle path like the renderer does (SPEC V5).
         player.recycle_buffer(frame.data);
     }
 }
 
 #[test]
 fn missing_file_is_a_typed_error() {
-    // SPEC V9: malformed/absent input must produce a typed error.
     let err = VideoPlayer::open("/nonexistent/kirie-video-test.mp4", VideoOptions::default());
     assert!(err.is_err());
 }

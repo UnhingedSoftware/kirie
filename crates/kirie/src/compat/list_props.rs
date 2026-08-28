@@ -1,22 +1,3 @@
-//! `-l` / `--list-properties-json` (docs/compat-cli.md §3.8) and the shared
-//! property-schema serializer used by the `getproperties` control-socket
-//! read-back (docs/compat-socket.md §11).
-//!
-//! Loads a background's `project.json` and prints (or returns) its user
-//! properties as a stable JSON schema: each entry carries
-//! `key/type/default/value/min/max/step/options/order/text`, where present for
-//! the type. `default` is the value declared in `project.json`; `value` is that
-//! default folded with any active override (`--set-property` at launch, or a
-//! live `property` socket command). For a plain `--list-properties` with no
-//! overrides `default == value`.
-//!
-//! Source resolution ([`load_source`]) accepts a **workshop directory**, a
-//! **`project.json` path**, or a **`scene.pkg` path** (its sibling
-//! `project.json` — the properties live beside the package, not inside it;
-//! resolve.rs, docs/format-project-json.md §3). The CLI's background token is
-//! passed through verbatim when it contains a `/` (resolve.rs), so any of the
-//! three forms reaches here.
-
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -25,16 +6,11 @@ use serde_json::{Map, Value, json};
 
 use crate::compat::args::CompatArgs;
 
-/// Print the property list for the default background (doc §3.8). Returns a
-/// short error string on load failure (SPEC V9: typed-ish, no panic).
 pub fn run(args: &CompatArgs) -> Result<(), String> {
     let overrides = overrides_map(&args.set_properties);
     let project = match args.default_background.as_deref().and_then(load_source) {
         Some(p) => p,
         None => {
-            // No workshop project.json (e.g. a direct image/video file): the
-            // C++ would fail to build a wallpaper, but there are simply no
-            // user properties to list. Emit the empty forms.
             if args.list_properties_json {
                 println!("[]");
             }
@@ -44,7 +20,6 @@ pub fn run(args: &CompatArgs) -> Result<(), String> {
 
     let views = property_views(&project, &overrides);
     if args.list_properties_json {
-        // Single line, matching the C++ compact array output (doc §3.8).
         println!("{}", Value::Array(views.iter().map(PropView::to_json).collect()));
     } else {
         for v in &views {
@@ -54,14 +29,6 @@ pub fn run(args: &CompatArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Serialize a source's property schema (with overrides folded into `value`)
-/// to a single-line JSON array string, for the `getproperties` socket
-/// read-back (docs/compat-socket.md §11). Load failure yields `"[]"` — a valid,
-/// byte-clean empty schema.
-///
-/// `source` is a workshop directory, a `project.json` path, or a `scene.pkg`
-/// path (see [`load_source`]); `overrides` is keyed by property name with the
-/// raw override string (post-override current value).
 pub fn properties_json_string(source: &Path, overrides: &BTreeMap<String, String>) -> String {
     match load_source(source) {
         Some(project) => {
@@ -75,13 +42,6 @@ pub fn properties_json_string(source: &Path, overrides: &BTreeMap<String, String
     }
 }
 
-/// Load the `project.json` for a background reference. Accepts:
-/// - a **directory** → `<dir>/project.json`,
-/// - a **`project.json`** (or any `.json`) file → parsed directly,
-/// - a **`scene.pkg`** file → its sibling `<parent>/project.json`.
-///
-/// Returns `None` for a direct media file, a missing/undecodable manifest, or
-/// an unrecognized path (SPEC V9: never panics).
 pub fn load_source(source: impl AsRef<Path>) -> Option<Project> {
     let path = source.as_ref();
     if path.is_dir() {
@@ -90,12 +50,9 @@ pub fn load_source(source: impl AsRef<Path>) -> Option<Project> {
     if path.is_file() {
         let name = path.file_name().and_then(|n| n.to_str());
         let ext = path.extension().and_then(|e| e.to_str());
-        // A `.pkg` (scene.pkg) does not itself hold the manifest — the sibling
-        // project.json does (resolve.rs, docs/format-project-json.md §3).
         if ext == Some("pkg") {
             return Project::from_path(path.parent()?.join("project.json")).ok();
         }
-        // A `project.json` (or any `.json`) is the manifest itself.
         if name == Some("project.json") || ext == Some("json") {
             return Project::from_path(path).ok();
         }
@@ -103,14 +60,10 @@ pub fn load_source(source: impl AsRef<Path>) -> Option<Project> {
     None
 }
 
-/// The active override map (last-wins), keyed by property name. Shared by the
-/// CLI (`--set-property`) and the socket read-back.
 fn overrides_map(pairs: &[(String, String)]) -> BTreeMap<String, String> {
     pairs.iter().cloned().collect()
 }
 
-/// The real (non-separator) properties, sorted by `order` then key (doc §3.8),
-/// each rendered into a [`PropView`] with its override folded in.
 fn property_views(project: &Project, overrides: &BTreeMap<String, String>) -> Vec<PropView> {
     let mut props: Vec<(&String, &kirie_formats::project::Property)> = project
         .general
@@ -128,17 +81,12 @@ fn property_views(project: &Project, overrides: &BTreeMap<String, String>) -> Ve
         .collect()
 }
 
-/// A resolved property row with a typed `default`, an override-folded `value`,
-/// and the type-specific extras — the stable JSON/human shape (doc §3.8;
-/// docs/compat-socket.md §11).
 struct PropView {
     key: String,
     text: String,
     order: i64,
     type_tag: &'static str,
-    /// Declared value (`project.json`), typed per `type_tag`.
     default: Value,
-    /// Current value = default folded with the active override, same JSON type.
     value: Value,
     min: Option<f64>,
     max: Option<f64>,
@@ -167,7 +115,6 @@ impl PropView {
             PropertyKind::Combo { options, value } => {
                 (json!(value), None, None, None, Some(combo_options(options)))
             }
-            // The `text` kind is a UI separator with no value (doc §3.8).
             PropertyKind::Text => (json!(""), None, None, None, None),
             PropertyKind::TextInput { value }
             | PropertyKind::UserShortcut { value }
@@ -193,9 +140,6 @@ impl PropView {
         }
     }
 
-    /// One JSON object with the stable field set (doc §3.8; socket §11): always
-    /// `key/type/order/text/default/value`, plus `min/max/step` (slider) or
-    /// `options` (combo) where applicable.
     fn to_json(&self) -> Value {
         let mut obj = Map::new();
         obj.insert("key".into(), json!(self.key));
@@ -215,7 +159,6 @@ impl PropView {
         Value::Object(obj)
     }
 
-    /// Print the human `-l` dump (doc §3.8): `key - type` plus indented details.
     fn print_human(&self) {
         println!("{} - {}", self.key, self.type_tag);
         if !self.text.is_empty() {
@@ -238,10 +181,6 @@ impl PropView {
     }
 }
 
-/// Coerce a raw override string into the property's typed JSON value so
-/// `value` keeps the same JSON type as `default` (docs/format-project-json.md
-/// §8 value coercion, socket §11): bool → `bool`, slider → `number`, everything
-/// else keeps the raw string (color triples, combo option values, paths, text).
 fn fold_override(kind: &PropertyKind, default: &Value, raw: &str) -> Value {
     match kind {
         PropertyKind::Bool { .. } => {
@@ -250,14 +189,12 @@ fn fold_override(kind: &PropertyKind, default: &Value, raw: &str) -> Value {
         }
         PropertyKind::Slider { .. } => match raw.parse::<f64>() {
             Ok(n) => json!(n),
-            // Non-numeric override: keep the declared default (no silent 0).
             Err(_) => default.clone(),
         },
         _ => json!(raw),
     }
 }
 
-/// Combo `options` array `[{label, value}]` (doc §3.8).
 fn combo_options(options: &[ComboOption]) -> Vec<Value> {
     options
         .iter()
@@ -265,7 +202,6 @@ fn combo_options(options: &[ComboOption]) -> Vec<Value> {
         .collect()
 }
 
-/// Render a scalar JSON value for the human dump without JSON quoting.
 fn scalar_str(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
@@ -273,8 +209,6 @@ fn scalar_str(v: &Value) -> String {
     }
 }
 
-/// Format an RGB color triple as space-separated `%f` (6 decimals), the C++
-/// color value shape (doc §3.8 `"0.000000 0.000000 0.000000"`).
 fn format_color(rgb: &[f32; 3]) -> String {
     format!("{:.6} {:.6} {:.6}", rgb[0], rgb[1], rgb[2])
 }
@@ -304,7 +238,6 @@ mod tests {
             },
         }));
         let views = property_views(&p, &BTreeMap::new());
-        // Sorted by order: fov (1) before bloom (2).
         assert_eq!(views[0].key, "fov");
         let fov = views[0].to_json();
         assert_eq!(fov["type"], json!("slider"));
@@ -336,13 +269,10 @@ mod tests {
             .into_iter()
             .map(|v| (v.key.clone(), v.to_json()))
             .collect();
-        // bool default vs override-folded value.
         assert_eq!(by_key["bloom"]["default"], json!(false));
         assert_eq!(by_key["bloom"]["value"], json!(true));
-        // slider coerces to number.
         assert_eq!(by_key["fov"]["default"], json!(45.0));
         assert_eq!(by_key["fov"]["value"], json!(70.0));
-        // color keeps the raw triple string.
         assert_eq!(by_key["outline"]["default"], json!("0.000000 0.000000 0.000000"));
         assert_eq!(by_key["outline"]["value"], json!("0.5 0.25 0.75"));
     }
@@ -359,7 +289,6 @@ mod tests {
         .to_string();
         assert!(!s.contains('\n'), "schema JSON must be single-line");
         assert!(s.starts_with('[') && s.ends_with(']'));
-        // Missing source → byte-clean empty array.
         assert_eq!(
             properties_json_string(Path::new("/definitely/not/a/thing"), &BTreeMap::new()),
             "[]"

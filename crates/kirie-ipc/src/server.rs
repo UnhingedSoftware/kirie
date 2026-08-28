@@ -1,10 +1,3 @@
-//! The control-socket server thread (docs/compat-socket.md §1, §2, §5).
-//!
-//! One dedicated thread owns the `UnixListener` and serves connections
-//! strictly in accept order — the same full serialization the C++ engine
-//! gets from draining every pending connection in one render-thread poll
-//! pass (doc §5) — but decoupled from rendering entirely (SPEC V4).
-
 use std::io::{ErrorKind, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -21,31 +14,12 @@ use crate::error::IpcError;
 use crate::event::{CommandOutcome, IpcEvent};
 use crate::status::format_status;
 
-/// Per-`read()` timeout, the C++ `SO_RCVTIMEO` of 50 ms
-/// (doc §2, ControlSocket.cpp:52-53). A client that connects and sends
-/// nothing holds the thread at most this long; its (empty) partial buffer is
-/// then processed as the request.
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
-/// Read chunk size, matching the C++ accumulation loop (doc §2 step 3).
 const READ_CHUNK: usize = 1024;
 
-/// Total per-connection read deadline. The C++ timeout is per-`read()` only,
-/// so a client trickling ≥ 1 byte per 50 ms without ever sending `\n` stalls
-/// the engine's render thread indefinitely (doc §5). Adaptation required by
-/// the port: the read phase is capped so one stalled client cannot block
-/// other clients for more than this long. Well-behaved clients (all daemon
-/// scripts) send the whole line in one write and are unaffected.
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
-/// How long a `workshop` request may wait on the app before the client is told
-/// so (docs/compat-socket.md §13).
-///
-/// SPEC V4 asks for a bounded deadline on socket work, and this is the one
-/// verb family that needs one: the rest is bounded by the app's own progress,
-/// while a Workshop request waits on the Steam client and the network. Long
-/// enough for a cold query on a slow link, short enough that a wedged Steam
-/// answers rather than hangs the connection.
 const WORKSHOP_DEADLINE: Duration = Duration::from_secs(30);
 
 const RESP_PONG: &[u8] = b"pong\n";
@@ -53,9 +27,6 @@ const RESP_OK: &[u8] = b"ok\n";
 const RESP_ERROR: &[u8] = b"error\n";
 const RESP_UNKNOWN: &[u8] = b"unknown command\n";
 
-/// The listening control socket. Owns the dedicated socket thread; dropping
-/// (or [`ControlSocket::shutdown`]) stops the thread and unlinks the socket
-/// file, like the C++ destructor on clean teardown (doc §1).
 #[derive(Debug)]
 pub struct ControlSocket {
     path: PathBuf,
@@ -64,21 +35,8 @@ pub struct ControlSocket {
 }
 
 impl ControlSocket {
-    /// Bind the control socket at exactly `path` (the `--control-socket`
-    /// value is used verbatim; no derivation — doc §1) and spawn the socket
-    /// thread.
-    ///
-    /// A pre-existing socket file is unlinked unconditionally first, exactly
-    /// like the C++ engine (doc §1: callers must serialize engine launches
-    /// externally; the daemon uses a per-monitor `flock`).
-    ///
-    /// Parsed requests are delivered on `events`; see [`IpcEvent`] for the
-    /// reply contract. On bind failure the caller decides policy — the C++
-    /// engine logs and continues without a socket (doc §1).
     pub fn bind(path: impl Into<PathBuf>, events: Sender<IpcEvent>) -> Result<Self, IpcError> {
         let path = path.into();
-        // unlink(path) unconditionally, errors ignored (doc §1,
-        // ControlSocket.cpp:20); a failure surfaces as AddrInUse from bind.
         if let Err(e) = fs::remove_file(&path)
             && e.kind() != ErrorKind::NotFound
         {
@@ -88,10 +46,6 @@ impl ControlSocket {
             path: path.clone(),
             source,
         })?;
-        // Backlog divergence (doc §1): C++ uses listen(fd, 8); std hardcodes
-        // 128. Strictly more permissive — behavior beyond 8 pending
-        // connections is explicitly unverified upstream (doc §10) — and the
-        // workspace has no crate (socket2/libc) that could set it exactly.
         tracing::info!(path = %path.display(), "ControlSocket listening");
         let shutdown = Arc::new(AtomicBool::new(false));
         let thread = thread::Builder::new()
@@ -108,23 +62,15 @@ impl ControlSocket {
         })
     }
 
-    /// The socket path this server is bound to.
     pub fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Stop the socket thread and unlink the socket file (doc §1 clean
-    /// teardown). Idempotent; also invoked by `Drop`.
     pub fn shutdown(&mut self) {
         let Some(handle) = self.thread.take() else {
             return;
         };
         self.shutdown.store(true, Ordering::Release);
-        // Wake the (blocking) accept with a throwaway connection. If the
-        // path was stolen/unlinked externally this can fail; the thread then
-        // stays parked in accept until process exit — leak it rather than
-        // hang the caller. (C++ has the mirror-image flaw: its exception
-        // exit path leaks the socket file, doc §1.)
         match UnixStream::connect(&self.path) {
             Ok(stream) => {
                 drop(stream);
@@ -145,7 +91,6 @@ impl Drop for ControlSocket {
     }
 }
 
-/// Accept loop: connections served strictly in accept order (doc §5).
 fn serve(listener: &UnixListener, events: &Sender<IpcEvent>, shutdown: &AtomicBool) {
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -154,7 +99,7 @@ fn serve(listener: &UnixListener, events: &Sender<IpcEvent>, shutdown: &AtomicBo
         match listener.accept() {
             Ok((stream, _addr)) => {
                 if shutdown.load(Ordering::Acquire) {
-                    break; // wake-up connection (or late client during teardown)
+                    break;
                 }
                 handle_connection(stream, events);
             }
@@ -163,18 +108,14 @@ fn serve(listener: &UnixListener, events: &Sender<IpcEvent>, shutdown: &AtomicBo
                     break;
                 }
                 tracing::warn!(error = %e, "control-socket accept failed");
-                // Guard against a hot spin on persistent errors (e.g. EMFILE).
                 thread::sleep(Duration::from_millis(10));
             }
         }
     }
 }
 
-/// One connection = one request, one response, close (doc §2).
 fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
     if stream.set_read_timeout(Some(READ_TIMEOUT)).is_err() {
-        // Without the timeout a half-open client could park the thread
-        // forever; refuse the connection instead.
         return;
     }
     let deadline = Instant::now() + CONNECTION_DEADLINE;
@@ -182,8 +123,6 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
     let mut chunk = [0u8; READ_CHUNK];
     loop {
         match stream.read(&mut chunk) {
-            // EOF/half-close terminates the request (doc §2 step 3-4:
-            // clients may terminate by newline OR by half-closing).
             Ok(0) => break,
             Ok(n) => {
                 let has_newline = chunk[..n].contains(&b'\n');
@@ -192,30 +131,20 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
                     break;
                 }
             }
-            // The 50 ms silence timeout: whatever accumulated is the request
-            // (doc §2 step 3; live-verified `printf 'ping'` + EOF → pong).
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,
             Err(e) if e.kind() == ErrorKind::Interrupted => continue,
-            Err(_) => break, // reset/etc. — treat like EOF, as C++ read() ≤ 0
+            Err(_) => break,
         }
         if Instant::now() >= deadline {
-            break; // trickle-client cap; see CONNECTION_DEADLINE
+            break;
         }
     }
-    // Request = bytes up to (excluding) the FIRST '\n'; everything after is
-    // discarded (doc §2 step 4). No '\n' ⇒ the whole buffer is the request.
     let line = match buf.iter().position(|&b| b == b'\n') {
         Some(i) => &buf[..i],
         None => &buf[..],
     };
     let request = parse_request(line);
 
-    // Workshop requests talk to Steam through a helper process, which takes
-    // seconds. Serving one inline would hold up every client behind it — a
-    // shell's `ping` health check included — so it gets its own thread, and
-    // the accept loop moves on. Compat verbs keep the C++ engine's strict
-    // accept-order serialisation (doc §5), including its unbounded blocking
-    // `bg`, because clients depend on that ordering.
     if matches!(request, Request::Workshop(_)) {
         let events = events.clone();
         thread::Builder::new()
@@ -234,20 +163,13 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
         return;
     }
 
-    if let Some(response) = respond(request, events) {
-        // Single write, failure logged and ignored (doc §5); the C++ single
-        // unlooped write() is upgraded to write_all (doc §10 short-write
-        // open item resolved conservatively).
-        if let Err(e) = stream.write_all(&response) {
-            tracing::debug!(error = %e, "control-socket response write failed");
-        }
+    if let Some(response) = respond(request, events)
+        && let Err(e) = stream.write_all(&response)
+    {
+        tracing::debug!(error = %e, "control-socket response write failed");
     }
-    // Connection closed on drop; EOF signals end-of-response (doc §2 step 6).
 }
 
-/// Map one parsed request to its response bytes. `None` ⇒ close with zero
-/// response bytes (empty request, doc §2 step 5 — or the app is gone, which
-/// is exactly the protocol's dead-engine signal, doc §3).
 fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
     match request {
         Request::Empty => None,
@@ -261,8 +183,6 @@ fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             Some(format_status(&snapshot))
         }
         Request::List => {
-            // Same framing contract as `getproperties`: the app owns the JSON,
-            // the server owns the newline.
             let (tx, rx) = bounded(1);
             events.send(IpcEvent::List { reply: tx }).ok()?;
             let mut body = rx.recv().ok()?.into_bytes();
@@ -270,8 +190,6 @@ fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             Some(body)
         }
         Request::GetProperties { screen } => {
-            // kirie extension (docs/compat-socket.md §11): the app returns the
-            // JSON schema body; we frame it with exactly one trailing newline.
             let (tx, rx) = bounded(1);
             events.send(IpcEvent::GetProperties { screen, reply: tx }).ok()?;
             let mut body = rx.recv().ok()?.into_bytes();
@@ -279,11 +197,6 @@ fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             Some(body)
         }
         Request::Workshop(request) => {
-            // Same framing as `list`; the deadline is what makes this verb
-            // safe to answer at all. Everything else here is bounded by the
-            // app's own progress, but a Workshop request waits on Steam —
-            // another process, over the network — so it gets a hard cap
-            // instead of the protocol's "however long it takes".
             let (tx, rx) = bounded(1);
             events.send(IpcEvent::Workshop { request, reply: tx }).ok()?;
             let mut body = rx
@@ -297,14 +210,8 @@ fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             let fallible = command.is_fallible();
             let (tx, rx) = bounded(1);
             events.send(IpcEvent::Command { command, reply: tx }).ok()?;
-            // Blocks until the app has applied the command — the same
-            // synchronous semantics clients get from the C++ engine, where
-            // blocking commands stall the reply for their full duration
-            // (doc §5). Bounded only by the app's own progress.
             let outcome = rx.recv().ok()?;
             Some(match (fallible, outcome) {
-                // ok\n unconditionally for speed/volume/mute/set/preload
-                // (ControlSocket.cpp:100-132 per doc §4).
                 (false, _) | (true, CommandOutcome::Ok) => RESP_OK.to_vec(),
                 (true, CommandOutcome::Error) => RESP_ERROR.to_vec(),
             })

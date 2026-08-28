@@ -1,18 +1,8 @@
-//! Corpus-gated: load a real workshop scene script and tick it end-to-end.
-//!
-//! docs/scripting-api.md §2: ~8 of the 19 scene items ship `export function
-//! update`. This extracts a script directly from a `scene.pkg`, loads it into
-//! the engine, and asserts `update()` runs and returns a value — proving the
-//! module + `createScriptProperties` + `Date` surface works on real content.
-//! Skips (does not fail) when the corpus is not installed.
-
 use kirie_script::{HostFrame, ScriptEngine, ScriptValue};
 use serde_json::Value;
 
 const CORPUS: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
 
-/// Recursively find the first user-setting object carrying a `"script"` whose
-/// source contains `export function update`, returning `(source, scriptprops)`.
 fn find_script(v: &Value) -> Option<(String, Value)> {
     if let Value::Object(map) = v {
         if let Some(Value::String(src)) = map.get("script")
@@ -39,8 +29,6 @@ fn find_script(v: &Value) -> Option<(String, Value)> {
     None
 }
 
-/// Flatten a `scriptproperties` map to the effective JSON values the engine sees
-/// (each entry may be a `{ "value": ... }` user setting).
 fn flatten_props(props: &Value) -> Value {
     let mut out = serde_json::Map::new();
     if let Value::Object(map) = props {
@@ -101,8 +89,6 @@ fn corpus_script_ticks_end_to_end() {
         )
         .expect("real corpus script must compile");
 
-    // Tick a few frames; a throwing script would surface as a typed error, not
-    // a panic (SPEC.md §V9).
     let mut applied = None;
     for f in 0..3 {
         let out = engine
@@ -121,12 +107,9 @@ fn corpus_script_ticks_end_to_end() {
         }
     }
 
-    // Scripted corpus properties are clock/date text (string) or color/audio
-    // cycles (vector/number); any non-null applied value proves update() ran and
-    // its return marshalled back.
     match applied {
         Some(ScriptValue::Str(s)) => assert!(!s.is_empty(), "expected non-empty text"),
         Some(ScriptValue::Null) | None => panic!("update() produced no applied value"),
-        Some(_) => {} // numeric / vector result is fine
+        Some(_) => {}
     }
 }

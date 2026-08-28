@@ -1,19 +1,7 @@
-//! Curl noise for the `turbulence` operator and `turbulentvelocityrandom`
-//! initializer (docs/render-architecture.md §7.3).
-//!
-//! The reference samples a curl-noise field to get a divergence-free direction
-//! that pushes particles along smooth swirls. The *exact* noise basis in the
-//! C++ engine is UNVERIFIED (not part of any format), so we use a classic
-//! Perlin gradient noise and take the analytic curl of a vector potential built
-//! from three shifted samples — a standard, divergence-free construction. It is
-//! deterministic (a pure function of position), which is what the operator
-//! semantics require ("curl noise at `(pos + phase + t*timescale) * scale*2`").
-
 use kirie_scene::value::Vec3;
 
 use super::math;
 
-/// Classic Perlin permutation (Ken Perlin's reference table, doubled).
 const PERM: [u8; 256] = [
     151, 160, 137, 91, 90, 15, 131, 13, 201, 95, 96, 53, 194, 233, 7, 225, 140, 36, 103, 30, 69, 142, 8, 99,
     37, 240, 21, 10, 23, 190, 6, 148, 247, 120, 234, 75, 0, 26, 197, 62, 94, 252, 219, 203, 117, 35, 11, 32,
@@ -53,7 +41,6 @@ fn grad(hash: i32, x: f32, y: f32, z: f32) -> f32 {
     (if h & 1 == 0 { u } else { -u }) + (if h & 2 == 0 { v } else { -v })
 }
 
-/// Perlin noise in roughly `[-1, 1]` at a point.
 #[must_use]
 pub fn perlin(p: Vec3) -> f32 {
     let (x, y, z) = (p[0], p[1], p[2]);
@@ -92,16 +79,9 @@ pub fn perlin(p: Vec3) -> f32 {
     lerp(w, y1, y2)
 }
 
-/// A divergence-free curl-noise direction at `p`.
-///
-/// Builds a vector potential `Ψ = (perlin(p), perlin(p+o1), perlin(p+o2))` from
-/// three decorrelated Perlin samples and returns `∇ × Ψ` via central
-/// differences. The result is not normalized (callers scale it); it is a
-/// deterministic pure function of `p` (SPEC §V13 stable behavior).
 #[must_use]
 pub fn curl(p: Vec3) -> Vec3 {
     const EPS: f32 = 1e-2;
-    // Decorrelating offsets so the three potential components differ.
     const O1: Vec3 = [123.4, 56.7, 89.1];
     const O2: Vec3 = [-45.6, 78.9, -12.3];
     let psi = |q: Vec3| -> Vec3 { [perlin(q), perlin(math::add(q, O1)), perlin(math::add(q, O2))] };
@@ -109,7 +89,6 @@ pub fn curl(p: Vec3) -> Vec3 {
     let dy = math::sub(psi([p[0], p[1] + EPS, p[2]]), psi([p[0], p[1] - EPS, p[2]]));
     let dz = math::sub(psi([p[0], p[1], p[2] + EPS]), psi([p[0], p[1], p[2] - EPS]));
     let inv = 1.0 / (2.0 * EPS);
-    // curl = (dPsiz/dy - dPsiy/dz, dPsix/dz - dPsiz/dx, dPsiy/dx - dPsix/dy)
     [
         (dy[2] - dz[1]) * inv,
         (dz[0] - dx[2]) * inv,

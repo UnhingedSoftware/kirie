@@ -1,11 +1,3 @@
-//! wgpu instance/adapter/device bring-up and raw-handle surface creation.
-//!
-//! `unsafe` in this crate (SPEC V2 note): raw-window-handle surface creation
-//! in [`create_wgpu_surface`], and the driver pipeline-cache constructor in
-//! [`attach_pipeline_cache`] (`create_pipeline_cache` is `unsafe` because it
-//! trusts the blob; ours comes from our own cache file and wgpu validates the
-//! header + falls back on mismatch).
-
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
@@ -15,10 +7,6 @@ use wayland_client::{Connection, Proxy};
 
 use crate::error::PlatformError;
 
-/// Adapter power preference: `LowPower` by default (an idle wallpaper does
-/// not need the discrete GPU spun up), but neutral when the user pinned a
-/// GPU (`--gpu`/`KIRIE_GPU` re-exec forces one ICD; a preference could only
-/// fight the pin on multi-adapter ICDs).
 pub fn power_preference() -> wgpu::PowerPreference {
     if std::env::var_os("KIRIE_GPU").is_some() || std::env::var_os("KIRIE_GPU_PINNED").is_some() {
         wgpu::PowerPreference::None
@@ -27,11 +15,6 @@ pub fn power_preference() -> wgpu::PowerPreference {
     }
 }
 
-/// Shared GPU context: one instance/adapter/device/queue for every output
-/// surface (docs/render-architecture.md §2.3 "wgpu:" note — the portable
-/// model is one shared device with one present pass per monitor surface;
-/// the C++ driver likewise shares a single EGL context across all
-/// per-output EGL window surfaces, WaylandOpenGLDriver.cpp:140-224).
 pub(crate) struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -39,19 +22,13 @@ pub(crate) struct Gpu {
     pub queue: wgpu::Queue,
 }
 
-/// The process-wide driver pipeline cache, set at GPU bring-up. kirie-render's
-/// pipeline builders read it (they already depend on this crate), so every
-/// `create_render_pipeline` reuses driver-compiled binaries across launches —
-/// the ~340ms/launch SPIR-V→ISA recompile disappears on warm starts.
 static SHARED_PIPELINE_CACHE: OnceLock<wgpu::PipelineCache> = OnceLock::new();
 
-/// The shared driver pipeline cache, if the adapter supports one.
 #[must_use]
 pub fn pipeline_cache() -> Option<&'static wgpu::PipelineCache> {
     SHARED_PIPELINE_CACHE.get()
 }
 
-/// On-disk blob path for `adapter`'s pipeline cache.
 fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
     let info = adapter.get_info();
     let key: String = format!("{}-{}-{}", info.name, info.driver, info.backend)
@@ -64,15 +41,6 @@ fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
     Some(base.join("kirie").join("pipelines").join(format!("{key}.bin")))
 }
 
-/// The `PIPELINE_CACHE` feature to request for `adapter`, honoring the
-/// software-adapter and env opt-outs.
-///
-/// The wgpu/Vulkan driver pipeline cache is **skipped on CPU (software)
-/// adapters**: `lavapipe` (llvmpipe's Vulkan driver, the fallback with no GPU —
-/// e.g. inside a KVM guest) advertises `PIPELINE_CACHE` but its implementation
-/// yields broken pipelines that render a uniform constant instead of the scene
-/// (software OpenGL/llvmpipe and every real GPU are unaffected). `KIRIE_NO_-
-/// PIPELINE_CACHE=1` forces it off everywhere for debugging.
 #[must_use]
 pub fn pipeline_cache_feature(adapter: &wgpu::Adapter) -> wgpu::Features {
     let opt_out = std::env::var_os("KIRIE_NO_PIPELINE_CACHE").is_some()
@@ -84,9 +52,6 @@ pub fn pipeline_cache_feature(adapter: &wgpu::Adapter) -> wgpu::Features {
     }
 }
 
-/// Create the driver pipeline cache for `device` (loading last session's blob)
-/// and publish it as the process-wide cache. Idempotent; no-op when the
-/// adapter lacks `PIPELINE_CACHE`.
 #[allow(unsafe_code)]
 pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     if !device.features().contains(wgpu::Features::PIPELINE_CACHE) || SHARED_PIPELINE_CACHE.get().is_some() {
@@ -94,8 +59,6 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     }
     let data = pipeline_cache_file(adapter).and_then(|p| std::fs::read(p).ok());
     // SAFETY: the blob is our own previous `get_data()` output for this
-    // adapter; wgpu/Vulkan validate the cache header and fall back to an
-    // empty cache on any mismatch (`fallback: true`).
     let cache = unsafe {
         device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
             label: Some("kirie-pipeline-cache"),
@@ -109,8 +72,6 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     }
 }
 
-/// Persist the shared pipeline cache blob for `adapter` (atomic replace).
-/// Cheap enough to call after every wallpaper build/swap.
 pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
     let Some(cache) = SHARED_PIPELINE_CACHE.get() else {
         return;
@@ -128,13 +89,6 @@ pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
 }
 
 impl Gpu {
-    /// Bring up wgpu against the first output's `wl_surface`, returning the
-    /// context plus that surface's swapchain handle.
-    ///
-    /// Backend policy: Vulkan preferred, fall back to `Backends::all()` if
-    /// no Vulkan adapter can present to the surface (SPEC §G: wgpu/Vulkan
-    /// renderer). Each attempt creates a fresh instance because a surface
-    /// is only compatible with adapters from the instance that created it.
     pub fn new_for_surface(
         conn: &Connection,
         wl_surface: &WlSurface,
@@ -171,10 +125,6 @@ impl Gpu {
                     let (device, queue) =
                         pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
                             label: Some("kirie-platform"),
-                            // Driver pipeline cache (Vulkan): reuse compiled
-                            // pipeline binaries across launches when supported;
-                            // skipped on software adapters (see
-                            // `pipeline_cache_feature`).
                             required_features: pipeline_cache_feature(&adapter),
                             ..wgpu::DeviceDescriptor::default()
                         }))?;
@@ -196,12 +146,9 @@ impl Gpu {
             }
         }
 
-        // Both attempts recorded an error; report the most recent one.
         Err(last_err.unwrap_or(PlatformError::NullDisplayPointer))
     }
 
-    /// Create a swapchain surface for an additional output using the
-    /// already-selected instance.
     pub fn create_surface(
         &self,
         conn: &Connection,
@@ -211,17 +158,12 @@ impl Gpu {
     }
 }
 
-/// The single unsafe entry point of the crate: wraps
-/// [`wgpu::Instance::create_surface_unsafe`] over the raw libwayland
-/// pointers of the connection and one `wl_surface` (SPEC V2).
 #[allow(unsafe_code)]
 fn create_wgpu_surface(
     instance: &wgpu::Instance,
     conn: &Connection,
     wl_surface: &WlSurface,
 ) -> Result<wgpu::Surface<'static>, PlatformError> {
-    // Both pointer accessors are safe; they only exist because the
-    // `client_system` (libwayland) backend is compiled in.
     let display =
         NonNull::new(conn.backend().display_ptr().cast()).ok_or(PlatformError::NullDisplayPointer)?;
     let surface = NonNull::new(wl_surface.id().as_ptr().cast()).ok_or(PlatformError::NullSurfacePointer)?;
@@ -230,27 +172,6 @@ fn create_wgpu_surface(
     let raw_window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(surface));
 
     // SAFETY: `create_surface_unsafe` requires both raw handles to be valid
-    // objects and to remain valid until the returned `Surface` is dropped.
-    // - Validity: `display` is the live `*mut wl_display` of `conn`'s
-    //   libwayland backend and `surface` is the live `*mut wl_proxy` of
-    //   `wl_surface`; both were null-checked above, and a non-null
-    //   `ObjectId::as_ptr` means the proxy has not been destroyed.
-    // - Lifetime: the returned surface is stored in an `OutputContext`
-    //   whose field order drops the `wgpu::Surface` before the sctk
-    //   `LayerSurface` that owns (and on drop destroys) the `wl_surface`
-    //   (src/output.rs), and `PlatformState` declares its output list
-    //   before the `Connection`, so every surface is dropped before the
-    //   display connection closes (src/platform.rs). The `'static`
-    //   lifetime on the return type is sound under that ownership
-    //   discipline. Two supporting facts:
-    //   - A surface that never reaches an `OutputContext` (the backend
-    //     fallback path in `Gpu::new_for_surface` drops the Vulkan-instance
-    //     surface when no adapter is found) dies inside this call, strictly
-    //     within the caller's borrows of `conn` and `wl_surface`.
-    //   - `Connection` is reference-counted: the `wl_display` stays alive
-    //     while *any* clone exists (`PlatformState.conn`, the calloop
-    //     `WaylandSource`), so the field-order argument is a conservative
-    //     lower bound on the display pointer's validity.
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(raw_display_handle),

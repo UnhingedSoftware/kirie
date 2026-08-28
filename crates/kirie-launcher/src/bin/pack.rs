@@ -1,27 +1,3 @@
-//! `kirie-pack` — build-time tool that assembles the single-file self-extracting
-//! `kirie` binary from a build directory.
-//!
-//! ```text
-//! kirie-pack <build-dir> <output>
-//! ```
-//!
-//! `<build-dir>` is a cargo output dir (e.g. `target/release`) holding the
-//! web-cef engine, the `kirie-cef-helper`, the `kirie-launcher` stub and the CEF
-//! runtime (as staged beside the binary by `cef-dll-sys`). `kirie-pack`:
-//!
-//! 1. stages the runtime file set into a temp dir,
-//! 2. strips debug symbols (CEF ships `libcef.so` unstripped at ~1.3 GB; stripped
-//!    it is ~245 MB — only debug info goes, the dynamic symbols needed to load it
-//!    stay),
-//! 3. trims `locales/` to `en-US` (the full set is ~50 MB / 220 languages; CEF's
-//!    UI locale defaults to en-US and web wallpaper *content* doesn't depend on
-//!    it — set `KIRIE_CEF_KEEP_LOCALES=1` to keep them all),
-//! 4. writes `<output>` = launcher stub bytes ++ `zstd(tar(stage))` ++ trailer
-//!    (see [`kirie_launcher`] for the layout) and marks it executable.
-//!
-//! Doing the staging/strip/trim here (rather than a shell script) keeps the
-//! packaging as a single compiled tool the release CI invokes directly.
-
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::os::unix::fs::PermissionsExt;
@@ -30,17 +6,10 @@ use std::process::{Command, ExitCode};
 
 use kirie_launcher::{KEY_LEN, MAGIC, TRAILER_LEN};
 
-/// zstd level for the runtime blob. 19 is near-max ratio (the runtime is a few
-/// hundred MB of libcef + resources, so ratio matters far more than pack time);
-/// still below the ultra levels that balloon memory.
 const ZSTD_LEVEL: i32 = 19;
 
-/// The launcher stub prepended to the blob (built by this crate's other bin).
 const STUB: &str = "kirie-launcher";
 
-/// The CEF runtime + engine file set staged into the bundle. Every one is
-/// required — a partial runtime fails at web init. `locales/` is handled
-/// separately (it is a directory and gets trimmed).
 const RUNTIME_FILES: &[&str] = &[
     "kirie",
     "kirie-cef-helper",
@@ -101,7 +70,6 @@ fn pack(build_dir: &Path, output: &Path) -> io::Result<PackInfo> {
     strip_stage(&stage);
     trim_locales(&stage)?;
 
-    // Compress tar(stage) into memory (multi-threaded to keep pack time sane).
     let mut encoder = zstd::Encoder::new(Vec::new(), ZSTD_LEVEL)?;
     let workers = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
@@ -109,14 +77,12 @@ fn pack(build_dir: &Path, output: &Path) -> io::Result<PackInfo> {
     let _ = encoder.multithread(workers);
     {
         let mut builder = tar::Builder::new(&mut encoder);
-        builder.follow_symlinks(false); // keep any versioned .so symlinks
+        builder.follow_symlinks(false);
         builder.append_dir_all(".", &stage)?;
         builder.finish()?;
     }
     let blob = encoder.finish()?;
 
-    // Cache key = first 16 hex of blake3(blob): stable per build, changes with
-    // the runtime so a new build extracts fresh.
     let key: String = blake3::hash(&blob).to_hex().chars().take(KEY_LEN).collect();
 
     let mut out = File::create(output)?;
@@ -138,7 +104,6 @@ fn pack(build_dir: &Path, output: &Path) -> io::Result<PackInfo> {
     })
 }
 
-/// Copy the runtime file set + `locales/` from `build_dir` into a fresh temp dir.
 fn stage_runtime(build_dir: &Path) -> io::Result<PathBuf> {
     let stage = std::env::temp_dir().join(format!("kirie-pack-stage.{}", std::process::id()));
     let _ = fs::remove_dir_all(&stage);
@@ -168,9 +133,6 @@ fn stage_runtime(build_dir: &Path) -> io::Result<PathBuf> {
     Ok(stage)
 }
 
-/// Strip debug symbols from every staged binary/shared object. Best-effort:
-/// `strip` failures (or a missing `strip`) are warned about, not fatal — an
-/// unstripped bundle still works, just larger.
 fn strip_stage(stage: &Path) {
     let Ok(entries) = fs::read_dir(stage) else { return };
     for entry in entries.flatten() {
@@ -191,14 +153,13 @@ fn strip_stage(stage: &Path) {
     }
 }
 
-/// Trim `locales/` to `en-US.pak` unless `KIRIE_CEF_KEEP_LOCALES=1`.
 fn trim_locales(stage: &Path) -> io::Result<()> {
     if std::env::var("KIRIE_CEF_KEEP_LOCALES").is_ok_and(|v| v == "1") {
         return Ok(());
     }
     let locales = stage.join("locales");
     if !locales.join("en-US.pak").is_file() {
-        return Ok(()); // no en-US to key on; keep whatever is there
+        return Ok(());
     }
     for entry in fs::read_dir(&locales)? {
         let entry = entry?;
@@ -209,7 +170,6 @@ fn trim_locales(stage: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Removes a temp dir on drop (so a pack failure doesn't leave the stage behind).
 struct TempDir(PathBuf);
 impl Drop for TempDir {
     fn drop(&mut self) {

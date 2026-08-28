@@ -1,16 +1,3 @@
-//! [`ParticleSim`] — the CPU particle simulation for one particle system
-//! (docs/render-architecture.md §7.3, `CParticle::update`).
-//!
-//! The update order matches the reference: run emitters (spawn), age particles,
-//! run operators, compute the spritesheet frame, then order-preservingly
-//! compact dead particles (index 0 stays the oldest — the rope renderer relies
-//! on it). `dt` is capped at 0.1 s.
-//!
-//! SPEC §V5: the particle pool is allocated once at construction (`maxcount ×
-//! instanceOverride.count`); steady-state stepping pushes into spare capacity
-//! and compacts in place — no per-frame heap allocation. SPEC §V1: no globals;
-//! all state is owned by the `ParticleSim`.
-
 use kirie_scene::particle::{InstanceOverride, ParticleSystem};
 use kirie_scene::value::Vec3;
 
@@ -20,53 +7,33 @@ use super::operator::{Operator, StepCtx};
 use super::rng::Rng;
 use super::state::{Initial, Overrides, Particle, SpriteInstance};
 
-/// The maximum `dt` a single update advances (docs §7.3: `g_Time` delta capped
-/// at 0.1 s so a stalled frame cannot teleport particles).
 pub const MAX_DT: f32 = 0.1;
 
-/// The default particle size before any `sizerandom` initializer (docs §7.3:
-/// "size base 20").
 const BASE_SIZE: f32 = 20.0;
 
-/// Hard cap on the pool so a malformed `maxcount` cannot request a huge
-/// allocation (SPEC §V9: never trust input sizing).
 const MAX_POOL: usize = 1_000_000;
 
-/// Spritesheet frame-advance mode (docs §7.3: `randomframe`, `once`, else loop).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FrameMode {
-    /// Advance and wrap (`frame mod frames`).
     #[default]
     Loop,
-    /// Advance and clamp at the last frame.
     Once,
-    /// A frozen random frame chosen per particle.
     RandomFrame,
 }
 
-/// Spritesheet timing for frame computation (from the material texture's
-/// spritesheet grid; supplied by the integrator since texture decoding lives
-/// elsewhere).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpriteSheet {
-    /// Total frames in the sheet (`>= 1`).
     pub frames: u32,
-    /// Seconds per frame.
     pub frame_duration: f32,
-    /// Frame-advance mode.
     pub mode: FrameMode,
 }
 
-/// Per-simulation configuration.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SimConfig {
-    /// RNG seed (deterministic runs / tests).
     pub seed: u64,
-    /// Optional spritesheet timing (none → all particles stay on frame 0).
     pub sheet: Option<SpriteSheet>,
 }
 
-/// The CPU simulation for a single particle system instance.
 pub struct ParticleSim {
     particles: Vec<Particle>,
     capacity: usize,
@@ -74,13 +41,9 @@ pub struct ParticleSim {
     initializers: Vec<Initializer>,
     operators: Vec<Operator>,
     control_points: Vec<Vec3>,
-    /// For each control point: `Some(authored offset)` when it is bound to
-    /// the cursor (`locktopointer`), applied on top of the pointer position.
     cp_pointer_offset: Vec<Option<Vec3>>,
     overrides: Overrides,
-    /// Script `pause()` — simulation frozen, particles retained.
     paused: bool,
-    /// Script `stop()` — emission halted, particles cleared.
     stopped: bool,
     perspective: bool,
     sequence_multiplier: f32,
@@ -92,8 +55,6 @@ pub struct ParticleSim {
 }
 
 impl ParticleSim {
-    /// Build a simulation from a resolved particle system + its scene-object
-    /// `instanceoverride`.
     #[must_use]
     pub fn new(system: &ParticleSystem, overrides: &InstanceOverride, config: SimConfig) -> Self {
         let ov = Overrides::from_scene(overrides);
@@ -110,10 +71,6 @@ impl ParticleSim {
             .map(|(i, s)| Operator::compile(s, 0x9E37_79B9u32.wrapping_mul(i as u32 + 1), &mut rng))
             .collect();
 
-        // Control points, system-local. A `locktopointer` point follows the
-        // cursor: [`Self::set_pointer_local`] re-bases it every frame (offset
-        // preserved), which is what makes cursor-trail systems trail the
-        // cursor instead of sitting wherever the author left CP0.
         let mut control_points: Vec<Vec3> = system
             .controlpoints
             .iter()
@@ -152,7 +109,6 @@ impl ParticleSim {
         }
     }
 
-    /// Advance the simulation by `dt` seconds (capped at [`MAX_DT`]).
     pub fn update(&mut self, dt: f32) {
         if !self.overrides.enabled || self.paused || self.stopped {
             return;
@@ -167,33 +123,25 @@ impl ParticleSim {
         self.compact();
     }
 
-    /// `IParticleSystem.play()` — restart a paused or stopped system.
     pub fn play(&mut self) {
         self.paused = false;
         self.stopped = false;
     }
 
-    /// `IParticleSystem.pause()` — freeze the simulation (particles keep
-    /// their state; `play` resumes).
     pub fn pause(&mut self) {
         self.paused = true;
     }
 
-    /// `IParticleSystem.stop()` — halt emission and clear the live particles.
     pub fn stop(&mut self) {
         self.stopped = true;
         self.particles.clear();
     }
 
-    /// `IParticleSystem.isPlaying()`.
     #[must_use]
     pub fn is_playing(&self) -> bool {
         self.overrides.enabled && !self.paused && !self.stopped
     }
 
-    /// `IParticleSystem.emitParticles(count)` — spawn `count` particles
-    /// immediately (round-robin over emitters), independent of the paused
-    /// state, exactly like the reference's immediate emission.
     pub fn emit_burst(&mut self, count: u32) {
         if self.emitters.is_empty() {
             return;
@@ -205,8 +153,6 @@ impl ParticleSim {
         }
     }
 
-    /// `IParticleSystemInstance` scalar setters. Returns false for a name
-    /// that is not a live scalar override.
     pub fn set_instance_scalar(&mut self, name: &str, v: f32) -> bool {
         match name {
             "alpha" => self.overrides.alpha = v,
@@ -220,15 +166,10 @@ impl ParticleSim {
         true
     }
 
-    /// `IParticleSystemInstance.colorn` — spawn-color multiplier.
     pub fn set_instance_colorn(&mut self, v: Vec3) {
         self.overrides.colorn = v;
     }
 
-    /// `IParticleSystemInstance.controlpointN` — reposition a control point
-    /// (local y-up space, same convention as the authored offsets). Indexes
-    /// past the authored list grow it, so a script can drive points the
-    /// author never placed.
     pub fn set_control_point(&mut self, idx: usize, pos: Vec3) {
         if idx >= 8 {
             return;
@@ -251,7 +192,6 @@ impl ParticleSim {
         }
     }
 
-    /// Spawn one particle from emitter `e_idx`; false when the pool is full.
     fn spawn_one(&mut self, e_idx: usize) -> bool {
         if self.particles.len() >= self.capacity {
             return false;
@@ -272,8 +212,6 @@ impl ParticleSim {
         true
     }
 
-    /// A fresh particle before initializers run (docs §7.3: color = colorn
-    /// override; alpha/size/lifetime = 1 × override with size base 20).
     fn new_particle(&mut self, position: Vec3, velocity: Vec3) -> Particle {
         let seed = self.next_seed;
         self.next_seed = self.next_seed.wrapping_add(0x9E37_79B9);
@@ -338,25 +276,16 @@ impl ParticleSim {
         }
     }
 
-    /// Order-preserving compaction: drop particles whose age reached their
-    /// lifetime, keeping the oldest at index 0 (docs §7.3). `Vec::retain` keeps
-    /// order and does not allocate.
     fn compact(&mut self) {
         self.particles.retain(|p| p.lifetime > 0.0 && p.age < p.lifetime);
     }
 
-    /// Set the live `instanceoverride.rate` multiplier — the seam a property
-    /// script (the standard audio-reactive particle recipe) drives per frame.
-    /// Read by every emitter tick, so it takes effect immediately.
     pub fn set_rate_override(&mut self, rate: f32) {
         if rate.is_finite() && rate >= 0.0 {
             self.overrides.rate = rate;
         }
     }
 
-    /// Move every cursor-bound control point to `pos` (system-local, y-up),
-    /// keeping its authored offset. Systems without `locktopointer` points
-    /// are untouched.
     pub fn set_pointer_local(&mut self, pos: Vec3) {
         for (point, offset) in self.control_points.iter_mut().zip(&self.cp_pointer_offset) {
             if let Some(off) = offset {
@@ -365,52 +294,41 @@ impl ParticleSim {
         }
     }
 
-    /// Whether any control point follows the cursor.
     #[must_use]
     pub fn follows_pointer(&self) -> bool {
         self.cp_pointer_offset.iter().any(Option::is_some)
     }
 
-    /// The live particles, oldest first.
     #[must_use]
     pub fn particles(&self) -> &[Particle] {
         &self.particles
     }
 
-    /// The number of live particles.
     #[must_use]
     pub fn live_count(&self) -> usize {
         self.particles.len()
     }
 
-    /// The pool capacity (`maxcount × instanceOverride.count`, clamped).
     #[must_use]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
 
-    /// Total particles spawned over the sim's lifetime (diagnostics).
     #[must_use]
     pub fn total_spawned(&self) -> u64 {
         self.total_spawned
     }
 
-    /// Whether any emitter has a shape the reference implements. A system with
-    /// only unsupported emitters can never spawn (docs §7.3).
     #[must_use]
     pub fn has_supported_emitter(&self) -> bool {
         self.emitters.iter().any(CompiledEmitter::is_supported)
     }
 
-    /// Elapsed simulated time.
     #[must_use]
     pub fn time(&self) -> f32 {
         self.time
     }
 
-    /// Fill `out` with one [`SpriteInstance`] per live particle for the
-    /// instanced-quad renderer. `out` is cleared and refilled in place so a
-    /// warm buffer never reallocates (SPEC §V5).
     pub fn write_sprites(&self, out: &mut Vec<SpriteInstance>) {
         out.clear();
         let frames = self.sheet.map_or(1u32, |s| s.frames.max(1));
@@ -426,8 +344,6 @@ impl ParticleSim {
     }
 }
 
-/// The pool size: `maxcount × instanceOverride.count`, at least 1, clamped to
-/// [`MAX_POOL`] (docs §7.3 pool; SPEC §V9 malformed-size guard).
 #[must_use]
 fn pool_size(maxcount: u32, count_override: f32) -> usize {
     let raw = (maxcount as f32 * count_override.max(0.0)).ceil();

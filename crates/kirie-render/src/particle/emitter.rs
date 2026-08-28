@@ -1,21 +1,9 @@
-//! Particle emitters — shape + rate/burst scheduling
-//! (docs/render-architecture.md §7.3: `boxrandom`, `sphererandom`; anything
-//! else is logged and ignored). Fields and defaults come from the scene-side
-//! [`Emitter`] model (`ObjectParser.cpp:745-775`).
-//!
-//! Emission accumulates `dt * rate * instanceOverride.rate * audioFactor`
-//! (audio adds, never gates; we run with `audioFactor = 1` headless). `flags`
-//! bit 0x2 limits one spawn per frame; bit 0x4 drives random periodic
-//! emission windows (`min/maxperiodicdelay`, `min/maxperiodicduration`).
-
 use kirie_scene::particle::Emitter;
 use kirie_scene::value::Vec3;
 
 use super::math;
 use super::rng::Rng;
 
-/// The two emitter shapes the reference implements (docs §7.3). Unknown names
-/// compile to [`Shape::Unsupported`] and emit nothing.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Shape {
     BoxRandom,
@@ -26,7 +14,6 @@ enum Shape {
 const FLAG_ONE_PER_FRAME: u32 = 0x2;
 const FLAG_PERIODIC: u32 = 0x4;
 
-/// A compiled emitter with its live scheduling state.
 #[derive(Clone, Debug)]
 pub struct CompiledEmitter {
     shape: Shape,
@@ -48,22 +35,14 @@ pub struct CompiledEmitter {
     minperiodicduration: f32,
     maxperiodicduration: f32,
 
-    // ---- live state ----
-    /// Fractional accumulator of pending spawns (SPEC §V5: no alloc).
     accumulator: f32,
-    /// Whether the emitter is inside an active window this step.
     active: bool,
-    /// Whether the current burst (`instantaneous`) has fired this window.
     burst_fired: bool,
-    /// Absolute time the next periodic toggle happens (`FLAG_PERIODIC`).
     next_toggle: f32,
-    /// Whether the periodic scheduler has been primed.
     primed: bool,
 }
 
 impl CompiledEmitter {
-    /// Compile a scene [`Emitter`]. Its origin/directions are Y-flipped to the
-    /// centered coordinate convention (docs §7.3).
     #[must_use]
     pub fn compile(e: &Emitter) -> Self {
         let shape = match e.name.as_str() {
@@ -98,15 +77,11 @@ impl CompiledEmitter {
         }
     }
 
-    /// Whether this emitter can ever spawn (a known shape).
     #[must_use]
     pub fn is_supported(&self) -> bool {
         self.shape != Shape::Unsupported
     }
 
-    /// Advance scheduling by `dt` at absolute `time` and return how many
-    /// particles to spawn this step. `rate_override` is `instanceOverride.rate`;
-    /// `audio_factor` is `1 + 3·sampleAudio` (`1.0` headless).
     pub fn tick(&mut self, dt: f32, time: f32, rate_override: f32, audio_factor: f32, rng: &mut Rng) -> u32 {
         if self.shape == Shape::Unsupported {
             return 0;
@@ -115,7 +90,6 @@ impl CompiledEmitter {
         let was_active = self.active;
         self.active = self.compute_active(time, rng);
         if self.active && !was_active {
-            // Entered an active window: re-arm the instantaneous burst.
             self.burst_fired = false;
         }
         if !self.active {
@@ -139,13 +113,10 @@ impl CompiledEmitter {
         n as u32
     }
 
-    /// Whether the emitter is active at `time` (delay/duration window, or the
-    /// random periodic scheduler when `FLAG_PERIODIC` is set).
     fn compute_active(&mut self, time: f32, rng: &mut Rng) -> bool {
         if self.flags & FLAG_PERIODIC != 0 {
             if !self.primed {
                 self.primed = true;
-                // Start inactive; first toggle after a periodic delay + delay.
                 self.active = false;
                 self.next_toggle = self.delay + rng.range(self.minperiodicdelay, self.maxperiodicdelay);
                 return false;
@@ -168,9 +139,6 @@ impl CompiledEmitter {
         self.duration <= 0.0 || time <= self.delay + self.duration
     }
 
-    /// Compute one spawn's system-local position and velocity. Called `n` times
-    /// per step by the simulation, which then builds the particle and runs
-    /// initializers over it.
     #[must_use]
     pub fn spawn(&self, control_points: &[Vec3], perspective: bool, rng: &mut Rng) -> (Vec3, Vec3) {
         let base = math::add(
@@ -179,8 +147,6 @@ impl CompiledEmitter {
         );
         match self.shape {
             Shape::BoxRandom => {
-                // Uniform per axis in [distancemin, distancemax] with random
-                // sign, times `directions` (docs §7.3).
                 let off = [
                     rng.range(self.distancemin[0], self.distancemax[0]) * rng.sign() * self.directions[0],
                     rng.range(self.distancemin[1], self.distancemax[1]) * rng.sign() * self.directions[1],
@@ -189,39 +155,27 @@ impl CompiledEmitter {
                 (math::add(base, off), [0.0, 0.0, 0.0])
             }
             Shape::SphereRandom => {
-                // Radius range from the X components (broadcastable field).
-                // UNVERIFIED: the reference's exact radius source is not
-                // documented; the X component matches the broadcast default.
                 let rmin = self.distancemin[0];
                 let rmax = self.distancemax[0];
                 let u = rng.unit();
                 let mut dir;
                 let radius;
                 if perspective {
-                    // 3D shell, volume-uniform via cbrt (docs §7.3).
                     radius = (lerp(rmin.powi(3), rmax.powi(3), u)).cbrt();
                     let z = rng.range(-1.0, 1.0);
                     let phi = rng.range(0.0, std::f32::consts::TAU);
                     let s = (1.0 - z * z).max(0.0).sqrt();
                     dir = [s * phi.cos(), s * phi.sin(), z];
                 } else {
-                    // 2D annulus, area-uniform via sqrt (docs §7.3).
                     radius = lerp(rmin * rmin, rmax * rmax, u).sqrt();
                     let theta = rng.range(0.0, std::f32::consts::TAU);
                     dir = [theta.cos(), theta.sin(), 0.0];
                 }
-                // `sign` ivec3 forces per-axis sign (sphere only, docs §7.3).
                 for (d, &s) in dir.iter_mut().zip(self.sign.iter()) {
                     if s != 0 {
                         *d = d.abs() * (s.signum() as f32);
                     }
                 }
-                // The reference masks the sampled offset per-axis by
-                // `directions` after the shell/annulus sample
-                // (CParticle.cpp:646 `randomPos *= emitter.directions`) — a
-                // directions like "1 0.03 0" confines spawns to a tight Y band.
-                // Without it, wide-radius emitters scatter across the whole
-                // ±distancemax sphere and most sprites land offscreen.
                 let offset = [
                     dir[0] * radius * self.directions[0],
                     dir[1] * radius * self.directions[1],

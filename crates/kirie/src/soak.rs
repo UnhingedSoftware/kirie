@@ -1,22 +1,3 @@
-//! Release-hardening leak/stability soak.
-//!
-//! Drives the offscreen build→render→drop cycle over the installed corpus on
-//! ONE shared wgpu device — the same device the live engine keeps across `bg`
-//! swaps — for many iterations, sampling resident memory and open-fd count. An
-//! unbounded climb across iterations is a leak; a rise-then-plateau (caches
-//! warming over the first full cycle, then flat once every page freed on drop
-//! is returned to the OS via [`kirie_bake::trim_heap`]) is clean.
-//!
-//! Triggered out-of-band with `KIRIE_SOAK=1` so it never touches the compat CLI
-//! surface. The [`soak`] fn is also called by the ignored `tests/soak.rs`
-//! release gate, which asserts on the returned [`SoakReport`].
-//!
-//! Env knobs (all optional):
-//! - `KIRIE_SOAK_ITERS`  total build/render/drop iterations (default 500)
-//! - `KIRIE_SOAK_FRAMES` frames rendered per iteration       (default 8)
-//! - `KIRIE_SOAK_SAMPLE` sample RSS/fds every N iterations    (default 10)
-//! - `KIRIE_SOAK_DIR`    corpus root (default: Steam workshop 431960)
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
@@ -28,37 +9,19 @@ use crate::compat::args::{ClampMode, ScalingMode};
 use crate::compat::resolve::{Wallpaper, classify};
 use crate::compat::screenshot::{Headless, build_offscreen_renderer};
 
-/// Outcome of a soak run — enough for the release gate to assert leak-freedom.
 #[derive(Debug, Clone, Copy)]
 pub struct SoakReport {
-    /// Build→render→drop cycles executed.
     pub iters: usize,
-    /// Builds that failed (a renderable item that errored); expected 0.
     pub fails: usize,
-    /// RSS before the first build.
     pub rss_start_kb: u64,
-    /// RSS right after the first full corpus cycle — the warm baseline every
-    /// later iteration should return to. Leak ⇒ `rss_end_kb` ≫ this.
     pub rss_warm_kb: u64,
-    /// RSS after the final iteration.
     pub rss_end_kb: u64,
-    /// Highest sampled RSS (transient build peaks included).
     pub rss_peak_kb: u64,
-    /// Open fds before the first build.
     pub fd_start: usize,
-    /// Open fds after the final iteration; must not grow with `iters`.
     pub fd_end: usize,
-    /// Highest sampled open-fd count.
     pub fd_peak: usize,
 }
 
-/// Entry point for `KIRIE_BENCH=<wallpaper dir> kirie …`: build one wallpaper
-/// and time steady-state frames offscreen, reporting ms/frame and the fps that
-/// implies. Answers "what does ONE frame of this wallpaper actually cost on
-/// this GPU", which utilization% cannot (a downclocked GPU inflates it).
-///
-/// - `KIRIE_BENCH_FRAMES` timed frames (default 120)
-/// - `KIRIE_BENCH_SIZE`   `WxH` render size (default 1920x1080)
 pub fn bench_from_env() -> ExitCode {
     match bench() {
         Ok(()) => ExitCode::SUCCESS,
@@ -80,8 +43,6 @@ fn bench() -> Result<()> {
         })
         .unwrap_or((1920u32, 1080u32));
 
-    // `KIRIE_BENCH_SCALE` drives the scene's render-target size (fill cost);
-    // the scene FBO is projection x scale, independent of KIRIE_BENCH_SIZE.
     if let Some(s) = std::env::var("KIRIE_BENCH_SCALE")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
@@ -89,8 +50,6 @@ fn bench() -> Result<()> {
         crate::compat::run::set_render_scale(s);
     }
 
-    // `KIRIE_BENCH_FIT=1` exercises `--fit-render-to-output` (cap the scene's
-    // render targets at the bench canvas rather than its authored projection).
     if std::env::var_os("KIRIE_BENCH_FIT").is_some() {
         crate::compat::run::set_fit_render_to_output(true);
     }
@@ -131,17 +90,11 @@ fn bench() -> Result<()> {
         build_offscreen_renderer(&rt, &wp, ScalingMode::Default, ClampMode::Clamp, size, None, &[])?;
     let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
 
-    // Warm up: first frames compile/upload lazily and would skew the mean.
     for _ in 0..15 {
         renderer.render(&view, size, 1.0 / 60.0);
     }
     let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
 
-    // Two clocks per frame. `cpu` stops when `render` returns — that is the
-    // encode cost, everything this process actually spends. `wall` additionally
-    // waits for the GPU to finish. Reporting only the second (as this bench
-    // used to) hides every CPU-side regression behind GPU time, which is
-    // exactly what an optimization pass needs to see.
     let mut times = Vec::with_capacity(frames);
     let mut cpu_times = Vec::with_capacity(frames);
     for _ in 0..frames {
@@ -176,7 +129,6 @@ fn bench() -> Result<()> {
     Ok(())
 }
 
-/// Entry point for `KIRIE_SOAK=1 kirie …` (wired in [`crate::run`]).
 pub fn run_from_env() -> ExitCode {
     match soak_from_env() {
         Ok(_) => ExitCode::SUCCESS,
@@ -210,7 +162,6 @@ fn soak_from_env() -> Result<SoakReport> {
     soak(&dir, iters, frames, sample_every)
 }
 
-/// Only Scene/Image/Video build offscreen in a default (no-web) build.
 fn is_soakable(wp: &Wallpaper) -> bool {
     matches!(
         wp,
@@ -218,19 +169,12 @@ fn is_soakable(wp: &Wallpaper) -> bool {
     )
 }
 
-/// Cycle every renderable item in `corpus_dir` build→render(`frames_per_iter`)
-/// →drop for `iters` total iterations on one shared device, logging RSS/fds
-/// every `sample_every` iterations. Returns a [`SoakReport`] for assertions.
 pub fn soak(
     corpus_dir: &Path,
     iters: usize,
     frames_per_iter: usize,
     sample_every: usize,
 ) -> Result<SoakReport> {
-    // Mirror the live engine's allocator policy (compat::run): cap glibc arenas
-    // so per-iteration worker threads reuse them, and `trim_heap` after each
-    // drop actually returns the pages. Without this the soak measures arena
-    // retention, not real footprint.
     kirie_bake::limit_malloc_arenas(2);
 
     let mut wallpapers: Vec<(String, Wallpaper)> = Vec::new();
@@ -297,8 +241,6 @@ pub fn soak(
 
     let rss_start = rss_kb().unwrap_or(0);
     let fd_start = fd_count().unwrap_or(0);
-    // Warm baseline = RSS after one full corpus cycle (all caches primed). If
-    // fewer iters than the corpus size, fall back to the start.
     let warm_at = wallpapers.len().min(iters).saturating_sub(1);
     let mut rss_warm = rss_start;
     let mut rss_peak = rss_start;
@@ -321,14 +263,9 @@ pub fn soak(
                 for _ in 0..frames_per_iter {
                     renderer.render(&view, size, 1.0 / 60.0);
                 }
-                // Block until the GPU is idle so each iteration's resources are
-                // actually reclaimed on drop (not lazily deferred) — a real
-                // leak then shows as monotonic growth, not free-timing noise.
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
                 drop(renderer);
                 let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-                // Return freed pages to the OS, exactly as the live swap path
-                // does — otherwise RSS reflects glibc arena caching, not usage.
                 kirie_bake::trim_heap();
             }
             Err(e) => {
@@ -383,7 +320,6 @@ pub fn soak(
     })
 }
 
-/// Resident set size in KB from `/proc/self/status` (`VmRSS`).
 fn rss_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -394,7 +330,6 @@ fn rss_kb() -> Option<u64> {
     None
 }
 
-/// Open file-descriptor count (leak canary for sockets / mmaps / device fds).
 fn fd_count() -> Option<usize> {
     Some(std::fs::read_dir("/proc/self/fd").ok()?.count())
 }

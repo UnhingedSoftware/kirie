@@ -1,17 +1,3 @@
-//! Corpus-gated headless GPU test for the **scene** renderer.
-//!
-//! For every `scene.pkg` in the workshop corpus (docs/corpus.md) this resolves
-//! the scene against its `project.json` properties, builds a [`SceneRenderer`],
-//! renders one frame into an offscreen `Rgba8Unorm` target on a real adapter,
-//! reads it back, and classifies the result (rendered non-black / clear-color
-//! only / build error). It asserts the pipeline produces plausible pixels for
-//! at least one of the simplest scenes and prints a per-item table so the ones
-//! that still error (unsupported shaders, effect graphs, model objects) are
-//! visible.
-//!
-//! Skipped (with a note, never failed) when either the corpus or a wgpu adapter
-//! is absent — so this is inert in CI and live on the RTX 4080.
-
 use std::path::{Path, PathBuf};
 
 use kirie_formats::pkg::OwnedPkg;
@@ -22,13 +8,7 @@ use kirie_scene::object::ObjectKind;
 use kirie_scene::resolve::AssetSource;
 use kirie_scene::{PropertyBag, Scene, SceneModel};
 
-/// Default corpus location (docs/corpus.md); override with `KIRIE_CORPUS`.
 const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
-/// Wallpaper Engine's shared builtin assets (`genericimage2`, effect shaders,
-/// builtin materials) — referenced by scene materials but *not* bundled in the
-/// scene.pkg, exactly as the C++ engine loads them from its install
-/// (docs/render-architecture.md §10 asset lookup). Override with
-/// `KIRIE_WE_ASSETS`.
 const ASSETS_DIR: &str = "/home/aiko/.steam/steam/steamapps/common/wallpaper_engine/assets";
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
@@ -75,11 +55,6 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     }
 }
 
-/// An [`AssetSource`] that resolves a path against the scene's `scene.pkg`
-/// first (byte-exact entry name, docs/format-pkg.md §2), then falls back to the
-/// shared builtin assets directory on disk — mirroring the C++ engine, which
-/// reads scene-local assets from the container and builtin shaders/materials
-/// from its install (docs/render-architecture.md §10).
 struct CompositeSource<'a> {
     pkg: &'a OwnedPkg,
     assets: Option<PathBuf>,
@@ -95,8 +70,6 @@ impl AssetSource for CompositeSource<'_> {
     }
 }
 
-/// Render one frame with `renderer` into a fresh offscreen target and read back
-/// tightly-packed RGBA8 rows.
 fn render_and_read(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -120,9 +93,6 @@ fn render_and_read(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    // A dt=0 frame establishes the blit window, then a burst of fixed-step
-    // frames advances time-driven shaders *and* populates particle sims (an
-    // emitter at ~10/s needs seconds of simulation before its sprites show).
     renderer.render(&view, SurfaceSize { width, height }, 0.0);
     for _ in 0..120 {
         renderer.render(&view, SurfaceSize { width, height }, 1.0 / 30.0);
@@ -174,18 +144,12 @@ fn render_and_read(
     pixels
 }
 
-/// Classification of a rendered frame.
 struct Stats {
-    /// Fraction of pixels whose max RGB channel differs from the frame's modal
-    /// (background) color by more than a small threshold — i.e. actual content.
     non_background: f32,
-    /// Whether any pixel has non-zero RGB at all.
     any_lit: bool,
 }
 
 fn classify(pixels: &[u8]) -> Stats {
-    // The clear color fills most of a simple scene; treat the top-left pixel as
-    // the background reference and count pixels that deviate from it.
     let bg = [pixels[0], pixels[1], pixels[2]];
     let mut differ = 0usize;
     let mut lit = false;
@@ -207,9 +171,6 @@ fn classify(pixels: &[u8]) -> Stats {
     }
 }
 
-/// Build a resolved [`SceneModel`] for `item_dir` (its `scene.pkg` +
-/// `project.json`). Returns the model, the owned pkg (kept alive so its
-/// [`PkgSource`] stays valid), and the property bag.
 fn load_model(
     item_dir: &Path,
     assets: &Option<PathBuf>,
@@ -219,7 +180,6 @@ fn load_model(
         .map(|p| PropertyBag::from_project(&p))
         .unwrap_or_default();
 
-    // Parse scene.json out of the pkg. Borrow the pkg only inside this scope.
     let scene = {
         let bytes = pkg
             .read_name(b"scene.json")
@@ -240,8 +200,6 @@ fn load_model(
 fn scene_corpus_renders_simplest_scenes_non_black() {
     let Some(dir) = corpus_dir() else { return };
     let Some((device, queue)) = gpu() else { return };
-    // Surface per-object/per-pass skip reasons (shader build + texture decode
-    // failures) by setting `KIRIE_TRACE=1`; quiet otherwise.
     if std::env::var_os("KIRIE_TRACE").is_some() {
         let _ = tracing_subscriber::fmt()
             .with_max_level(tracing::Level::DEBUG)
@@ -265,18 +223,16 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
     items.sort();
     assert!(!items.is_empty(), "no scene.pkg items under {}", dir.display());
 
-    let mut rendered = 0usize; // non-background content present
-    let mut clear_only = 0usize; // built + drew but frame is flat background
-    let mut errored = 0usize; // could not build a renderer
+    let mut rendered = 0usize;
+    let mut clear_only = 0usize;
+    let mut errored = 0usize;
     let mut lines = Vec::new();
 
-    // Non-image compositing coverage (SPEC §T16b): how many particle/text
-    // objects are wired in across the corpus and whether they populate.
-    let mut total_particle_objs = 0usize; // particle objects present in the models
-    let mut wired_particle_items = 0usize; // particle systems the renderer built
+    let mut total_particle_objs = 0usize;
+    let mut wired_particle_items = 0usize;
     let mut wired_text_items = 0usize;
-    let mut total_live_particles = 0usize; // live particles after warm-up
-    let mut particle_scenes_lit = 0usize; // scenes with particles that render content
+    let mut total_live_particles = 0usize;
+    let mut particle_scenes_lit = 0usize;
 
     for item in &items {
         let id = item.file_name().unwrap().to_string_lossy().into_owned();
@@ -330,7 +286,6 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
         let pixels = render_and_read(&device, &queue, &mut renderer, OUT_W, OUT_H);
         let stats = classify(&pixels);
 
-        // Sampled after the warm-up burst: proves particle sims populated.
         let particles = renderer.debug_particle_count();
         let texts = renderer.debug_text_count();
         let live = renderer.debug_live_particles();
@@ -374,8 +329,6 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
         lines.join("\n")
     );
 
-    // The pipeline must render at least one of the simplest scenes to plausible,
-    // non-background pixels end-to-end on a real adapter.
     assert!(
         rendered >= 1,
         "no corpus scene produced non-background content ({} built-but-flat, {} errored)",
@@ -383,9 +336,6 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
         errored
     );
 
-    // SPEC §T16b: particle objects (docs count 58 across the corpus) must now be
-    // composited, not skipped — the renderer builds a sim per particle object
-    // and those sims populate over the warm-up burst (the biggest visual win).
     if total_particle_objs > 0 {
         assert!(
             wired_particle_items > 0,

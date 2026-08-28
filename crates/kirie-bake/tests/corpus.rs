@@ -1,9 +1,3 @@
-//! Corpus-gated integration: bake a real workshop `scene.pkg` through
-//! kirie-scene + kirie-shader + kirie-formats, then reload it and assert the
-//! model round-trips and warm load beats cold bake (task §K corpus test).
-//!
-//! Skips cleanly when the corpus is absent (CI without Steam content).
-
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -53,7 +47,6 @@ impl IncludeResolver for NoIncludes {
     }
 }
 
-/// Load a resolved [`SceneModel`] from a scene.pkg item directory.
 fn load_model(item: &Path) -> Option<(OwnedPkg, SceneModel)> {
     let pkg = OwnedPkg::from_path(item.join("scene.pkg")).ok()?;
     let bag = Project::from_path(item.join("project.json"))
@@ -71,7 +64,6 @@ fn load_model(item: &Path) -> Option<(OwnedPkg, SceneModel)> {
     Some((pkg, model))
 }
 
-/// Decode the first `.tex` in the pkg to RGBA8, if any.
 fn first_texture(pkg: &OwnedPkg) -> Option<(String, u32, u32, Vec<u8>)> {
     for entry in pkg.entries() {
         let name = entry.name_str()?;
@@ -87,17 +79,14 @@ fn first_texture(pkg: &OwnedPkg) -> Option<(String, u32, u32, Vec<u8>)> {
     None
 }
 
-/// Build a bundle's content from a real scene, exercising all three producers.
 fn build_content(pkg: &OwnedPkg, model: &SceneModel) -> BundleContent {
     let mut c = BundleContent::new();
     c.set_scene_model(model).unwrap();
 
-    // A real decoded texture (kirie-formats tex path), if the pkg has one.
     if let Some((name, w, h, pixels)) = first_texture(pkg) {
         c.add_rgba8_texture(name, w, h, pixels);
     }
 
-    // A translated shader (kirie-shader path) — exercises SPIR-V emission.
     let frag = "\
 uniform sampler2D g_Texture0; // {\"default\":\"util/white\"}\n\
 varying vec2 v_TexCoord;\n\
@@ -137,9 +126,6 @@ fn corpus_scene_bakes_reloads_and_warm_beats_cold() {
 
     let mut baked = 0usize;
     for item in &items {
-        // COLD: the whole pipeline from raw disk bytes to a written bundle —
-        // parse pkg, resolve the scene, load assets, decode a texture, translate
-        // a shader, serialize + write. This is the work a warm load avoids.
         let t0 = Instant::now();
         let Some((pkg, model)) = load_model(item) else {
             continue;
@@ -151,21 +137,12 @@ fn corpus_scene_bakes_reloads_and_warm_beats_cold() {
 
         let size = std::fs::metadata(&path).unwrap().len();
 
-        // WARM: mmap + validate + decode the scene model. (The file is already
-        // in the page cache from the write above, matching a warm start.)
         let t1 = Instant::now();
         let loaded = cache.load(source).unwrap().expect("bundle present");
         let reloaded = loaded.scene_model().unwrap();
         let warm = t1.elapsed();
 
-        // Equivalent model (SPEC.md §V13).
         assert_eq!(reloaded, model, "reloaded model equals original ({item:?})");
-        // Warm load must not be substantially slower than the cold bake.
-        // A strict `warm < cold` was flaky: small scenes now cold-bake in
-        // ~25ms (property-independent bundles + page-cached pkg), putting
-        // both numbers inside scheduler noise. 2x keeps the regression
-        // guard (a warm path that re-parses would be 10x+) without the
-        // sub-millisecond coin flip.
         assert!(
             warm < cold * 2,
             "warm {warm:?} should not exceed 2x cold {cold:?} for {item:?}"

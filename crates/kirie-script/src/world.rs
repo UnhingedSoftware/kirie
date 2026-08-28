@@ -1,11 +1,3 @@
-//! The single-threaded script world: one QuickJS `Runtime` + `Context` per scene
-//! (docs/scripting-api.md §1; SPEC.md §V3 — this lives on its own dedicated
-//! thread, driven only by [`crate::engine`] commands).
-//!
-//! All JS handles (module namespaces, timers, text layers, `localStorage`) stay
-//! inside the JS heap (`__host.*`), so no Rust-side `Persistent` bookkeeping is
-//! needed; Rust keeps only lightweight per-module metadata.
-
 use std::collections::BTreeMap;
 
 use rquickjs::loader::{BuiltinLoader, BuiltinResolver};
@@ -21,12 +13,8 @@ const WE_MATH_JS: &str = include_str!("js/we_math.js");
 const WE_COLOR_JS: &str = include_str!("js/we_color.js");
 const WE_VECTOR_JS: &str = include_str!("js/we_vector.js");
 
-/// Snapshot of one module's tick inputs `(key, owner_id, inited, current value,
-/// workshop id)`, cloned out of [`World::modules`] before entering `ctx.with`.
 type ModuleTickState = (String, Option<i64>, bool, ScriptValue, Option<String>, u8, u8);
 
-/// Cursor-export presence bits (detected once at module load, so the per-tick
-/// dispatch never round-trips into JS for a handler that does not exist).
 const F_CURSOR_MOVE: u8 = 1;
 const F_CURSOR_ENTER: u8 = 2;
 const F_CURSOR_LEAVE: u8 = 4;
@@ -43,7 +31,6 @@ const CURSOR_EXPORTS: [(u8, &str); 6] = [
     (F_CURSOR_CLICK, "cursorClick"),
 ];
 
-/// Media-event export bits (same load-time detection as cursor handlers).
 const F_MEDIA_STATUS: u8 = 1;
 const F_MEDIA_PLAYBACK: u8 = 2;
 const F_MEDIA_PROPERTIES: u8 = 4;
@@ -58,60 +45,33 @@ const MEDIA_EXPORTS: [(u8, &str); 5] = [
     (F_MEDIA_TIMELINE, "mediaTimelineChanged"),
 ];
 
-/// Edge-detection state for cursor event dispatch, persisted across ticks.
 #[derive(Default)]
 struct CursorState {
-    /// Previous tick's (world position, left-button) — `None` before the first
-    /// tick, which only records a baseline (a cursor that *starts* inside a
-    /// layer's bounds must not fire `cursorEnter`).
     prev: Option<([f32; 3], bool)>,
-    /// Per-layer hit state from the previous tick (solid layers only).
     hit: std::collections::HashMap<i64, bool>,
-    /// Layers the current press started on, for `cursorClick` ("pressed and
-    /// released on the same object", d.ts).
     down_on: std::collections::HashSet<i64>,
 }
 
-/// Per-module bookkeeping (docs §4.2/§5.1).
 struct ModuleMeta {
-    /// The layer object this module drives (for `thisLayer` binding); `None`
-    /// when the property has no scriptable owner.
     owner_id: Option<i64>,
-    /// Whether deferred `init()` has run (first tick only, docs §4.2 step 6).
     inited: bool,
-    /// The property's current value (fed as `update`'s argument; updated from
-    /// the previous tick's return so scripts see their own writes, docs §5.1).
     current: ScriptValue,
-    /// `__workshopId` export, for `createLayer` path resolution (docs §2).
     workshop_id: Option<String>,
-    /// Which `cursor*` handlers the module exports (`F_CURSOR_*` bits).
     cursor_exports: u8,
-    /// Which `media*Changed` handlers the module exports (`F_MEDIA_*` bits).
     media_exports: u8,
 }
 
-/// The owned script world. Not `Send` (QuickJS `Runtime` is `!Send`); created and
-/// used only on the dedicated script thread.
 pub struct World {
     _runtime: Runtime,
     context: Context,
-    /// Loaded property-script modules, keyed `"<prop>_<objectId>"`; iteration is
-    /// lexicographic (docs §4.1 tick order).
     modules: BTreeMap<String, ModuleMeta>,
-    /// Next text-layer handle (docs §7; positive ints, 0 = invalid).
     next_layer_handle: u32,
-    /// Cursor event edge state (docs: cursor events on solid layers).
     cursor: CursorState,
-    /// Previous tick's resolution, to edge-detect `resizeScreen` dispatch.
     prev_res: Option<[f64; 2]>,
-    /// System language in the reference's lowercase `en-us` form, delivered
-    /// via `applyGeneralSettings` (the only setting the d.ts documents).
     language: String,
 }
 
 impl World {
-    /// Build a fresh world: runtime + context, module loader for the three
-    /// importable modules, then the embedded builtins + host bridge.
     pub fn new() -> Result<Self, ScriptError> {
         let runtime = Runtime::new().map_err(|e| ScriptError::Internal(e.to_string()))?;
         let resolver = BuiltinResolver::default()
@@ -147,13 +107,6 @@ impl World {
         })
     }
 
-    /// Load (compile + evaluate) a property script as an ES module (docs §4.2).
-    /// `key` is the module key; `owner_id` the scriptable layer it drives;
-    /// `initial` the property's initial value; `script_properties` the JSON
-    /// `scriptproperties` bag (docs §5.5, descriptors ignored).
-    ///
-    /// A compile/eval failure yields [`ScriptError::Load`] and the module is not
-    /// registered (SPEC.md §V9 — script disabled, engine unharmed).
     pub fn load_property_script(
         &mut self,
         key: &str,
@@ -163,15 +116,12 @@ impl World {
         script_properties: &serde_json::Value,
     ) -> Result<(), ScriptError> {
         if self.modules.contains_key(key) {
-            // docs §4.1: queueScript dedupes by key — first registration wins.
             return Ok(());
         }
         let key_owned = key.to_owned();
         let loaded = self
             .context
             .with(|ctx| -> Result<(Option<String>, u8, u8), ScriptError> {
-                // docs §5.5: expose this module's scriptproperties before its body
-                // runs, so top-level createScriptProperties().finish() reads them.
                 let host: Object = global(&ctx, "__host")?;
                 host.set("scriptProps", json_to_js(&ctx, script_properties).internal()?)
                     .internal()?;
@@ -188,7 +138,6 @@ impl World {
                 })?;
                 drain_jobs(&ctx);
                 let namespace = module.namespace().internal()?;
-                // Register the namespace in the JS heap so exports outlive this call.
                 let register: Function = global(&ctx, "__registerModule")?;
                 register
                     .call::<_, ()>((key_owned.clone(), namespace.clone()))
@@ -226,11 +175,7 @@ impl World {
         Ok(())
     }
 
-    /// Run one frame (docs §3.2): fire due timers, then for each module in key
-    /// order bind `thisLayer`, run deferred `init` once, call `update(value)`
-    /// and collect its return. Drains recorded scene ops and console output.
     pub fn tick(&mut self, frame: &HostFrame, overrides: &[(String, ScriptValue)]) -> TickOutput {
-        // Apply integrator-pushed value changes (user edits) before the tick.
         for (k, v) in overrides {
             if let Some(m) = self.modules.get_mut(k) {
                 m.current = v.clone();
@@ -253,9 +198,6 @@ impl World {
             .collect();
 
         let cursor = &mut self.cursor;
-        // `resizeScreen` fires on resolution *transitions* only — the initial
-        // size is init()'s job (d.ts: "call that function from both init()
-        // and resizeScreen()").
         let res = [frame.res_x, frame.res_y];
         let res_changed = self.prev_res.is_some_and(|r| r != res);
         self.prev_res = Some(res);
@@ -265,18 +207,10 @@ impl World {
             if let Err(e) = apply_frame(&ctx, frame) {
                 out.errors.push(e);
             }
-            // First frame only: snapshot the authored layer configs for
-            // `getInitialLayerConfig` (no-op afterwards).
             let _ = call_void(&ctx, "__snapshotInitialLayers", ());
-            // docs §3.2.a: fire due engine timers (self-catching in JS).
             let _ = call_void(&ctx, "__tickTimers", ());
-            // Trailing edge of the localStorage write debounce.
             let _ = call_void(&ctx, "__flushStorage", ());
-            // Cursor events fire before the frame's update() calls, mirroring
-            // the reference's input-then-update frame order.
             dispatch_cursor(&ctx, &metas, frame, cursor, &mut out);
-            // Media events likewise fire pre-update, on the tick their
-            // category changed (the integrator sets the flags).
             dispatch_media(&ctx, &metas, frame, &mut out);
 
             let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
@@ -298,10 +232,6 @@ impl World {
                             message: msg,
                         });
                     }
-                    // Load-time general settings: every setting counts as
-                    // changed on the initial call (scripts localize their text
-                    // from this delivery, so skipping it would leave them
-                    // untranslated forever).
                     match general_settings(&ctx, &language) {
                         Ok(payload) => {
                             if let Err(msg) = call_export(&ctx, key, "applyGeneralSettings", payload) {
@@ -329,13 +259,6 @@ impl World {
                         Err(e) => out.errors.push(e),
                     }
                 }
-                // `update(value)` must receive the property's CURRENT value —
-                // including writes made by this module's own `init()` (e.g. the
-                // visualizer template's `thisLayer.visible = false`) or another
-                // script, which the host-side `current` cache cannot see. The
-                // layer snapshot in the JS world is the live truth for
-                // layer-backed props; fall back to the cache when the layer
-                // doesn't carry the prop (module keys are "<prop>_<objectId>").
                 let arg = match (*owner, key.rsplit_once('_')) {
                     (Some(id), Some((prop, _))) => match call_ret2(&ctx, "__getLayerProp", (id, prop)) {
                         Ok(v) if !v.is_undefined() => v,
@@ -349,7 +272,6 @@ impl World {
                     }
                     Ok(None) => { /* no update export — leave value untouched */ }
                     Err(msg) => {
-                        // docs §5.1: exception from update skips the write-back.
                         out.errors.push(ScriptError::Runtime {
                             key: key.clone(),
                             phase: "update",
@@ -371,14 +293,12 @@ impl World {
                 }
             }
         }
-        // Mark inited even for modules with no update export.
         for m in self.modules.values_mut() {
             m.inited = true;
         }
         out
     }
 
-    /// Dispatch `applyUserProperties({key: value})` to every module (docs §5.3).
     pub fn dispatch_user_property(&mut self, key: &str, value: &ScriptValue) -> TickOutput {
         let keys: Vec<(String, Option<i64>)> = self
             .modules
@@ -409,8 +329,6 @@ impl World {
         })
     }
 
-    /// Wire `localStorage` persistence: seed the buckets from `path` (if it
-    /// exists) and register the native write hook the JS debouncer calls.
     pub fn set_storage_path(&mut self, path: std::path::PathBuf) {
         self.context.with(|ctx| {
             if let Ok(existing) = std::fs::read_to_string(&path)
@@ -423,7 +341,6 @@ impl World {
                 if let Some(dir) = write_path.parent() {
                     let _ = std::fs::create_dir_all(dir);
                 }
-                // 100 KB cap: localStorage is settings, not a database.
                 if json.len() <= 100 * 1024 {
                     let _ = std::fs::write(&write_path, json);
                 }
@@ -434,8 +351,6 @@ impl World {
         });
     }
 
-    /// Create a text-layer script (docs §7): returns a positive handle, or 0 on
-    /// evaluation failure.
     pub fn create_layer_script(
         &mut self,
         source: &str,
@@ -461,7 +376,6 @@ impl World {
         if ok { handle } else { 0 }
     }
 
-    /// Tick a text layer (docs §7.2): runs its deferred `init` then `update`.
     pub fn tick_layer(&mut self, handle: u32, time: f64, dt: f64, fps: f64) -> Vec<LogLine> {
         self.context.with(|ctx| {
             let _ = call_void(&ctx, "__tickLayer", (handle, time, dt, fps));
@@ -471,8 +385,6 @@ impl World {
         })
     }
 
-    /// Read a text layer's current rendered text (docs §7.2); `""` for an
-    /// invalid handle.
     pub fn layer_text(&self, handle: u32) -> String {
         self.context.with(|ctx| {
             global(&ctx, "__layerText")
@@ -481,15 +393,12 @@ impl World {
         })
     }
 
-    /// Destroy a text layer (docs §7.2): calls `destroy()` if present.
     pub fn destroy_layer(&mut self, handle: u32) {
         self.context.with(|ctx| {
             let _ = call_void(&ctx, "__destroyLayer", (handle,));
         });
     }
 
-    /// Evaluate an arbitrary global script and return its value as a string
-    /// (test/diagnostic helper).
     pub fn eval_to_string(&self, source: &str) -> Result<String, ScriptError> {
         self.context.with(|ctx| {
             ctx.eval::<Value, _>(source)
@@ -504,8 +413,6 @@ impl World {
     }
 }
 
-// ---- helpers --------------------------------------------------------------
-
 fn eval_global(ctx: &Ctx<'_>, name: &str, src: &str) -> Result<(), ScriptError> {
     ctx.eval::<(), _>(src).catch(ctx).map_err(|e| ScriptError::Load {
         key: name.to_owned(),
@@ -518,7 +425,6 @@ fn global<'js, T: rquickjs::FromJs<'js>>(ctx: &Ctx<'js>, name: &str) -> Result<T
 }
 
 fn drain_jobs(ctx: &Ctx<'_>) {
-    // docs §4.2 step 4: drain the pending-job queue after module evaluation.
     while ctx.execute_pending_job() {}
 }
 
@@ -534,7 +440,6 @@ fn call_void<'js, A: rquickjs::function::IntoArgs<'js>>(
         .map_err(|e| ScriptError::Internal(e.to_string()))
 }
 
-/// Call a global function returning its raw JS value (for `__getLayerProp`).
 fn call_ret2<'js, A: rquickjs::function::IntoArgs<'js>>(
     ctx: &Ctx<'js>,
     name: &str,
@@ -567,11 +472,6 @@ fn set_workshop_id(ctx: &Ctx<'_>, id: Option<&str>) {
     }
 }
 
-/// Dispatch the frame's cursor events (d.ts ScriptModule): edge-detect motion,
-/// per-solid-layer hits and left-button presses against the previous tick, and
-/// call the matching exported handlers with a `CursorEvent`. Only layers whose
-/// `solid` flag is set trigger cursor events (d.ts ILayer.solid), and only
-/// modules that actually export a handler are called (load-time bits).
 fn dispatch_cursor(
     ctx: &Ctx<'_>,
     metas: &[ModuleTickState],
@@ -582,8 +482,6 @@ fn dispatch_cursor(
     let world = frame.pointer_world;
     let left = frame.pointer_left_down;
     let Some((prev_world, prev_left)) = st.prev else {
-        // First tick: baseline only. A cursor that starts inside a layer's
-        // bounds must not fire `cursorEnter` (events are transitions).
         st.prev = Some((world, left));
         for l in &frame.layers {
             if l.solid == Some(true) {
@@ -600,9 +498,6 @@ fn dispatch_cursor(
         return;
     }
 
-    // New hit states computed up front so every module dispatches against the
-    // same previous-tick snapshot (two modules on one layer must both see the
-    // same enter edge).
     let mut new_hit: Vec<(i64, bool)> = Vec::new();
     for (key, owner, _, _, _, flags, _) in metas {
         if *flags == 0 {
@@ -667,9 +562,6 @@ fn dispatch_cursor(
     }
 }
 
-/// Dispatch the tick's media events (d.ts media*Changed) to every module that
-/// exports the matching handler. Payloads are built from the integrator's
-/// snapshot; `__mediaEvent` upgrades color arrays to real `Vec3`s JS-side.
 fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, out: &mut TickOutput) {
     let Some(m) = &frame.media else { return };
     if metas.iter().all(|t| t.6 == 0) {
@@ -679,7 +571,6 @@ fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, o
         m.colors
             .map_or(serde_json::json!([0.0, 0.0, 0.0]), |c| serde_json::json!(c[i]))
     };
-    // (payload, export name, fires) per category.
     let events: [(serde_json::Value, &'static str, bool, u8); 5] = [
         (
             serde_json::json!({ "enabled": m.enabled }),
@@ -755,16 +646,12 @@ fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, o
     }
 }
 
-/// The `applyGeneralSettings` payload: `{language}` is the only setting the
-/// d.ts documents.
 fn general_settings<'js>(ctx: &Ctx<'js>, language: &str) -> Result<Value<'js>, String> {
     let obj = Object::new(ctx.clone()).map_err(|e| e.to_string())?;
     obj.set("language", language).map_err(|e| e.to_string())?;
     Ok(obj.into_value())
 }
 
-/// The system language in the reference's lowercase tag form (`en-us`), from
-/// `LC_ALL`/`LANG` (`en_US.UTF-8` → `en-us`). Defaults to `en-us`.
 fn system_language() -> String {
     let raw = std::env::var("LC_ALL")
         .or_else(|_| std::env::var("LANG"))
@@ -782,9 +669,6 @@ fn system_language() -> String {
     }
 }
 
-/// Axis-aligned bounds test in scene space: `origin` is the layer center,
-/// extent is `size × scale` (rotation is ignored — the reference hit-tests the
-/// unrotated quad for flat layers).
 fn hit_test(l: &LayerState, world: [f32; 3]) -> bool {
     let (Some(origin), Some(size)) = (l.origin, l.size) else {
         return false;
@@ -795,9 +679,6 @@ fn hit_test(l: &LayerState, world: [f32; 3]) -> bool {
     (world[0] - origin[0]).abs() <= hw && (world[1] - origin[1]).abs() <= hh
 }
 
-/// Build the `CursorEvent` payload (worldPosition/localPosition as real `Vec3`
-/// instances, built JS-side by `__cursorEvent`). `localPosition` is the world
-/// position relative to the layer's origin.
 fn cursor_event<'js>(ctx: &Ctx<'js>, world: [f32; 3], layer: &LayerState) -> Result<Value<'js>, String> {
     let origin = layer.origin.unwrap_or([0.0; 3]);
     let f: Function = ctx.globals().get("__cursorEvent").map_err(|e| e.to_string())?;
@@ -813,14 +694,10 @@ fn cursor_event<'js>(ctx: &Ctx<'js>, world: [f32; 3], layer: &LayerState) -> Res
     .map_err(|e| e.to_string())
 }
 
-/// Call `module.export(arg)` ignoring any return; a missing export is not an
-/// error (docs §4.2: missing/non-function exports are silently skipped).
 fn call_export<'js>(ctx: &Ctx<'js>, key: &str, name: &str, arg: Value<'js>) -> Result<(), String> {
     call_export_ret(ctx, key, name, arg).map(|_| ())
 }
 
-/// Call `module.export(arg)` via `__callExport`, returning its value. `Ok(None)`
-/// = the export was missing/non-function; `Err` = the call threw.
 fn call_export_ret<'js>(
     ctx: &Ctx<'js>,
     key: &str,
@@ -835,8 +712,6 @@ fn call_export_ret<'js>(
     Ok(Some(ret.get("value").map_err(|e| e.to_string())?))
 }
 
-/// Inject the frame snapshot into `__host` (only the data fields; JS-owned state
-/// such as timers/textLayers/modules is preserved).
 fn apply_frame(ctx: &Ctx<'_>, frame: &HostFrame) -> Result<(), ScriptError> {
     let host: Object = global(ctx, "__host")?;
     let json =
@@ -845,10 +720,6 @@ fn apply_frame(ctx: &Ctx<'_>, frame: &HostFrame) -> Result<(), ScriptError> {
         for (k, v) in &map {
             host.set(k.as_str(), json_to_js(ctx, v).internal()?).internal()?;
         }
-        // `skip_serializing_if` drops a `None` audio from the snapshot, which
-        // would leave the previous tick's bands visible forever — but a frame
-        // without audio means "no capture" and must read as silence (the JS
-        // getter zero-fills from a null buffer).
         if !map.contains_key("audio") {
             host.set("audio", Value::new_null(ctx.clone())).internal()?;
         }
@@ -862,8 +733,6 @@ fn build_single<'js>(ctx: &Ctx<'js>, key: &str, value: &ScriptValue) -> Result<V
     Ok(obj.into_value())
 }
 
-/// Drain `__host.ops` (typed scene mutations) and `__host.console`, then reset
-/// both to empty arrays for the next tick.
 fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
     let host: Object = match global(ctx, "__host") {
         Ok(h) => h,
@@ -884,7 +753,6 @@ fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
     if let Ok(console) = host.get::<_, Array>("console") {
         for i in 0..console.len() {
             if let Ok(s) = console.get::<String>(i) {
-                // Each line is tagged with a leading 'I' (log) or 'E' (error).
                 let error = s.starts_with('E');
                 out.logs.push(LogLine {
                     error,
@@ -901,7 +769,6 @@ fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
     }
 }
 
-/// Parse one recorded op object (`{op: "...", ...}`) into a [`SceneOp`].
 fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
     let obj = v.as_object()?;
     let op: String = obj.get("op").ok()?;
@@ -978,8 +845,6 @@ fn get_vec3(obj: &Object<'_>, key: &str) -> Option<[f32; 3]> {
     ])
 }
 
-/// Decode an op's `value` field, which is a scalar, a bool, or a `[x,y,z]`
-/// array (vector properties).
 fn op_value(v: &Value<'_>) -> ScriptValue {
     if v.is_array()
         && let Some(arr) = v.as_array()
@@ -1014,7 +879,6 @@ fn stringify(ctx: &Ctx<'_>, v: &Value<'_>) -> String {
     }
 }
 
-/// Map a raw `rquickjs::Result` to [`ScriptError::Internal`].
 trait Internalize<T> {
     fn internal(self) -> Result<T, ScriptError>;
 }

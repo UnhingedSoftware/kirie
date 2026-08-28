@@ -1,14 +1,3 @@
-//! Backend selection facade.
-//!
-//! [`Platform`] is a thin dispatcher over the two presentation backends —
-//! [`WaylandPlatform`] (layer-shell, docs/render-architecture.md §2.3) and
-//! [`X11Platform`] (root-window/desktop, docs/render-architecture.md §2.2) —
-//! so callers (`kirie`, the examples, the tests) get one type with one
-//! `connect`/`run`/`output_count` surface regardless of session type
-//! (SPEC T24). The backend is chosen by the environment, mirroring the C++
-//! driver dispatch which picks the GLFW/X11 or Wayland-EGL video driver at
-//! startup (docs/render-architecture.md §2.1).
-
 use std::time::Duration;
 
 use crate::error::PlatformError;
@@ -16,86 +5,16 @@ use crate::platform::WaylandPlatform;
 use crate::renderer::RendererFactory;
 use crate::x11::{X11Mode, X11Platform};
 
-/// Presentation options shared across backends.
-///
-/// Threaded into [`Platform::connect_with`] so the compat CLI can make kirie a
-/// drop-in for the wallpaper daemon (`~/.config/hypr/wallpaper-daemon`):
-///
-/// - `layer_namespace` sets the wlr-layer-shell surface namespace. The
-///   daemon's watchdog (`wallpaperengine.sh`, `engine_layer_ok()`) decides a
-///   monitor still has a live wallpaper by grepping that monitor's layer
-///   namespaces:
-///   `… any(.[][]?; .namespace|test("wallpaperengine"))` — so the namespace
-///   MUST contain the substring `wallpaperengine` or the watchdog concludes
-///   the wallpaper is gone and kill-restarts the engine every ~45s. Default
-///   `"linux-wallpaperengine"` matches; keep any custom value containing
-///   `wallpaperengine`.
-/// - `screen_roots` are the output/monitor names (`--screen-root` values,
-///   e.g. `HDMI-A-1`) to place wallpaper surfaces on. **Empty means every
-///   output.** Any output whose name is not listed gets no surface at all, so
-///   the user's other monitors are left untouched instead of being blacked out
-///   by an unconfigured wallpaper surface (Wayland backend; SPEC V6 — a
-///   skipped output costs zero render work).
-/// - the `fullscreen_pause*` fields stop rendering an output entirely while a
-///   fullscreen app covers it, so a game gets the whole GPU (Wayland backend,
-///   `zwlr_foreign_toplevel_manager_v1`; see `src/toplevel.rs`).
-///
-/// Plain data only — this type is `Clone`/`Debug` and crosses the backend
-/// boundary, so no callbacks live here; the Wayland backend derives its
-/// behavior from these values.
 #[derive(Debug, Clone)]
 pub struct PresentOptions {
-    /// wlr-layer-shell surface namespace (Wayland only; ignored by X11).
-    /// Must contain `wallpaperengine` for the daemon watchdog to match.
     pub layer_namespace: String,
-    /// Output/monitor names to place surfaces on. Empty = all outputs.
     pub screen_roots: Vec<String>,
-    /// `--fps` cap: skip rendering on frame callbacks that arrive early,
-    /// re-requesting the next callback so pacing stays compositor-driven
-    /// (the reference paces its GL swap the same way). `None`/0 = uncapped.
     pub fps: Option<u32>,
-    /// `--playback-speed`/`--clock`: scales every scene's frame delta — the
-    /// reference multiplies its clock (`g_Time`) by this
-    /// (WallpaperApplication.cpp:908), so animations run faster/slower
-    /// without changing the render FPS. Videos apply their own rate.
     pub playback_speed: f64,
-    /// Stop rendering an output while a fullscreen application covers it, the
-    /// way the reference engine does — the wallpaper is invisible anyway and a
-    /// heavy scene costs real GPU time the foreground app wants. **Default
-    /// `true`**; `--no-fullscreen-pause` sets it to `false`.
-    ///
-    /// Wayland only, and only where the compositor implements
-    /// `wlr-foreign-toplevel-management-unstable-v1` (wlroots/sway, KWin,
-    /// Hyprland — *not* GNOME). Everywhere else this silently never pauses.
-    /// X11 ignores it (docs/render-architecture.md §2.2 has no equivalent).
     pub fullscreen_pause: bool,
-    /// Only pause when the fullscreen toplevel is also the focused one
-    /// (`--fullscreen-pause-only-active`). Off by default, matching the
-    /// reference: a game that was alt-tabbed away from still covers the
-    /// wallpaper, so it should still pause it.
     pub fullscreen_pause_only_active: bool,
-    /// `app_id`s that must never trigger a pause
-    /// (`--fullscreen-pause-ignore-appid`, repeatable), compared
-    /// case-insensitively. The usual case is a fullscreen media player or
-    /// browser the user wants the wallpaper to keep running behind.
     pub fullscreen_pause_ignore_appids: Vec<String>,
-    /// Drop a paused output's renderer once it has been hidden this long,
-    /// giving its memory back to the system until it is visible again
-    /// (`--release-hidden-after`, seconds; `None` keeps it resident forever).
-    ///
-    /// A hidden wallpaper is pure cost: measured, a scene holds ~90-240MB of
-    /// RSS plus its GPU textures, and a web wallpaper's out-of-process webkit
-    /// host holds ~240MB more and frees NOTHING on its own when covered. The
-    /// rebuild on resume is cheap because the bake + shader caches survive
-    /// (~50-120ms warm), and it runs off the render thread like any other
-    /// build, so nothing blocks.
-    ///
-    /// The delay exists so alt-tabbing in and out of a game does not thrash
-    /// teardown/rebuild: only a wallpaper that stays hidden pays it back.
     pub release_hidden_after: Option<Duration>,
-    /// Written by the platform: `true` while ANY output is fullscreen-paused.
-    /// The engine's background baker reads it as a pause gate (SPEC §V7) —
-    /// no cache-grinding while a game has the machine.
     pub activity_paused: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
@@ -106,35 +25,22 @@ impl Default for PresentOptions {
             screen_roots: Vec::new(),
             fps: None,
             playback_speed: 1.0,
-            // Pausing is the reference engine's default behavior; the CLI flag
-            // is the opt-*out* (`--no-fullscreen-pause`).
             fullscreen_pause: true,
             fullscreen_pause_only_active: false,
             fullscreen_pause_ignore_appids: Vec::new(),
-            // Off unless asked for: releasing changes visible behavior (a
-            // rebuild on resume), so it should be the user's choice, not a
-            // surprise.
             release_hidden_after: None,
             activity_paused: None,
         }
     }
 }
 
-/// Which presentation backend to bring up.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Backend {
-    /// Wayland `wlr-layer-shell` (docs/render-architecture.md §2.3).
     Wayland,
-    /// X11 root-window / desktop background (docs/render-architecture.md
-    /// §2.2).
     X11,
 }
 
 impl Backend {
-    /// Pick a backend from the environment: Wayland when `$WAYLAND_DISPLAY`
-    /// is set (the compositor is the native session), else X11 when
-    /// `$DISPLAY` is set. Defaults to Wayland when neither is set so the
-    /// error surfaced is the (more common) wayland connect failure.
     #[must_use]
     pub fn from_env() -> Self {
         if std::env::var_os("WAYLAND_DISPLAY").is_some() {
@@ -147,48 +53,21 @@ impl Backend {
     }
 }
 
-/// The presentation layer: owns whichever backend was selected. All variants
-/// drive the same [`crate::Renderer`] contract (SPEC V1: state owned here,
-/// nothing global).
-// One long-lived instance per process; the variant size skew is irrelevant.
 #[allow(clippy::large_enum_variant)]
 pub enum Platform {
-    /// Wayland layer-shell backend.
     Wayland(WaylandPlatform),
-    /// X11 root-window / desktop backend.
     X11(X11Platform),
 }
 
 impl Platform {
-    /// Connect using the backend implied by the environment
-    /// ([`Backend::from_env`]). On X11 this uses the desktop (behind-windows)
-    /// wallpaper mode; use [`Platform::connect_x11`] to force a mode.
     pub fn connect(make_renderer: RendererFactory) -> Result<Self, PlatformError> {
         Self::connect_backend(Backend::from_env(), make_renderer)
     }
 
-    /// Connect using an explicit backend with default [`PresentOptions`]
-    /// (namespace `linux-wallpaperengine`, all outputs). On X11 this uses the
-    /// desktop wallpaper mode ([`X11Mode::Desktop`]).
-    ///
-    /// Forcing a backend matters when both `$WAYLAND_DISPLAY` and `$DISPLAY`
-    /// are set (an Xwayland session under a wayland compositor): the CLI's
-    /// `--window`/desktop selection and the X11 live test both need to
-    /// bypass the env heuristic.
     pub fn connect_backend(backend: Backend, make_renderer: RendererFactory) -> Result<Self, PlatformError> {
         Self::connect_with(backend, PresentOptions::default(), make_renderer)
     }
 
-    /// Connect using an explicit backend and explicit [`PresentOptions`].
-    ///
-    /// This is the drop-in entry point the compat CLI uses: it carries the
-    /// `--screen-root` selection (so only the requested monitors get a
-    /// wallpaper surface) and the layer-shell namespace the daemon watchdog
-    /// greps for. The X11 backend ignores those fields today (its per-CRTC
-    /// desktop windows are already scoped to real monitors and have no
-    /// layer-shell namespace), and it likewise ignores the `fullscreen_pause*`
-    /// fields — foreign-toplevel tracking is a wayland protocol, so an X11
-    /// session never pauses; see [`PresentOptions`].
     pub fn connect_with(
         backend: Backend,
         options: PresentOptions,
@@ -203,14 +82,10 @@ impl Platform {
         }
     }
 
-    /// Connect the X11 backend with an explicit window mode
-    /// (desktop-background vs a normal `--window`,
-    /// docs/render-architecture.md §2.2).
     pub fn connect_x11(mode: X11Mode, make_renderer: RendererFactory) -> Result<Self, PlatformError> {
         Ok(Self::X11(X11Platform::connect(mode, make_renderer)?))
     }
 
-    /// Number of outputs/monitors that currently have a surface.
     #[must_use]
     pub fn output_count(&self) -> usize {
         match self {
@@ -219,8 +94,6 @@ impl Platform {
         }
     }
 
-    /// Outputs that actually got a GPU surface — see
-    /// [`WaylandPlatform::surface_count`].
     #[must_use]
     pub fn surface_count(&self) -> usize {
         match self {
@@ -229,8 +102,6 @@ impl Platform {
         }
     }
 
-    /// Render-command sender for live `bg`/`preload` swaps. `Some` on Wayland;
-    /// `None` on X11 (not wired there yet — X11 relaunches per switch).
     #[must_use]
     pub fn command_sender(&self) -> Option<crate::renderer::CommandSender> {
         match self {
@@ -239,9 +110,6 @@ impl Platform {
         }
     }
 
-    /// Move each output's launch-time build off the render thread (P1.6).
-    /// Wayland only — X11 has no off-thread build/install path and keeps the
-    /// synchronous factory.
     pub fn set_initial_build(&mut self, f: crate::renderer::InitialBuildFn) {
         match self {
             Self::Wayland(p) => p.set_initial_build(f),
@@ -249,10 +117,6 @@ impl Platform {
         }
     }
 
-    /// Drive the backend's render loop until `duration` elapses (`None` = run
-    /// forever). Wayland blocks in the compositor event loop between frame
-    /// callbacks; X11 runs the vsync-paced present loop
-    /// (docs/render-architecture.md §2.2–§2.3).
     pub fn run(&mut self, duration: Option<Duration>) -> Result<(), PlatformError> {
         match self {
             Self::Wayland(p) => p.run(duration),

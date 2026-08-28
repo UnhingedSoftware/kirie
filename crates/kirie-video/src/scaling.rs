@@ -1,48 +1,13 @@
-//! Output scaling UV math — fill / fit / stretch / default.
-//!
-//! Port of the C++ `WallpaperState` UV computation
-//! (docs/render-architecture.md §4; WallpaperState.cpp:20-131). kirie-render
-//! is still a placeholder crate, so the math lives here for now and should
-//! move to (or be re-exported from) kirie-render once the scene renderer
-//! exists — noted for the integration step.
-//!
-//! Semantics per docs/render-architecture.md §4:
-//! * **stretch** — full 0..1 range (distorts);
-//! * **fill** — scale by `max(vw/pw, vh/ph)`, crop the overflowing axis;
-//! * **fit** — same with `min(...)`; UVs go *outside* [0, 1] and the
-//!   sampler/shader decides what shows there (this crate letterboxes with
-//!   black in the fragment shader);
-//! * **default** — crop U or V only when viewport/projection orientations
-//!   disagree.
-//!
-//! The reference computes intermediate sizes as C++ `int` (truncating
-//! float→int conversions, WallpaperState.cpp:37,53,86-88,107-109); this
-//! port reproduces those truncations for pixel-exact parity.
-//!
-//! Orientation note: the C++ default (`vflip == false`) V range is `1..0`
-//! because its wallpapers sample a GL FBO whose row 0 is the bottom
-//! (docs/render-architecture.md §4 resetUVs). This renderer samples a CPU
-//! upload whose row 0 is the *top*, so it uses the `vflip == true` branch
-//! (`0..1`) — same picture on screen, no double flip.
-
-/// Output scaling mode (docs/render-architecture.md §4 scaling enum and
-/// CLI strings: `default`, `fit`, `fill`, `stretch`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScalingMode {
-    /// `DefaultUVs`: crop only on orientation mismatch.
     #[default]
     Default,
-    /// `ZoomFillUVs`: cover the viewport, crop overflow.
     Fill,
-    /// `ZoomFitUVs`: contain in the viewport, letterbox.
     Fit,
-    /// `StretchUVs`: full range, distorts.
     Stretch,
 }
 
 impl ScalingMode {
-    /// Parse the CLI string form (docs/render-architecture.md §4:
-    /// `"default"`, `"fit"`, `"fill"`, `"stretch"`).
     #[must_use]
     pub fn from_cli(s: &str) -> Option<Self> {
         match s {
@@ -55,22 +20,15 @@ impl ScalingMode {
     }
 }
 
-/// Texture-space sampling rectangle. Values may lie outside `[0, 1]` in
-/// `Fit` mode (docs/render-architecture.md §4).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UvRect {
-    /// U at the left edge of the viewport.
     pub ustart: f32,
-    /// U at the right edge of the viewport.
     pub uend: f32,
-    /// V at the top edge of the viewport.
     pub vstart: f32,
-    /// V at the bottom edge of the viewport.
     pub vend: f32,
 }
 
 impl UvRect {
-    /// Full texture, no crop (resetUVs, vflip branch — see module docs).
     #[must_use]
     pub const fn full() -> Self {
         Self {
@@ -82,9 +40,6 @@ impl UvRect {
     }
 }
 
-/// Crop U for a projection scaled to `proj_w × proj_h`
-/// (WallpaperState.cpp:34-47 `updateUs`, including the `int newWidth`
-/// truncation).
 fn update_us(viewport_w: f32, viewport_h: f32, proj_w: i32, proj_h: i32, uv: &mut UvRect) {
     if proj_h == 0 {
         return;
@@ -99,8 +54,6 @@ fn update_us(viewport_w: f32, viewport_h: f32, proj_w: i32, proj_h: i32, uv: &mu
     uv.uend = (new_center + viewport_center) / new_width as f32;
 }
 
-/// Crop V (WallpaperState.cpp:50-67 `updateVs`, vflip branch — module
-/// docs explain why).
 fn update_vs(viewport_w: f32, viewport_h: f32, proj_w: i32, proj_h: i32, uv: &mut UvRect) {
     if proj_w == 0 {
         return;
@@ -115,12 +68,6 @@ fn update_vs(viewport_w: f32, viewport_h: f32, proj_w: i32, proj_h: i32, uv: &mu
     uv.vend = (new_center + viewport_center) / new_height as f32;
 }
 
-/// Compute the UV crop for one video frame in one viewport
-/// (docs/render-architecture.md §4; WallpaperState.cpp:70-131).
-///
-/// `video_w`/`video_h` play the role of the projection size: the video
-/// texture is kept at its native size and all scaling happens here, in
-/// composition (docs/subsystems-misc.md §2.2).
 #[must_use]
 pub fn compute_uvs(
     mode: ScalingMode,
@@ -146,8 +93,6 @@ pub fn compute_uvs(
             } else {
                 m1.min(m2)
             };
-            // `projectionWidth *= m` on C++ ints truncates
-            // (WallpaperState.cpp:86-88,107-109).
             let scaled_w = (pw as f32 * m) as i32;
             let scaled_h = (ph as f32 * m) as i32;
             if scaled_w != viewport_w as i32 {
@@ -158,7 +103,6 @@ pub fn compute_uvs(
         }
         ScalingMode::Default => {
             let (vw_i, vh_i) = (viewport_w as i32, viewport_h as i32);
-            // Orientation-mismatch crops (WallpaperState.cpp:115-131).
             if (vh_i > vw_i && pw >= ph) || (vw_i > vh_i && ph > pw) {
                 update_us(vw, vh, pw, ph, &mut uv);
             }
@@ -207,9 +151,6 @@ mod tests {
 
     #[test]
     fn fill_crops_the_wide_axis() {
-        // Square viewport, 2:1 video: fill scales by max(0.5, 1.0) = 1.0,
-        // width overflows -> centered U crop of the middle half
-        // (WallpaperState.cpp:74-93 via docs/render-architecture.md §4).
         assert_uv(
             compute_uvs(ScalingMode::Fill, 1000, 1000, 2000, 1000),
             (0.25, 0.75, 0.0, 1.0),
@@ -226,10 +167,6 @@ mod tests {
 
     #[test]
     fn fit_letterboxes_with_out_of_range_uvs() {
-        // Square viewport, 2:1 video: fit scales by min(0.5, 1.0) = 0.5,
-        // height underflows -> V range extends outside [0,1]
-        // (docs/render-architecture.md §4: fit relies on what is sampled
-        // outside the texture).
         assert_uv(
             compute_uvs(ScalingMode::Fit, 1000, 1000, 2000, 1000),
             (0.0, 1.0, -0.5, 1.5),
@@ -238,9 +175,6 @@ mod tests {
 
     #[test]
     fn default_landscape_viewport_landscape_video_crops_v() {
-        // 16:9 viewport, 4:3 video, orientations agree (landscape) ->
-        // updateVs path (WallpaperState.cpp:123-127): newHeight =
-        // 1920/1440*1080 = 1440 -> V in [0.125, 0.875].
         assert_uv(
             compute_uvs(ScalingMode::Default, 1920, 1080, 1440, 1080),
             (0.0, 1.0, 0.125, 0.875),
@@ -249,9 +183,6 @@ mod tests {
 
     #[test]
     fn default_portrait_viewport_landscape_video_crops_u() {
-        // Portrait viewport + landscape video -> updateUs
-        // (WallpaperState.cpp:119-121): newWidth = 1920/1080*1920 = 3413,
-        // U = center ± 540 over 3413.
         let uv = compute_uvs(ScalingMode::Default, 1080, 1920, 1920, 1080);
         let new_width = 3413.0f32;
         let expected_us = (new_width / 2.0 - 540.0) / new_width;

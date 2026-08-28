@@ -1,11 +1,3 @@
-//! The still-image / animated-gif wallpaper renderer
-//! ([`kirie_platform::Renderer`] implementation).
-//!
-//! Upload model (SPEC §V5): every content page is uploaded to its own GPU
-//! texture once at construction; per frame only a 32-byte uniform write
-//! happens, and only when the displayed frame actually changes. Static
-//! content re-encodes the same cached draw with zero uploads.
-
 use std::time::Duration;
 
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
@@ -15,18 +7,12 @@ use crate::error::RenderError;
 use crate::scaling::{ClampMode, ScalingMode, UvWindow};
 use crate::schedule::FrameSchedule;
 
-/// Presentation options for one output, from the CLI compat surface
-/// (docs/compat-cli.md §2: `--scaling` default `default`, `--clamp` default
-/// `clamp`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct ImageOptions {
-    /// Output scaling mode (docs/render-architecture.md §4).
     pub scaling: ScalingMode,
-    /// Out-of-window UV behavior (docs/render-architecture.md §4).
     pub clamp: ClampMode,
 }
 
-/// std140-compatible window uniform: scaling UV window + clamp mode.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct WindowUniform {
@@ -35,7 +21,6 @@ struct WindowUniform {
     _pad: [u32; 3],
 }
 
-/// std140-compatible frame uniform: the §8.1 atlas placement.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FrameUniform {
@@ -43,34 +28,24 @@ struct FrameUniform {
     axes: [f32; 4],
 }
 
-/// Renders decoded [`ImageContent`] to one output surface.
 pub struct ImageRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     window_buffer: wgpu::Buffer,
     frame_buffer: wgpu::Buffer,
-    /// One bind group per content page; switching frames switches bind
-    /// groups (prebuilt — no steady-state allocation, SPEC §V5).
     bind_groups: Vec<wgpu::BindGroup>,
-    /// Page index per frame, parallel to `schedule`.
     frame_pages: Vec<usize>,
-    /// Atlas placement uniform per frame, parallel to `schedule`.
     frame_uniforms: Vec<FrameUniform>,
     schedule: FrameSchedule,
     options: ImageOptions,
     content_size: (u32, u32),
-    /// Wall-clock seconds accumulated from per-frame `dt` — the unscaled
-    /// render-time counter the reference feeds to `fmod`
-    /// (docs/format-tex.md §8.1 step 2).
     elapsed: f64,
     current_frame: usize,
-    /// Surface size the current window uniform was computed for.
     window_for: Option<SurfaceSize>,
 }
 
 impl ImageRenderer {
-    /// Upload `content` and build the present pipeline for one output.
     pub fn new(
         target: &RenderTarget<'_>,
         content: &ImageContent,
@@ -79,10 +54,6 @@ impl ImageRenderer {
         let device = target.device;
         let max_dim = device.limits().max_texture_dimension_2d;
 
-        // Match the surface's sRGB-ness so stored bytes survive the
-        // sample→write round trip unchanged, like the reference's
-        // gamma-naive GL_RGBA8 → default-framebuffer path
-        // (docs/render-architecture.md §10).
         let texture_format = if target.format.is_srgb() {
             wgpu::TextureFormat::Rgba8UnormSrgb
         } else {
@@ -107,10 +78,6 @@ impl ImageRenderer {
             mapped_at_creation: false,
         });
 
-        // docs/format-tex.md §6.1: NoInterpolation → nearest else linear;
-        // ClampUVs → clamp-to-edge else repeat. The scaling window's own
-        // wrap (--clamp) is resolved in content space by the shader, so
-        // this sampler only governs filtering at page edges.
         let filter = if content.sampler.nearest {
             wgpu::FilterMode::Nearest
         } else {
@@ -172,9 +139,6 @@ impl ImageRenderer {
             ],
         });
 
-        // Upload every page once; animation only ever rebinds
-        // (docs/format-tex.md §9: the reference likewise keeps one GL
-        // texture per image and binds textureID[frameNumber]).
         let mut bind_groups = Vec::with_capacity(content.pages.len());
         for page in &content.pages {
             if page.width > max_dim || page.height > max_dim {
@@ -278,8 +242,6 @@ impl ImageRenderer {
                 compilation_options: wgpu::PipelineCompilationOptions::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target.format,
-                    // The reference's final blit runs with blending
-                    // disabled (docs/render-architecture.md §2.5).
                     blend: None,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -298,9 +260,6 @@ impl ImageRenderer {
             })
             .collect();
 
-        // Seed the frame uniform with frame 0; the window uniform is
-        // written on the first `render` when the real surface size is
-        // known.
         target
             .queue
             .write_buffer(&frame_buffer, 0, bytemuck::bytes_of(&frame_uniforms[0]));
@@ -323,18 +282,11 @@ impl ImageRenderer {
         })
     }
 
-    /// Whether the content ever changes frames. Static content needs no
-    /// further redraws after the first presented frame (SPEC §V6) — the
-    /// presentation layer can stop scheduling frame callbacks based on
-    /// this + [`ImageRenderer::time_until_frame_change`].
     #[must_use]
     pub fn is_animated(&self) -> bool {
         self.schedule.is_animated()
     }
 
-    /// Time until the displayed frame next changes, or `None` for static
-    /// content (redraw-scheduling hint, SPEC §V6; the wall-clock walk of
-    /// docs/format-tex.md §8.1).
     #[must_use]
     pub fn time_until_frame_change(&self) -> Option<Duration> {
         self.schedule
@@ -342,8 +294,6 @@ impl ImageRenderer {
             .map(Duration::from_secs_f64)
     }
 
-    /// The UV window currently in effect for `size`
-    /// (docs/render-architecture.md §4).
     #[must_use]
     pub fn uv_window_for(&self, size: SurfaceSize) -> UvWindow {
         self.options
@@ -364,14 +314,8 @@ impl Renderer for ImageRenderer {
     }
 
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32) {
-        // Unscaled wall-clock accumulation (docs/format-tex.md §8.1 step 2:
-        // frame selection uses render time, not the playback-speed-scaled
-        // g_Time).
         self.elapsed += f64::from(dt);
 
-        // Recompute the scaling window only when the surface size changes
-        // (the reference caches UVs the same way,
-        // docs/render-architecture.md §4, WallpaperState.cpp:11-17).
         if self.window_for != Some(size) {
             let window = self.uv_window_for(size);
             let clamp_mode = match self.options.clamp {
@@ -391,9 +335,6 @@ impl Renderer for ImageRenderer {
             self.window_for = Some(size);
         }
 
-        // Animated content: pick the frame by the §8.1 walk and upload the
-        // 32-byte placement only when it changes (SPEC §V5 — the atlas
-        // pages themselves were uploaded once at construction).
         if self.schedule.is_animated() {
             let frame = self.schedule.frame_at(self.elapsed);
             if frame != self.current_frame {
@@ -414,10 +355,6 @@ impl Renderer for ImageRenderer {
                 label: Some("kirie-image-encoder"),
             });
         {
-            // The quad covers the whole surface; the clear only shows
-            // through border-mode transparency. Opaque black matches the
-            // GL default border color composited onto an opaque surface
-            // (docs/render-architecture.md §4, §5.2).
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kirie-image-pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

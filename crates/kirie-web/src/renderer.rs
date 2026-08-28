@@ -1,22 +1,8 @@
-//! [`WebRenderer`] — uploads a [`WebBackend`]'s latest frame to a wgpu
-//! texture and blits it fullscreen.
-//!
-//! Mirrors the C++ `CWeb::renderFrame` path (docs/subsystems-misc.md §3.5):
-//! per frame, resize the texture if the browser's paint size changed, upload
-//! the newest BGRA buffer, then draw. The heavy lifting (the actual browser
-//! paint) happens on the backend's own thread; this renderer only ever reads
-//! the last published frame, so it satisfies the frame-callback-driven,
-//! non-blocking [`kirie_platform::Renderer`] contract (SPEC §V4/§V6).
-
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 
 use crate::backend::{PixelFormat, WebBackend, WebFrameRef};
 use crate::feed::{FeedPump, WebFeed};
 
-/// A [`kirie_platform::Renderer`] that presents a web wallpaper.
-///
-/// Owns the browser [`WebBackend`] and the GPU resources needed to sample its
-/// off-screen frames onto the output surface.
 pub struct WebRenderer {
     backend: Box<dyn WebBackend>,
     device: wgpu::Device,
@@ -24,24 +10,12 @@ pub struct WebRenderer {
     pipeline: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     bind_layout: wgpu::BindGroupLayout,
-    /// Lazily (re)built when the browser paint size or format changes.
     uploaded: Option<Uploaded>,
     surface_size: SurfaceSize,
-    /// Engine-supplied source of live audio + now-playing data
-    /// ([`Self::set_feed`]); `None` leaves the page unfed, which is what a
-    /// build with neither audio capture nor MPRIS wants.
     feed: Option<Box<dyn WebFeed>>,
-    /// Rate limiting + change detection for that feed. Held here (not in the
-    /// backend) so both drive paths — `render` for a composited backend,
-    /// `poll` for a passive one — share one cadence and one diff.
     pump: FeedPump,
-    /// Last platform pointer, surface-normalized, with the held button state —
-    /// buttons arrive on a separate trait call, so both halves are retained
-    /// and every forward carries the full state.
     pointer: (f32, f32),
     pointer_left: bool,
-    /// Engine power-save flag + the last value forwarded to the backend, so
-    /// the backend hears only transitions.
     power_flag: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     power_on: bool,
 }
@@ -55,7 +29,6 @@ struct Uploaded {
 }
 
 impl WebRenderer {
-    /// Push the retained pointer + button state to the page in browser pixels.
     fn forward_pointer(&mut self) {
         let px = (self.pointer.0 * self.surface_size.width as f32) as i32;
         let py = (self.pointer.1 * self.surface_size.height as f32) as i32;
@@ -67,11 +40,6 @@ impl WebRenderer {
         });
     }
 
-    /// Build the fullscreen-blit pipeline for `target`, presenting `backend`.
-    ///
-    /// The pipeline targets the swapchain `format`; the browser texture is
-    /// sampled through an sRGB view so web content (sRGB bytes) is linearised
-    /// on read and re-encoded on write.
     #[must_use]
     pub fn new(target: &RenderTarget<'_>, backend: Box<dyn WebBackend>) -> Self {
         let device = target.device.clone();
@@ -161,37 +129,19 @@ impl WebRenderer {
         }
     }
 
-    /// Access the underlying backend (e.g. to forward pointer input).
     pub fn backend_mut(&mut self) -> &mut dyn WebBackend {
         self.backend.as_mut()
     }
 
-    /// Attach the engine's live audio + now-playing source.
-    ///
-    /// Without this a web wallpaper renders, takes pointer input and receives
-    /// its user properties, but its `wallpaperRegisterAudioListener` /
-    /// `wallpaperRegisterMedia*Listener` callbacks never fire — an
-    /// audio-reactive page stays still and a media page never leaves its
-    /// loading state. The engine owns the sources (system-audio capture, the
-    /// MPRIS D-Bus client), so it supplies them here rather than this crate
-    /// growing a dependency on either.
-    ///
-    /// Delivery starts on the next [`Renderer::render`] / [`Renderer::poll`],
-    /// with the first tick sending every media channel so the page is brought
-    /// up to date even when nothing is playing.
     pub fn set_feed(&mut self, feed: Box<dyn WebFeed>) {
         self.feed = Some(feed);
     }
 
-    /// Wire the engine's on-battery flag into the feed pump (halves the
-    /// audio/media push cadence while set).
     pub fn set_power_save(&mut self, flag: std::sync::Arc<std::sync::atomic::AtomicBool>) {
         self.pump.set_power_save(flag.clone());
         self.power_flag = Some(flag);
     }
 
-    /// Forward a power-save transition to the backend (CEF drops its paint
-    /// rate; native-surface backends ignore it).
     fn sync_power_save(&mut self) {
         let Some(flag) = &self.power_flag else { return };
         let on = flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -201,10 +151,6 @@ impl WebRenderer {
         }
     }
 
-    /// Deliver whatever the feed has that the page has not been told yet.
-    ///
-    /// Called from both drive paths; the pump itself decides what is due, so
-    /// calling it more often than necessary costs two `Instant` comparisons.
     fn pump_feed(&mut self) {
         self.sync_power_save();
         if let Some(feed) = &self.feed {
@@ -262,8 +208,6 @@ impl WebRenderer {
         let Some(uploaded) = &self.uploaded else {
             return;
         };
-        // Guard against a torn frame whose byte count disagrees with its
-        // reported dims (SPEC §V9: never trust the buffer size).
         let expected = (frame.width as usize) * (frame.height as usize) * 4;
         if frame.data.len() < expected {
             return;
@@ -305,14 +249,8 @@ impl Renderer for WebRenderer {
         }
 
         self.backend.tick(dt);
-        // Composited backends (CEF) keep getting frames, so this is their feed
-        // path; the pump's own intervals keep a 144 Hz output from pushing 144
-        // audio frames a second. A passive backend never reaches here at all
-        // and is fed from `poll` instead.
         self.pump_feed();
 
-        // Copy the frame's bytes out from behind the backend's borrow before
-        // touching `self` mutably (upload needs `&mut self`).
         if let Some(frame) = self.backend.latest_frame() {
             let owned = (frame.data.to_vec(), frame.width, frame.height, frame.format);
             self.upload(WebFrameRef {
@@ -354,26 +292,15 @@ impl Renderer for WebRenderer {
         self.queue.submit([encoder.finish()]);
     }
 
-    /// Platform-driven low-rate tick for the passive (webview) backend, whose
-    /// [`Self::render`] is never called again after the first frame.
-    ///
-    /// Same work as the `render` path does inline: hand the page whatever the
-    /// feed has that it has not been told yet. The platform only calls this for
-    /// visible outputs, so a paused or released wallpaper is never fed — the
-    /// host process it would push into is, in the released case, already gone.
     fn poll(&mut self) {
         self.pump_feed();
     }
 
-    /// Platform-fed pointer (T26): forward to the page in browser pixels (the
-    /// reference drives CEF mouse events the same way).
     fn set_pointer(&mut self, x: f32, y: f32) {
         self.pointer = (x, y);
         self.forward_pointer();
     }
 
-    /// Platform-fed button state: pages receive real mousedown/up (the
-    /// backend edge-detects, so unchanged state costs one no-op line).
     fn set_pointer_buttons(&mut self, left_down: bool) {
         if self.pointer_left != left_down {
             self.pointer_left = left_down;
@@ -381,15 +308,6 @@ impl Renderer for WebRenderer {
         }
     }
 
-    /// Hand the platform a still of the live page so it can leave it on the
-    /// output when this wallpaper is released (`--release-hidden-after`).
-    ///
-    /// Delegated straight to the backend, because only it knows whether a still
-    /// is obtainable *and* needed. A composited backend (CEF) answers `None`:
-    /// the engine's surface already holds its pixels and keeps showing them
-    /// after we stop drawing. The native-surface webview backend answers with a
-    /// host-drawn frame, because its window disappears with the host and the
-    /// engine's own surface underneath is black.
     fn snapshot(&mut self) -> Option<kirie_platform::RendererSnapshot> {
         let frame = self.backend.snapshot()?;
         Some(kirie_platform::RendererSnapshot {
@@ -403,10 +321,6 @@ impl Renderer for WebRenderer {
         })
     }
 
-    /// Live `setProperty` (doc §4.9): forward to the page as a one-entry
-    /// `applyUserProperties` batch. Values are typed like the reference's
-    /// encoder (`CWeb.cpp`): bools bare, numbers bare, everything else (colors
-    /// are "r g b" strings there too) as a JSON string.
     fn set_property(&mut self, key: &str, value: &str) -> kirie_platform::PropertyImpact {
         let typed = match value.trim() {
             "true" => "true".to_owned(),
@@ -427,9 +341,6 @@ impl Drop for WebRenderer {
     }
 }
 
-/// Fullscreen-triangle blit. The oversized triangle covers the viewport; UVs
-/// are derived from clip position with a top-left origin to match the
-/// browser's top-left-origin paint buffer.
 const BLIT_WGSL: &str = r#"
 struct VsOut {
     @builtin(position) pos: vec4<f32>,

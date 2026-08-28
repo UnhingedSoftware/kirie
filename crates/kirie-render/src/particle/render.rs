@@ -1,43 +1,18 @@
-//! [`ParticleRenderer`] — a standalone instanced-quad sprite renderer for a
-//! [`ParticleSim`]'s output (docs/render-architecture.md §7.3 sprite path).
-//!
-//! The scene renderer (`crate::scene`) currently skips particle objects
-//! (`scene/renderer.rs`: "non-image object skipped"); it exposes no particle
-//! hook. So this is a standalone renderer the scene integrator wires in later:
-//! give it the particle material's texture + blend mode, upload the sim's
-//! [`SpriteInstance`]s each frame, and draw into the scene FBO with the scene's
-//! view-projection and the object's model matrix folded into one matrix.
-//!
-//! Each particle is one instance; the vertex shader expands the centered quad
-//! (rotation about Z, `size` as the full edge length), samples the (optional)
-//! spritesheet frame, and multiplies by the per-particle color/alpha. Blend
-//! mode reuses the scene's [`blend_state`](crate::scene::blend::blend_state)
-//! mapping (additive / translucent), so particles composite exactly like the
-//! reference passes (SPEC §V10, no duplicated blend table).
-
 use kirie_scene::material::Blending;
 use wgpu::util::DeviceExt;
 
 use super::state::SpriteInstance;
 
-/// A GPU renderer for particle sprites. Owns its instance buffer (sized to the
-/// sim pool once — SPEC §V5), a view-projection UBO, and a bind group holding
-/// the particle texture + sampler.
 pub struct ParticleRenderer {
     pipeline: wgpu::RenderPipeline,
     vp_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
     capacity: u32,
-    /// Kept alive so the fallback white texture view in the bind group stays
-    /// valid when the caller supplies no texture.
     _fallback: Option<wgpu::Texture>,
 }
 
 impl ParticleRenderer {
-    /// Build a renderer targeting `format`, blending with `blending`, sampling
-    /// `texture` (or an internal white 1×1 when `None`), with room for
-    /// `capacity` instances.
     #[must_use]
     pub fn new(
         device: &wgpu::Device,
@@ -59,14 +34,11 @@ impl ParticleRenderer {
             mapped_at_creation: false,
         });
 
-        // Fallback white texture + sampler when the caller has none.
         let mut fallback = None;
         let (view, sampler_owned);
         let (tex_view, tex_sampler): (&wgpu::TextureView, &wgpu::Sampler) = match texture {
             Some((v, s)) => (v, s),
             None => {
-                // A 1×1 white texture so particles show their own color when the
-                // caller supplies no atlas (docs §7.3: color modulates texture).
                 let tex = device.create_texture_with_data(
                     queue,
                     &wgpu::TextureDescriptor {
@@ -152,7 +124,6 @@ impl ParticleRenderer {
             immediate_size: 0,
         });
 
-        // One vertex buffer, stepped per instance: four vec4 attributes.
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<SpriteInstance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
@@ -205,9 +176,6 @@ impl ParticleRenderer {
         }
     }
 
-    /// Upload the combined view-projection × model matrix (column-major, 16
-    /// floats) and the current instances. Instances beyond the pool capacity
-    /// are dropped defensively (SPEC §V9). Returns the number uploaded.
     pub fn upload(
         &self,
         queue: &wgpu::Queue,
@@ -222,9 +190,6 @@ impl ParticleRenderer {
         n as u32
     }
 
-    /// Draw `count` uploaded instances into `target` (loading existing contents,
-    /// so this composites over a scene FBO). No-op when `count == 0` (SPEC §V6:
-    /// zero work when there is nothing to draw).
     pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, count: u32) {
         if count == 0 {
             return;
@@ -252,9 +217,6 @@ impl ParticleRenderer {
     }
 }
 
-/// The instanced sprite shader: expand a centered quad per instance (rotation
-/// about Z, `size` as the full edge length), sample the optional spritesheet
-/// frame column, and modulate by per-particle color/alpha.
 const SPRITE_WGSL: &str = r#"
 struct VP { m: mat4x4<f32> }
 @group(0) @binding(0) var<uniform> vp: VP;

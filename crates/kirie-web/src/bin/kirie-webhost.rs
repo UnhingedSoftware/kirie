@@ -1,13 +1,3 @@
-//! `kirie-webhost` — the out-of-process web wallpaper host.
-//!
-//! Owns the CEF context and one windowless browser, publishes frames into a
-//! `memfd` seqlock buffer the engine maps read-only (announced as
-//! `shm /proc/<pid>/fd/<fd> <bytes>` on stdout), and takes line commands on
-//! stdin (`resize`/`pointer`/`mute`/`props`/`audio`/`media`/`quit`). The engine kills this
-//! process to tear the browser down — the kernel then reclaims every thread,
-//! zygote and heap deterministically, which in-process `cef_shutdown` never
-//! guaranteed. See `kirie_web::hosted` for the protocol/layout.
-
 use std::io::BufRead;
 use std::os::fd::FromRawFd;
 use std::sync::mpsc::{TryRecvError, channel};
@@ -28,7 +18,6 @@ fn arg(name: &str) -> Option<String> {
 }
 
 fn main() {
-    // Child logs to stderr, which the engine inherits into its own log.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -44,9 +33,6 @@ fn main() {
     let width: u32 = arg("--width").and_then(|v| v.parse().ok()).unwrap_or(1920);
     let height: u32 = arg("--height").and_then(|v| v.parse().ok()).unwrap_or(1080);
 
-    // Frame buffer: an anonymous memfd, republished to the parent via procfs
-    // (same-uid open of /proc/<pid>/fd/<fd>). Sparse — pages materialize only
-    // for the frames actually written.
     let shm_len = SHM_HEADER + SHM_PIXELS;
     // SAFETY: plain syscalls creating and sizing an anonymous fd we own.
     let (shm_file, shm_fd) = unsafe {
@@ -62,7 +48,6 @@ fn main() {
         (std::fs::File::from_raw_fd(fd), fd)
     };
     // SAFETY: writable shared mapping of our own memfd; only this process maps
-    // it writable (the engine maps the fd read-only).
     let mut shm = match unsafe { memmap2::MmapMut::map_mut(&shm_file) } {
         Ok(m) => m,
         Err(e) => {
@@ -72,7 +57,6 @@ fn main() {
     };
     println!("shm /proc/{}/fd/{} {}", std::process::id(), shm_fd, shm_len);
 
-    // stdin command reader → channel (the pump loop must never block on IO).
     let (tx, rx) = channel::<String>();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
@@ -82,7 +66,6 @@ fn main() {
                 break;
             }
         }
-        // Engine hung up (crash?) — no reason to outlive it.
         let _ = tx;
     });
 
@@ -97,8 +80,6 @@ fn main() {
 
     let mut seq: u64 = 0;
     let mut last_pub: (*const u8, u32, u32) = (std::ptr::null(), 0, 0);
-    // 16 ms matches the browser's 60 fps windowless paint rate exactly —
-    // the old 8 ms tick woke twice per possible frame.
     let frame_dt = Duration::from_millis(16);
     let mut last = Instant::now();
     'run: loop {
@@ -136,10 +117,6 @@ fn main() {
                             }
                         }
                         Some("media") => {
-                            // `strip_prefix` + one split, never
-                            // `split_whitespace`: the JSON payload contains
-                            // spaces and, for a cover, a few hundred KB of
-                            // base64 that must survive whole.
                             if let Some(rest) = line.strip_prefix("media ")
                                 && let Some((channel, json)) = kirie_web::feed::parse_media_payload(rest)
                             {
@@ -151,7 +128,6 @@ fn main() {
                     }
                 }
                 Err(TryRecvError::Empty) => break,
-                // Engine gone: exit rather than render to nowhere.
                 Err(TryRecvError::Disconnected) => break 'run,
             }
         }
@@ -166,7 +142,6 @@ fn main() {
             let len = frame.data.len();
             if key != last_pub && SHM_HEADER + len <= shm.len() {
                 last_pub = key;
-                // Seqlock publish: odd while writing, even when stable.
                 seq += 1;
                 shm[0..8].copy_from_slice(&seq.to_le_bytes());
                 shm[8..12].copy_from_slice(&frame.width.to_le_bytes());
@@ -183,11 +158,6 @@ fn main() {
         }
     }
 
-    // Exit WITHOUT running CEF teardown: process isolation is the whole
-    // point — the kernel reclaims every page/thread, the zygotes exit on
-    // their broken IPC pipes, and CEF 149's in-process teardown reliably
-    // SIGSEGVs anyway (it left a coredump on every clean quit). `exit`
-    // skips the backend's Drop chain deliberately.
     std::mem::forget(backend);
     std::process::exit(0);
 }

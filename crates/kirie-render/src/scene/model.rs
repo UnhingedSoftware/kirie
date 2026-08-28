@@ -1,36 +1,3 @@
-//! 3D MODEL object rendering — the `.mdl` mesh path (docs/render-architecture.md
-//! §7.2; the reference `Render/Objects/CModel.cpp`).
-//!
-//! A model object names a binary `.mdl` (parsed by [`kirie_formats::model`]).
-//! Each sub-mesh carries a material path whose first pass is a `generic3`
-//! program; this module builds one wgpu pipeline per mesh (via
-//! [`super::pipeline::build_model_pass`], which accepts the full 48-byte vertex
-//! layout the 2D path rejects), uploads the mesh's vertex/index buffers, and
-//! draws every mesh in `.mdl` declaration order into the scene FBO under a
-//! **perspective** camera with a private depth buffer — exactly the reference's
-//! `CModel::render`.
-//!
-//! # The two hard-won gotchas (user notes; `CModel.cpp` comments)
-//!
-//! 1. **Winding / cull.** The `.mdl` triangles are authored for the reference,
-//!    which flips clip-space Y for its Y-down scene FBO (`projection[1][1] *=
-//!    -1`) and therefore declares CW front-facing so back-face culling keeps the
-//!    real front faces. kirie's scene FBO is Y-up (the 2D layers build Y-up quads
-//!    through [`super::matrix::ortho`] with no flip), so [`super::matrix::perspective`]
-//!    applies **no** Y flip and the natural winding is CCW-front — matching
-//!    kirie's default [`wgpu::FrontFace::Ccw`]. Cull mode comes from the material
-//!    (`normal` ⇒ cull back). Get the flip and the winding out of sync and the
-//!    figure is culled to invisibility.
-//! 2. **Depth-clip half-coloring.** With no depth buffer the sub-meshes composite
-//!    in draw order and the translucent shell whitens the opaque body; with the
-//!    wrong depth range half the mesh is near/far-clipped. The perspective is
-//!    wgpu zero-to-one (`perspectiveRH_ZO`) and the model gets its own
-//!    `Depth24Plus` buffer cleared to 1.0 each frame so `LessEqual` occlusion is
-//!    correct and nothing is clipped.
-//!
-//! The Starscape figure's material renders it a near-black silhouette (its tint
-//! is black / the shell is unlit) — that dark shape is correct, not a bug.
-
 use std::collections::HashMap;
 
 use kirie_audio::AudioSpectrum;
@@ -48,14 +15,8 @@ use super::renderer::{
 use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
 
-/// The model's private depth attachment format (the reference allocates
-/// `GL_DEPTH_COMPONENT24`, `CModel::ensureDepthBuffer`). `Depth24Plus` is the
-/// portable wgpu equivalent and matches [`super::pipeline::build_model_pass`].
 pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
-/// The neutral camera clamps the reference applies before building the model
-/// projection (`CModel::render`): fov ∈ [1, 170] else 50; near > 0 else 0.1;
-/// far > near else 10000.
 fn clamp_camera(fov: f32, near: f32, far: f32) -> (f32, f32, f32) {
     let fov = if (1.0..=170.0).contains(&fov) { fov } else { 50.0 };
     let near = if near > 0.0 { near } else { 0.1 };
@@ -63,8 +24,6 @@ fn clamp_camera(fov: f32, near: f32, far: f32) -> (f32, f32, f32) {
     (fov, near, far)
 }
 
-/// One drawable sub-mesh: its pipeline, static bind groups, per-frame UBOs and
-/// geometry buffers.
 struct MeshGpu {
     pipeline: wgpu::RenderPipeline,
     g0_bind: wgpu::BindGroup,
@@ -78,16 +37,10 @@ struct MeshGpu {
     vertex_buffer: wgpu::Buffer,
     index_buffer: wgpu::Buffer,
     index_count: u32,
-    /// `g_TextureNResolution` per slot for this mesh's material.
     tex_resolution: [[f32; 4]; 8],
 }
 
 impl ModelGpu {
-    /// Live script transform writes (`thisLayer.origin` / `scale` / `angles`):
-    /// the model matrix is rebuilt from these fields every draw, so a write is
-    /// live on the next frame. Angles pass through in the same unit the layer
-    /// snapshot serves (the authored radians, format doc §7.2) — a script that
-    /// writes back what it read must round-trip exactly.
     pub(super) fn set_origin(&mut self, v: [f32; 3]) {
         self.origin = v;
     }
@@ -100,39 +53,22 @@ impl ModelGpu {
         self.angles = v;
     }
 
-    /// Whether this model animates on its own (`angles.animation` track).
     pub(super) fn has_animation(&self) -> bool {
         self.angles_animation.is_some()
     }
 }
 
-/// One renderable 3D model object: its sub-meshes plus the object transform the
-/// per-frame model matrix is built from (`CModel::computeModelMatrix`).
 pub(super) struct ModelGpu {
-    /// The owning scene-object id (script `sortLayer` targeting).
     pub(super) id: i64,
     meshes: Vec<MeshGpu>,
-    /// Object origin, world space (`origin`).
     origin: [f32; 3],
-    /// Object scale (`scale`).
     scale: [f32; 3],
-    /// Base angles in radians (`angles`); the live angles are this plus the
-    /// evaluated `angles_animation` track (models only, like C++ CModel).
     angles: [f32; 3],
-    /// `angles.animation` keyframe track — evaluated per frame in `draw_model`
-    /// to rotate/spin the model over time (`AnimationTrack::sample`).
     angles_animation: Option<AnimationTrack>,
-    /// Live visibility (`visible`; false ⇒ the whole model is skipped).
     pub(super) visible: bool,
-    /// True when a mesh's material samples `_rt_FullFrameBuffer` /
-    /// `_rt_MipMappedFrameBuffer` (generic3 REFLECTION): the scene composited so
-    /// far is snapshotted before the model draws so the read never aliases the
-    /// write (docs §6/§11 shadow-copy; `CModel::render` blits the scene FBO).
     pub(super) reads_scene: bool,
 }
 
-/// Build a 3D model object's GPU resources, or `None` when nothing is drawable
-/// (missing/invalid `.mdl`, no buildable mesh — SPEC.md §V9 skip-and-continue).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_model(
     device: &wgpu::Device,
@@ -156,10 +92,7 @@ pub(super) fn build_model(
 
     let mut reads_scene = false;
     let mut meshes = Vec::new();
-    // Draw in `.mdl` declaration order — load-bearing for depth (the opaque body
-    // must draw before the translucent shell; `CModel::setup`).
     for (mi, mesh) in model.meshes.iter().enumerate() {
-        // Load and parse the mesh's material JSON; take its first pass.
         let Some(mat_bytes) = source.load(&mesh.material_ref) else {
             tracing::debug!(material = %mesh.material_ref, "model material missing; mesh skipped");
             continue;
@@ -174,8 +107,6 @@ pub(super) fn build_model(
             continue;
         };
 
-        // Translate + build the mesh pipeline (generic3, 48-byte vertex layout,
-        // triangle list, depth, cull per material — `build_model_pass`).
         let vs_name = format!("shaders/{}.vert", raw_pass.shader);
         let fs_name = format!("shaders/{}.frag", raw_pass.shader);
         let (Some(vs_bytes), Some(fs_bytes)) = (source.load(&vs_name), source.load(&fs_name)) else {
@@ -201,8 +132,6 @@ pub(super) fn build_model(
             }
         };
 
-        // Geometry buffers: the raw interleaved vertex bytes upload verbatim
-        // (`CModel::setupMesh`), the u16 index list as-is.
         let vertex_buffer = create_buffer_init(
             device,
             "kirie-model-vb",
@@ -214,15 +143,8 @@ pub(super) fn build_model(
             create_buffer_init(device, "kirie-model-ib", index_bytes, wgpu::BufferUsages::INDEX);
         let index_count = mesh.indices.len() as u32;
 
-        // The albedo/base input (`g_Texture0`, default `util/white`); the model
-        // materials declare `textures:[null]`, so slot 0 is the neutral white the
-        // reference resolves too (`CModel::setup`).
         let input = registry.white();
 
-        // `_rt_` reflection binds resolve to the scene snapshot; generic3's
-        // `g_Texture3` defaults to `_rt_MipMappedFrameBuffer` and REFLECTION
-        // samples `_rt_FullFrameBuffer` (`CModel::setup` aliases both to a shadow
-        // copy). Any such bind flags the model as reading the scene.
         let mut named: HashMap<&str, (&wgpu::TextureView, &wgpu::Sampler)> = HashMap::new();
         named.insert("_rt_FullFrameBuffer", (&scene_snapshot.view, fbo_sampler));
         named.insert("_rt_MipMappedFrameBuffer", (&scene_snapshot.view, fbo_sampler));
@@ -236,7 +158,6 @@ pub(super) fn build_model(
             reads_scene = true;
         }
 
-        // Per-stage UBOs sized to the shader's `_WEGlobals` block.
         let vs_ubo = (!built.vs_globals.is_empty()).then(|| create_ubo(device, built.vs_globals.size));
         let fs_ubo = (!built.fs_globals.is_empty()).then(|| create_ubo(device, built.fs_globals.size));
 
@@ -326,10 +247,6 @@ pub(super) fn build_model(
     })
 }
 
-/// Compute `g_TextureNResolution` per slot for a mesh material (docs §8.3): slot
-/// 0 is the albedo input; slots 1.. resolve from the pass textures / sampler
-/// defaults. FBO/composite refs are clean render targets at the scene size; real
-/// `.tex` assets carry their own (padded) size so shaders can crop NPOT padding.
 fn build_tex_resolution(
     built: &BuiltPass,
     pass: &kirie_scene::material::Pass,
@@ -366,9 +283,6 @@ fn build_tex_resolution(
     out
 }
 
-/// Draw one model's sub-meshes into the scene FBO under the perspective camera
-/// (`CModel::render`). `depth_view` is the shared model depth buffer; it is
-/// cleared to 1.0 at pass begin so `LessEqual` occlusion is correct.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_model(
     encoder: &mut wgpu::CommandEncoder,
@@ -391,8 +305,6 @@ pub(super) fn draw_model(
     let projection = matrix::perspective(fov.to_radians(), aspect, near, far);
     let view = matrix::look_at(camera.eye, camera.center, camera.up);
     let view_projection = matrix::mul(&projection, &view);
-    // Evaluate the angle-animation track (models only, like C++ CModel): add the
-    // sampled offset to the base angles when `relative`, else replace them.
     let angles = match model
         .angles_animation
         .as_ref()
@@ -416,7 +328,6 @@ pub(super) fn draw_model(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                // Composite onto the scene so far (like every other kind).
                 load: wgpu::LoadOp::Load,
                 store: wgpu::StoreOp::Store,
             },
@@ -435,8 +346,6 @@ pub(super) fn draw_model(
     });
 
     for mesh in &model.meshes {
-        // Neutral CRenderable identity values; the material constants style the
-        // mesh (`CModel.h`: brightness/alpha = 1, color = white).
         let builtins = Builtins {
             time,
             daytime: 0.0,
@@ -477,8 +386,6 @@ pub(super) fn draw_model(
     }
 }
 
-/// The object model matrix (`CModel::computeModelMatrix`):
-/// `translate(origin) · rotZ · rotY · rotX · scale`.
 fn compute_model_matrix(origin: [f32; 3], angles: [f32; 3], scale: [f32; 3]) -> Mat4 {
     let mut m = matrix::translation(origin);
     m = matrix::mul(&m, &matrix::rotation_z(angles[2]));
@@ -487,9 +394,6 @@ fn compute_model_matrix(origin: [f32; 3], angles: [f32; 3], scale: [f32; 3]) -> 
     matrix::mul(&m, &matrix::scale(scale))
 }
 
-/// Allocate the model's private depth buffer (the reference's
-/// `ensureDepthBuffer`, `CModel::render`): a `Depth24Plus` render target at the
-/// scene size, built once and reused every frame (SPEC.md §V5).
 pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kirie-model-depth"),
@@ -514,7 +418,6 @@ mod tests {
 
     #[test]
     fn camera_clamps_match_reference() {
-        // In-range values pass through; out-of-range fall back (CModel::render).
         assert_eq!(clamp_camera(50.0, 0.01, 11.0), (50.0, 0.01, 11.0));
         assert_eq!(clamp_camera(0.0, 0.0, -1.0), (50.0, 0.1, 10000.0));
         assert_eq!(clamp_camera(200.0, 0.01, 0.005), (50.0, 0.01, 10000.0));
@@ -522,17 +425,10 @@ mod tests {
 
     #[test]
     fn model_matrix_places_origin() {
-        // A pure origin translation moves the world origin to `origin`.
         let m = compute_model_matrix([1.0, -2.0, 3.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
-        // Column-major: translation lives in the 4th column (indices 12,13,14).
         assert_eq!([m[12], m[13], m[14]], [1.0, -2.0, 3.0]);
     }
 
-    /// Isolated headless diagnostic (ignored): build and draw ONLY the Starscape
-    /// model onto a magenta `Rgba16F` target (bypassing the rest-of-scene compose
-    /// so a black background can't hide it), then report where the mesh drew. Any
-    /// pixel that differs from pure magenta is geometry the model produced —
-    /// independent of shading — so this proves the winding/transform/depth path.
     #[test]
     #[ignore = "heavy GPU + corpus diagnostic; run manually with --ignored"]
     fn model_only_on_magenta() {
@@ -613,7 +509,6 @@ mod tests {
         let resolver = Inc(&src);
         let mut registry = TextureRegistry::new(&device, &queue);
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
-        // Oracle-matching frame (oracle-3047596375.png is 636×692).
         let (w, h) = (636u32, 692u32);
         let snapshot = Fbo::new(&device, "diag-snap", w, h);
         let mg = build_model(
@@ -632,7 +527,6 @@ mod tests {
 
         let color = Fbo::new(&device, "diag-color", w, h);
         let depth = create_depth_texture(&device, w, h);
-        // Clear to magenta, then draw the model on top.
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
             let _c = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -677,7 +571,6 @@ mod tests {
         );
         queue.submit(Some(enc.finish()));
 
-        // Read back the Rgba16F target (8 bytes/texel, f16 channels).
         let padded = (w * 8).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("diag-rb"),
@@ -727,8 +620,6 @@ mod tests {
             if sign == 1 { -val } else { val }
         };
 
-        // Save an 8-bit PNG so the figure/water placement can be eyeballed
-        // against the oracle (magenta = untouched background).
         let mut rgba = vec![0u8; (w * h * 4) as usize];
         for y in 0..h {
             for x in 0..w {
@@ -793,9 +684,7 @@ mod tests {
 
     #[test]
     fn model_matrix_scales_then_translates() {
-        // Scale applies innermost, then translate: a unit +X point → origin + s.
         let m = compute_model_matrix([0.0, -0.84, 0.0], [0.0, 0.0, 0.0], [0.003, 0.003, 0.003]);
-        // Column 0 carries the X scale.
         assert!((m[0] - 0.003).abs() < 1e-6);
         assert_eq!([m[12], m[13], m[14]], [0.0, -0.84, 0.0]);
     }

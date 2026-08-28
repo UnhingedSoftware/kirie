@@ -7,67 +7,25 @@ repository.workspace = true
 description = "kirie (切り絵) — Wallpaper Engine compatible wallpaper renderer for Linux"
 
 [features]
-# Default build compiles NEITHER web backend: `cargo build/test --workspace`
-# (no features) stays green on machines without libcef or webkit2gtk. The heavy
-# browser deps live behind these opt-in features, which pull the (otherwise
-# unbuilt) `kirie-web` crate and turn on the matching backend inside it.
-# The Workshop browser (`kirie workshop browse`). On by default because
-# browsing is most of the point of the Workshop surface, and removable because
-# a headless install has no use for a terminal UI. Measured cost of having it:
-# 17,932,848 B against 17,716,960 B without — 211 KB, 1.2%.
 tui = ["dep:ratatui"]
 default = ["tui"]
-# One portable binary for any Linux distro: statically link the two churny
-# libraries (ffmpeg + shaderc/glslang) so the binary's only dynamic deps are
-# universal, same-named-everywhere system libs (glibc, libvulkan.so.1, wayland/
-# xcb/x11, alsa/pulse). Build the release with this feature (needs nasm + cmake +
-# python + ninja + git); leave it off for fast dynamic dev/CI builds.
 portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
-# `portable`, but building ffmpeg from source instead of taking a prebuilt
-# prefix — one word to fall back on if a trimmed build ever misses a format.
 portable-fatlibs = ["kirie-video/static-ffmpeg-from-source", "kirie-render/static-shaderc"]
-# Chromium Embedded Framework off-screen-rendering backend. `kirie-web/cef`
-# downloads + links libcef. This is the backend that composites through kirie's
-# wgpu presentation layer (a `kirie_platform::Renderer` blitting CEF's OSR
-# frames), so it also powers `--screenshot`.
 web-cef = ["dep:kirie-web", "kirie-web/host"]
-# Webview (system webkit) web wallpapers. webkit has no off-screen path, so a
-# separate PROCESS owns webkit and a gtk-layer-shell window on the
-# compositor's background layer; the engine drives it over a pipe.
-#
-# The engine links NO gtk: that would map the whole gtk/gdk/cairo/pango/
-# fontconfig chain at exec for every wallpaper, including scene-only ones that
-# never open a browser (measured on a scene render: 186 MB peak / 562 mappings
-# without, 196 MB / 827 with). The install stays one file because the engine
-# carries the host binary as bytes and extracts it on first web use — see
-# `crates/kirie/build.rs` and `KIRIE_EMBED_WEBVIEWHOST`.
 web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
-# Compiles the host INTO the engine (`kirie __webviewhost`) instead of carrying
-# it. Convenient for working on the host itself; costs the gtk linkage above.
 web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
-# VAAPI hardware video decode in kirie-video. Runtime-safe to enable: when no
-# VAAPI device/driver exists, playback degrades to the usual CPU decode path.
 vaapi = ["kirie-video/vaapi"]
 
 [dependencies]
-# System-bus UPower probe for the on-battery power profile.
 zbus = { workspace = true }
 kirie-formats = { workspace = true }
-# Sibling workspace crates, not listed in [workspace.dependencies]; path deps
-# (root manifest is frozen — same convention kirie-render/kirie-video use).
 kirie-platform = { path = "../kirie-platform" }
 kirie-render = { path = "../kirie-render" }
 kirie-bake = { path = "../kirie-bake" }
 kirie-video = { path = "../kirie-video" }
 kirie-ipc = { path = "../kirie-ipc" }
-# The Workshop bridge. Linked in so the engine ships as ONE file and re-execs
-# itself to run it (`kirie __steamhelper …`); the unsafe stays inside that
-# crate, which is why kirie keeps `#![forbid(unsafe_code)]`.
 kirie-steam-helper = { path = "../kirie-steam-helper" }
 kirie-audio = { path = "../kirie-audio" }
-# Optional: only compiled when a `web-*` feature selects a backend. Keeping it
-# `optional` (rather than always-on) is what keeps the default build from
-# touching CEF/webkit2gtk (SPEC invariant: no-feature build stays lean + green).
 kirie-web = { path = "../kirie-web", optional = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
@@ -80,13 +38,7 @@ pollster = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-# Safe SIGTERM/SIGINT handling (the crate's forbid(unsafe_code) rules out a
-# hand-rolled sigaction). Not a `[workspace.dependencies]` entry — the root
-# manifest is frozen, so a direct version dep, same convention as the sibling
-# path deps above. Pulls signal-hook-registry (already locked) + libc.
 signal-hook = "0.4"
-# Terminal UI for `kirie workshop browse` (its own `crossterm` backend is
-# re-exported, so the terminal plumbing needs no second dependency).
 ratatui = { version = "0.30.2", optional = true }
 
 [lints]

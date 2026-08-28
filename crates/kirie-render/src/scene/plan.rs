@@ -1,134 +1,50 @@
-//! The per-image pass list and its ping-pong FBO wiring (the pure planning of
-//! docs/render-architecture.md §7.1, `CImage::setup`/`setupPasses`).
-//!
-//! This computes the *order* and *routing* of an image's draws without touching
-//! the GPU, so the chain topology is unit-testable. Given the base material and
-//! the visible effects it produces an ordered [`PlanPass`] list where each pass
-//! knows its input texture (the previous output, or the layer texture for the
-//! first pass), its render target (a ping-pong image FBO or the scene FBO for
-//! the last visible pass), and its geometry role (copy-space, pass-space, or
-//! scene-space — §7.1's `copySpacePosition`/`passSpacePosition`/
-//! `sceneSpacePosition`).
-//!
-//! Effect per-pass FBO routing IS modeled (docs §11.2): each pass carries its
-//! `target` scratch-FBO name and `bind` sources, and the effects' declared
-//! `fbos` are surfaced on the plan, so a combine pass samples the composite
-//! (`_rt_imageLayerComposite_<id>_a/_b`) and its own scratch buffers
-//! (`_rt_HalfCompoBuffer*`) instead of the 1×1 white default. The renderer
-//! allocates the named FBOs and threads the composite front (§11.2).
-//!
-//! Effect `command:"copy"` passes ARE modeled (`CImage.cpp:683-718`): a
-//! material-less pass with `command:"copy"` plans the reference's virtual
-//! `commands/copy` material pass — texture slot 0 = the `source` FBO, routed at
-//! the `target` FBO — so the draw is a sampling blit between the named scratch
-//! buffers (sizes may differ; the quad resamples). `command:"swap"` is rejected
-//! exactly like the reference (`CImage.cpp:699` "Only copy command is
-//! supported").
-//!
-//! `colorBlendMode` extra passes ARE modeled (`CImage.cpp:770-788`): a
-//! non-default mode appends the builtin `materials/util/effectpassthrough`
-//! material with the `BLENDMODE` combo, placed before the §7.1 blend
-//! relocation so it composites into the scene with the layer's blending.
-//! Puppet meshes are handled via the [`Geometry`] roles below.
-
 use kirie_scene::material::{Blending, CullMode, DepthMode, Pass, PassCommand};
 use kirie_scene::object::{ImageObject, PassOverride};
 
-/// Where a planned pass reads its `g_Texture0` from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PassInput {
-    /// The image's base layer texture (the first pass).
     Layer,
-    /// One of the two ping-pong image FBOs (`_rt_imageLayerComposite_<id>_a/_b`).
     Fbo(usize),
 }
 
-/// Where a planned pass renders.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PassOutput {
-    /// A ping-pong image FBO (index 0 or 1).
     Fbo(usize),
-    /// A per-effect scratch FBO by declared name (§11.2 `target`).
     Named(String),
-    /// The scene FBO — the composite-into-scene draw (the last visible pass).
     Scene,
 }
 
-/// The geometry + MVP role of a pass (docs/render-architecture.md §7.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Geometry {
-    /// `copySpacePosition` + copy matrices — first pass (texture → layer FBO).
     Copy,
-    /// `passSpacePosition` + identity — intermediate effect passes.
     Pass,
-    /// `sceneSpacePosition` + screen MVP — composite into the scene FBO.
     Scene,
-    /// A puppet-warp deformable mesh drawn straight into the scene FBO in
-    /// scene space (screen MVP) — the single-pass puppet character path
-    /// (`CImage::setupPasses` `m_hasPuppetMesh`, `CImage.cpp:823-834`). The
-    /// vertices/indices come from the puppet `.mdl`, not the 4-vertex quad.
     Puppet,
-    /// A puppet-warp deformable mesh drawn into the image's own copy FBO in
-    /// local `[0..size]` space (the ortho model matrix as MVP) — the first
-    /// pass of a *multi-pass* puppet character, so the effect chain then
-    /// processes the deformed character exactly as the reference does
-    /// (`CImage.cpp:823-825`, `m_modelViewProjectionCopy`).
     PuppetCopy,
 }
 
-/// One fully-resolved, wired pass ready for pipeline creation and drawing.
 #[derive(Debug, Clone)]
 pub struct PlanPass {
-    /// The pass's shader base name (`shaders/<name>.vert/.frag`).
     pub shader: String,
-    /// Blending after §7.1 relocation.
     pub blending: Blending,
-    /// Cull mode.
     pub cull: CullMode,
-    /// Depth test.
     pub depthtest: DepthMode,
-    /// Depth write.
     pub depthwrite: DepthMode,
-    /// The merged material pass (combos/textures/constants, override applied).
     pub pass: Pass,
-    /// Texture input source.
     pub input: PassInput,
-    /// Render target.
     pub output: PassOutput,
-    /// Geometry / MVP role.
     pub geometry: Geometry,
-    /// Authored effect index (script `getEffect(i)` space); `None` for the
-    /// base material / colorBlend passes.
     pub effect_index: Option<usize>,
-    /// The effect pass's own render `target` FBO name (docs/format-scene-json.md
-    /// §11.2), or `None` for the base material and effect passes that render
-    /// back into the image composite ping-pong. A named target routes the draw
-    /// into a per-effect scratch FBO (e.g. `_rt_HalfCompoBuffer1`) instead of the
-    /// composite, so the composite keeps the pre-effect image for a later
-    /// combine pass to sample as `_rt_imageLayerComposite_<id>_a/_b` (§11.2,
-    /// `CImage.cpp`/`CPass.cpp` FBO routing — the reference never overwrites the
-    /// composite with an effect's intermediate work).
     pub target: Option<String>,
-    /// The effect pass's `bind` entries — `(slot, source-name)` where the source
-    /// is `previous` (the composite front), a named effect FBO, or an
-    /// `_rt_imageLayerComposite_<id>_*` composite reference (§11.2, `CPass.cpp`
-    /// getInput/"previous"). Filled into empty texture slots by the renderer so
-    /// each `g_TextureN` samples the right prior output instead of the 1×1 white.
     pub binds: Vec<(u32, String)>,
 }
 
-/// The planned draw chain for one image object.
 #[derive(Debug, Clone, Default)]
 pub struct ImagePlan {
-    /// Passes in draw order (empty ⇒ the image is skipped, §7.1 early-out).
     pub passes: Vec<PlanPass>,
-    /// The union of the visible effects' declared scratch FBOs (§11.2 `fbos`),
-    /// allocated per object and referenced by pass `target`/`binds`.
     pub named_fbos: Vec<kirie_scene::material::Fbo>,
 }
 
-/// Merge a per-position effect [`PassOverride`] onto a base material [`Pass`]
-/// (docs/render-architecture.md §8.1, §8.3 priority: override wins).
 fn apply_override(mut pass: Pass, ov: &PassOverride) -> Pass {
     for (k, v) in &ov.combos {
         pass.combos.insert(k.clone(), *v);
@@ -136,7 +52,6 @@ fn apply_override(mut pass: Pass, ov: &PassOverride) -> Pass {
     for (k, v) in &ov.constantshadervalues {
         pass.constantshadervalues.insert(k.clone(), v.clone());
     }
-    // Texture-slot overrides win by index where present and non-empty.
     for (i, slot) in ov.textures.iter().enumerate() {
         if slot.is_some() {
             if i >= pass.textures.len() {
@@ -148,28 +63,15 @@ fn apply_override(mut pass: Pass, ov: &PassOverride) -> Pass {
     pass
 }
 
-/// A material pass paired with its effect FBO routing (`target`/`bind`); the
-/// base material carries `None`/empty (it renders into the composite).
 struct SrcPass {
     pass: Pass,
     target: Option<String>,
     binds: Vec<(u32, String)>,
-    /// Authored effect index this pass came from (`None` = base material /
-    /// colorBlend pass) — the script `getEffect(i)` addressing space.
     effect_index: Option<usize>,
 }
 
-/// The shader base name of the synthesized `command:"copy"` blit pass. The
-/// reference registers `shaders/commands/copy.vert/.frag` in its virtual asset
-/// filesystem (`WallpaperApplication.cpp:165-182`) — no on-disk container has
-/// them, so the renderer binds embedded sources when it sees this name.
 pub const COPY_COMMAND_SHADER: &str = "commands/copy";
 
-/// Synthesize the virtual `commands/copy` pass for a material-less effect pass
-/// with `command:"copy"` (`CImage.cpp:704-718`): blending Normal, no cull, no
-/// depth, texture slot 0 = the `source` FBO name, routed at the `target` FBO.
-/// Drawing the pass-space quad into the target while sampling the source is
-/// the reference's copy — a blit that also handles differing FBO sizes.
 fn copy_command_pass(source: &str, target: &str) -> SrcPass {
     SrcPass {
         effect_index: None,
@@ -189,7 +91,6 @@ fn copy_command_pass(source: &str, target: &str) -> SrcPass {
     }
 }
 
-/// The base material's passes (the layer's own draw, before any effect).
 fn base_passes(image: &ImageObject) -> Vec<SrcPass> {
     image
         .material
@@ -209,25 +110,15 @@ fn base_passes(image: &ImageObject) -> Vec<SrcPass> {
         .unwrap_or_default()
 }
 
-/// The passes contributed by the image's *visible* effects, in effect order,
-/// each with its per-position [`PassOverride`] applied plus its effect-file
-/// `target`/`bind` routing preserved (docs §7.1, §8.1, §11.2).
 fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
     let mut out = Vec::new();
     for (ei, effect) in image.effects.iter().enumerate() {
         if !effect.visible.value {
-            continue; // §7.1: `visible:false` effects skipped.
+            continue;
         }
         let Some(file) = &effect.resolved else { continue };
-        // Per-position overrides pair with *material* passes only — a buffer
-        // command pass never consumes one (`CImage.cpp:719-736`: the reference
-        // advances `curOverride` in the material branch alone).
         let mut ov_next = 0usize;
         for epass in &file.passes {
-            // A pass without a material must be a buffer command
-            // (`CImage.cpp:683-718`): only `copy` with both `source` and
-            // `target` is supported; `swap` and malformed commands are
-            // rejected exactly like the reference (`CImage.cpp:684-701`).
             if epass.material.is_none() {
                 match (&epass.command, &epass.source, &epass.target) {
                     (Some(PassCommand::Copy), Some(source), Some(target)) => {
@@ -251,9 +142,6 @@ fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
                 tracing::debug!(effect = %effect.file, "effect pass material unresolved; skipped");
                 continue;
             };
-            // The effect-file `bind`s route named FBOs / the composite `previous`
-            // into texture slots (§11.2). Only the first material pass of a multi
-            // -pass material inherits them (the reference binds per effect pass).
             let binds: Vec<(u32, String)> = epass
                 .bind
                 .iter()
@@ -275,7 +163,6 @@ fn effect_passes(image: &ImageObject) -> Vec<SrcPass> {
     out
 }
 
-/// The union of the visible effects' declared scratch FBOs (§11.2 `fbos`).
 fn effect_fbos(image: &ImageObject) -> Vec<kirie_scene::material::Fbo> {
     let mut out: Vec<kirie_scene::material::Fbo> = Vec::new();
     for effect in &image.effects {
@@ -292,26 +179,8 @@ fn effect_fbos(image: &ImageObject) -> Vec<kirie_scene::material::Fbo> {
     out
 }
 
-/// The builtin material a non-default `colorBlendMode` appends
-/// (`CImage.cpp:770-788`, `MaterialParser::load` of the shared WE asset). The
-/// renderer loads it from the [`AssetSource`] — pkg first, then the shared
-/// builtin-assets dir — and hands it to [`plan_image`] as `color_blend`.
-///
-/// [`AssetSource`]: kirie_scene::resolve::AssetSource
 pub const COLOR_BLEND_MATERIAL: &str = "materials/util/effectpassthrough.json";
 
-/// Build the draw plan for an image (docs/render-architecture.md §7.1).
-///
-/// `visible` is the image's resolved visibility (a hidden image still plans
-/// nothing). `passthrough` is the model's `passthrough` flag: a passthrough
-/// image whose passes are all trivial is the §7.1 early-out. `offscreen_donor`
-/// is the §5.6 dependency-donor flag: the chain ends in the image's composite
-/// FBO instead of the scene, so the §7.1 blend relocation below suppresses the
-/// layer's material blending entirely — the composite stays a straight-alpha
-/// replace chain for dependents to sample. `color_blend` is the loaded
-/// [`COLOR_BLEND_MATERIAL`], only consulted when the image's `colorBlendMode`
-/// is non-default; `None` (builtin asset unavailable) degrades to no extra
-/// pass (SPEC.md §V9).
 #[must_use]
 pub fn plan_image(
     image: &ImageObject,
@@ -322,12 +191,6 @@ pub fn plan_image(
     if !visible {
         return ImagePlan::default();
     }
-    // §7.1 passthrough early-out (`CImage.cpp:606-624`): a `passthrough` layer
-    // whose visible effects contribute no passes is an identity copy of the
-    // scene FBO onto itself — the reference skips it entirely. Rendering it
-    // anyway samples `_rt_FullFrameBuffer` and blits the scene straight back,
-    // which (before the scene-snapshot wiring) composited a solid block. These
-    // compose/project/fullscreen util layers exist only to *host* effects.
     let passthrough = image.model.as_ref().is_some_and(|m| m.passthrough);
     let effects = effect_passes(image);
     if passthrough && effects.is_empty() {
@@ -339,13 +202,6 @@ pub fn plan_image(
         return ImagePlan::default();
     }
 
-    // `colorBlendMode` extra pass (`CImage.cpp:770-788`): a non-default mode
-    // appends the builtin `materials/util/effectpassthrough` material (shader
-    // `genericimage3`) with the override combo `BLENDMODE = <mode>`, drawn
-    // into the composite chain with no target/binds. Appended after the
-    // effects and *before* the §7.1 blend relocation below, so as last pass it
-    // inherits the layer's blending for the scene composite — the reference's
-    // exact pass order (`CImage.cpp:791-798` relocation follows the append).
     if image.color_blend_mode.value > 0
         && let Some(mat) = color_blend
         && let Some(first) = mat.passes.first()
@@ -367,33 +223,6 @@ pub fn plan_image(
         });
     }
 
-    // §7.1 blend-mode relocation (`CImage.cpp:789-795`): with >1 pass, the
-    // first pass's blending moves to the last pass and the first becomes Normal
-    // (layer blending happens when compositing into the scene, not when copying
-    // into the layer FBO). The reference applies this *unconditionally* — even
-    // for a puppet base, whose overlapping mesh triangles must nevertheless
-    // composite over themselves (Normal would let a transparent-margin triangle
-    // REPLACE an already-opaque texel with alpha 0, punching holes — the girl
-    // 女's eye socket in scene 3428443753). The reference restores that by
-    // *forcing* the first pass to Translucent in `setupPasses`
-    // (`CImage.cpp:832-834`), gated on the puppet mesh actually having loaded
-    // (`m_hasPuppetMesh`). Planning is pure and cannot know load success, so
-    // kirie applies that force in the renderer (`effective_blending`), paired
-    // with blend.rs's coverage-correct alpha factor.
-    //
-    // Dependency-donor exception (docs §5.6): the relocated blending is the
-    // layer's *scene-composite* blending — it belongs on the pass that draws
-    // into the scene FBO (`CImage.cpp:843-846` reroutes exactly that pass).
-    // A donor never scene-draws (`shouldRenderFinalPass`, `CImage.cpp:883-885`,
-    // keeps an invisible image's last pass in the ping-pong), so its material
-    // blending must NOT be installed there: the composite must hold straight
-    // (rgb, a) for dependents' blend effects, which mix with weight = sampled
-    // alpha (`shaders/effects/blend.frag`: `blend = blendColors.a`). A
-    // Translucent write into the cleared-transparent composite would store
-    // premultiplied `a·rgb` and square the weight at anti-aliased rims —
-    // `out = (1−a)·bg + a²·rgb` instead of the straight-alpha over
-    // (2155933185's planet-disc donors). A single-pass donor's only pass IS
-    // that composite copy, so its material blending is suppressed the same way.
     if passes.len() > 1 {
         let first_blend = passes[0].pass.blending;
         passes[0].pass.blending = Blending::Normal;
@@ -405,11 +234,6 @@ pub fn plan_image(
         passes[0].pass.blending = Blending::Normal;
     }
 
-    // Wire inputs/outputs: ping-pong across two image FBOs, last pass → scene.
-    // These composite fields are the linear fallback (`target: None` passes); the
-    // renderer re-derives the true routing from `target`/`binds` so effect
-    // scratch passes (a named `target`) render into per-effect FBOs and keep the
-    // composite intact for a combine pass (docs §11.2).
     let n = passes.len();
     let mut wired = Vec::with_capacity(n);
     let mut input = PassInput::Layer;
@@ -423,8 +247,6 @@ pub fn plan_image(
         } else {
             (PassOutput::Fbo(cur_out), Geometry::Pass)
         };
-        // A single visible pass composites straight into the scene from the
-        // layer texture (copy-space geometry keeps the correct MVP path).
         let geometry = if n == 1 { Geometry::Scene } else { geometry };
         let SrcPass {
             pass,
@@ -522,9 +344,6 @@ mod tests {
 
     #[test]
     fn passthrough_layer_without_visible_effects_is_skipped() {
-        // §7.1 early-out: a `passthrough` util layer (compose/fullscreen) whose
-        // base pass just samples `_rt_FullFrameBuffer` and copies it back is an
-        // identity — the reference never renders it (would blit a solid block).
         let mut img = image(vec![pass("passthrough", Blending::Translucent)]);
         img.model = Some(passthrough_model());
         assert!(plan_image(&img, true, false, None).passes.is_empty());
@@ -532,8 +351,6 @@ mod tests {
 
     #[test]
     fn passthrough_layer_with_visible_effect_renders() {
-        // The same util layer *with* a visible effect hosts real work — it must
-        // render: base pass reads the scene, the effect pass composites back.
         use kirie_scene::material::{EffectFile, EffectPass};
         use kirie_scene::object::Effect;
         use kirie_scene::user::UserSetting;
@@ -583,7 +400,6 @@ mod tests {
         assert_eq!(p.input, PassInput::Layer);
         assert_eq!(p.output, PassOutput::Scene);
         assert_eq!(p.geometry, Geometry::Scene);
-        // A single pass keeps its blending (no relocation happens).
         assert_eq!(p.blending, Blending::Translucent);
     }
 
@@ -597,23 +413,19 @@ mod tests {
         let plan = plan_image(&img, true, false, None);
         assert_eq!(plan.passes.len(), 3);
 
-        // First pass reads the layer, copy-space, writes fbo 0.
         assert_eq!(plan.passes[0].input, PassInput::Layer);
         assert_eq!(plan.passes[0].output, PassOutput::Fbo(0));
         assert_eq!(plan.passes[0].geometry, Geometry::Copy);
 
-        // Middle pass reads fbo 0, pass-space, writes fbo 1.
         assert_eq!(plan.passes[1].input, PassInput::Fbo(0));
         assert_eq!(plan.passes[1].output, PassOutput::Fbo(1));
         assert_eq!(plan.passes[1].geometry, Geometry::Pass);
 
-        // Last pass reads fbo 1 and composites into the scene.
         assert_eq!(plan.passes[2].input, PassInput::Fbo(1));
         assert_eq!(plan.passes[2].output, PassOutput::Scene);
         assert_eq!(plan.passes[2].geometry, Geometry::Scene);
     }
 
-    /// A visible effect whose resolved file has exactly `epasses`.
     fn effect_of(epasses: Vec<kirie_scene::material::EffectPass>) -> kirie_scene::object::Effect {
         kirie_scene::object::Effect {
             file: "effects/test/effect.json".into(),
@@ -633,7 +445,6 @@ mod tests {
         }
     }
 
-    /// An effect-file pass carrying a resolved single-pass material.
     fn material_epass(shader: &str, target: Option<&str>) -> kirie_scene::material::EffectPass {
         kirie_scene::material::EffectPass {
             material: Some(format!("materials/effects/{shader}.json")),
@@ -647,7 +458,6 @@ mod tests {
         }
     }
 
-    /// A material-less buffer-command pass (`command`/`source`/`target`).
     fn command_epass(
         command: kirie_scene::material::PassCommand,
         source: &str,
@@ -665,11 +475,6 @@ mod tests {
 
     #[test]
     fn copy_command_plans_the_virtual_blit_pass() {
-        // The motionblur shape (`assets/effects/motionblur/effect.json`):
-        // accumulate into FullCompoBuffer2, `command:"copy"` it back into
-        // FullCompoBuffer1, then combine. The copy must become the reference's
-        // virtual `commands/copy` pass — texture slot 0 = source, routed at
-        // target, blending Normal, no binds (`CImage.cpp:683-718`).
         let mut img = image(vec![pass("base", Blending::Translucent)]);
         img.effects = vec![effect_of(vec![
             material_epass("motionblur_accumulation", Some("_rt_FullCompoBuffer2")),
@@ -692,8 +497,6 @@ mod tests {
 
     #[test]
     fn swap_command_pass_is_rejected_like_the_reference() {
-        // `CImage.cpp:699`: "Only copy command is supported for pass without
-        // material" — a swap plans nothing; the chain stays base-only.
         let mut img = image(vec![pass("base", Blending::Normal)]);
         img.effects = vec![effect_of(vec![command_epass(
             PassCommand::Swap,
@@ -706,9 +509,6 @@ mod tests {
 
     #[test]
     fn command_passes_do_not_consume_pass_overrides() {
-        // Overrides pair with material passes only (`CImage.cpp:719-736`):
-        // with file passes [material, copy, material] and overrides [o0, o1],
-        // the second material pass must receive o1, not the copy's slot.
         use kirie_scene::object::PassOverride;
         let mut img = image(vec![pass("base", Blending::Normal)]);
         let mut effect = effect_of(vec![
@@ -737,8 +537,6 @@ mod tests {
         assert!(plan.passes[2].pass.combos.is_empty(), "copy takes no override");
     }
 
-    /// The builtin `materials/util/effectpassthrough.json` as shipped in the
-    /// WE assets: a single `genericimage3` pass, blending normal, no textures.
     fn effectpassthrough() -> Material {
         Material {
             passes: vec![pass("genericimage3", Blending::Normal)],
@@ -747,10 +545,6 @@ mod tests {
 
     #[test]
     fn color_blend_mode_appends_the_passthrough_pass() {
-        // `CImage.cpp:770-788`: colorBlendMode > 0 appends the builtin
-        // effectpassthrough material with combo BLENDMODE=<mode>, and the
-        // append happens *before* the blend relocation (`CImage.cpp:791-798`)
-        // so the extra pass carries the layer's blending into the scene.
         let mut img = image(vec![pass("base", Blending::Additive)]);
         img.color_blend_mode = UserSetting::literal(9);
         let plan = plan_image(&img, true, false, Some(&effectpassthrough()));
@@ -761,17 +555,12 @@ mod tests {
         assert_eq!(last.target, None, "renders into the composite chain");
         assert!(last.binds.is_empty());
         assert_eq!(last.output, PassOutput::Scene);
-        // Relocation: the base copy becomes Normal, the extra pass composites
-        // with the layer's Additive.
         assert_eq!(plan.passes[0].blending, Blending::Normal);
         assert_eq!(last.blending, Blending::Additive);
     }
 
     #[test]
     fn color_blend_mode_pass_follows_effect_passes() {
-        // The reference appends the colorBlendMode pass *after* the effects
-        // (`CImage.cpp:636-737` effects, then `:770-788`), so grading applies
-        // to the effect chain's output.
         let mut img = image(vec![pass("base", Blending::Normal)]);
         img.color_blend_mode = UserSetting::literal(2);
         img.effects = vec![effect_of(vec![material_epass("tint", None)])];
@@ -784,8 +573,6 @@ mod tests {
 
     #[test]
     fn default_color_blend_mode_appends_nothing() {
-        // Mode 0 is the default — no extra pass even with the material at hand
-        // (`CImage.cpp:770` gates on `getInt() > 0`).
         let img = image(vec![pass("base", Blending::Normal)]);
         let plan = plan_image(&img, true, false, Some(&effectpassthrough()));
         assert_eq!(plan.passes.len(), 1);
@@ -793,8 +580,6 @@ mod tests {
 
     #[test]
     fn color_blend_mode_without_builtin_material_degrades() {
-        // The builtin asset may be unavailable (no shared assets dir): §V9
-        // skip-and-continue — the image still renders, just ungraded.
         let mut img = image(vec![pass("base", Blending::Normal)]);
         img.color_blend_mode = UserSetting::literal(4);
         let plan = plan_image(&img, true, false, None);
@@ -803,8 +588,6 @@ mod tests {
 
     #[test]
     fn blend_relocation_moves_first_to_last() {
-        // docs/render-architecture.md §7.1: first pass's blending moves to the
-        // last; the first becomes Normal.
         let img = image(vec![
             pass("a", Blending::Additive),
             pass("b", Blending::Translucent),
@@ -820,11 +603,6 @@ mod tests {
 
     #[test]
     fn blend_relocation_is_unconditional_for_puppet_images() {
-        // `CImage.cpp:789-795` relocates with no puppet exception; the puppet
-        // base's Translucent is *forced later* by the renderer, gated on the
-        // mesh actually loading (`CImage.cpp:832-834` `m_hasPuppetMesh` —
-        // `effective_blending` in renderer.rs). The plan must therefore leave
-        // the relocated Normal in place even when a puppet is declared.
         let mut img = image(vec![
             pass("base", Blending::Translucent),
             pass("effect", Blending::Normal),
@@ -851,12 +629,6 @@ mod tests {
 
     #[test]
     fn donor_blend_is_not_installed_on_last_pass() {
-        // Docs §5.6: a dependency donor's last pass stays in the ping-pong
-        // (the reference's `shouldRenderFinalPass`, `CImage.cpp:883-885`), so
-        // the §7.1 relocation must not install the layer blending there — the
-        // composite keeps straight (rgb, a) for dependents' blend effects
-        // (2155933185's planet-disc donors: base Translucent + scroll +
-        // transform; a Translucent last write would premultiply the rim).
         let img = image(vec![
             pass("base", Blending::Translucent),
             pass("scroll", Blending::Normal),
@@ -873,9 +645,6 @@ mod tests {
 
     #[test]
     fn single_pass_donor_copy_is_replace() {
-        // A single-pass donor's only pass IS the composite copy — its material
-        // blending (the would-be scene blending) is suppressed to Normal so
-        // the composite holds the straight layer texture.
         let img = image(vec![pass("base", Blending::Translucent)]);
         let plan = plan_image(&img, true, true, None);
         assert_eq!(plan.passes[0].blending, Blending::Normal);

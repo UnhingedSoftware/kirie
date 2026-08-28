@@ -1,25 +1,3 @@
-//! Run the built-in [`TestPattern`] on every output as a background surface
-//! for `--seconds N` (default 3), then exit cleanly.
-//!
-//! Backend defaults to the environment (Wayland when `$WAYLAND_DISPLAY` is
-//! set, else X11); force one with `--backend wayland|x11`. On X11,
-//! `--window WxH` maps a single ordinary window instead of the per-monitor
-//! desktop background.
-//!
-//! On Wayland, `--namespace NAME` sets the layer-shell surface namespace
-//! (default `linux-wallpaperengine`, which the wallpaper daemon watchdog
-//! greps for) and `--screen-root NAME` (repeatable) restricts surfaces to the
-//! named outputs — other monitors are left untouched. With no `--screen-root`,
-//! every output gets a surface.
-//!
-//! ```sh
-//! cargo run -p kirie-platform --example layer_clear -- --seconds 3
-//! cargo run -p kirie-platform --example layer_clear -- --screen-root HDMI-A-1
-//! cargo run -p kirie-platform --example layer_clear -- --namespace linux-wallpaperengine
-//! cargo run -p kirie-platform --example layer_clear -- --backend x11
-//! cargo run -p kirie-platform --example layer_clear -- --backend x11 --window 800x600
-//! ```
-
 use std::time::Duration;
 
 use kirie_platform::{
@@ -108,8 +86,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err("--window is only supported on the X11 backend".into());
         }
         (_, Some((w, h))) => Platform::connect_x11(X11Mode::Window { width: w, height: h }, make_factory())?,
-        // Wayland (explicit or env-selected): carry the namespace +
-        // --screen-root selection through the drop-in path.
         (Some(Backend::Wayland), None) => Platform::connect_with(Backend::Wayland, options, make_factory())?,
         (None, None) if Backend::from_env() == Backend::Wayland => {
             Platform::connect_with(Backend::Wayland, options, make_factory())?

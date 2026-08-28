@@ -1,6 +1,3 @@
-//! Background-baker behavior: staleness skip, pause gating (SPEC.md §V7), and
-//! queue draining onto the pool.
-
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -35,7 +32,6 @@ fn model() -> SceneModel {
     SceneModel::resolve(scene, &PropertyBag::new())
 }
 
-/// source_fn/content_fn that count how many times content is built.
 fn config(cache: Cache, pause: PauseFn, built: Arc<AtomicUsize>) -> BakerConfig {
     let source_fn = Arc::new(|item: &Path| Ok(item.as_os_str().as_encoded_bytes().to_vec()));
     let content_fn = Arc::new(move |_item: &Path, _src: &[u8]| {
@@ -76,12 +72,10 @@ fn paused_baker_skips_work() {
     let baker = BackgroundBaker::start(config(cache, pause, built.clone()));
 
     let item = tmp.path().join("item-2");
-    // Paused: no work, no bundle.
     assert_eq!(baker.bake_item_now(&item).unwrap(), BakeOutcome::Paused);
     assert_eq!(built.load(Ordering::Relaxed), 0);
     assert!(baker.is_paused());
 
-    // Release the gate → bakes.
     gate.store(false, Ordering::Relaxed);
     assert!(matches!(
         baker.bake_item_now(&item).unwrap(),
@@ -101,7 +95,6 @@ fn enqueue_drains_onto_pool() {
         baker.enqueue(tmp.path().join(format!("q-{i}")));
     }
 
-    // Poll for completion (coordinator + pool are async).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     while built.load(Ordering::Relaxed) < 3 && std::time::Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(20));

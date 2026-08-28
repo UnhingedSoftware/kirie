@@ -9,35 +9,13 @@ repository.workspace = true
 workspace = true
 
 [features]
-# Default build compiles NEITHER CEF nor a webview: `cargo build/test
-# --workspace` (no features) must stay green on machines without libcef or
-# webkit2gtk. The heavy browser backends are strictly opt-in.
 default = []
-# Chromium Embedded Framework off-screen-rendering backend. `cef` and
-# `cef-dll-sys` are HEAVY (download + cmake-build of libcef); gated so the
-# default build never touches them.
 cef = ["dep:cef", "dep:cef-dll-sys", "dep:memmap2", "dep:tracing-subscriber", "dep:libc", "host"]
-# Out-of-process web host CLIENT: no browser deps at all — spawns the
-# `kirie-webhost` binary and reads its shared-memory frames.
 host = []
-# System-webkit2gtk native-surface backend, presented by the out-of-process
-# `kirie-webviewhost` binary: webkit has no off-screen path (upstream
-# won't-fix, see src/webview/mod.rs), so instead of compositing frames the host
-# puts a gtk-layer-shell window straight on the compositor's background layer
-# and lets webkit render into it natively. webkit itself is `dlopen`ed at RUN
-# time (src/webview/webkit_sys.rs) so one binary serves both webkit2gtk-4.1 and
-# the -4.0 still shipped by old LTS distros; only GTK 3 is linked at compile
-# time. Gated anyway so the default build pulls no gtk at all.
 webview = ["dep:libloading", "dep:gtk", "dep:gtk-layer-shell", "dep:tracing-subscriber"]
-# Out-of-process webview host CLIENT: no browser/gtk deps at all — spawns the
-# `kirie-webviewhost` binary (which owns webkit + the layer surface) and
-# drives it over stdin. The engine layer stays black behind the host's own
-# background-layer window; `latest_frame()` is always `None`.
 webview-client = []
 
 [dependencies]
-# Content-hashes the embedded webview host so a rebuilt one never reuses a
-# stale extraction.
 blake3 = { workspace = true }
 memmap2 = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true, optional = true }
@@ -50,21 +28,9 @@ wgpu = { workspace = true }
 bytemuck = { workspace = true }
 arc-swap = { workspace = true }
 
-# Heavy, optional, feature-gated. `default-features = false` drops the crate's
-# `sandbox` + `build-util` defaults (neither is needed for OSR) while keeping
-# the download + cmake link path (bootstrap notes). The workspace pins the same
-# 149 line (`cef = "149"`); it is declared directly here because a
-# `{ workspace = true }` ref cannot turn off the workspace entry's default
-# features, and the root manifest must not be edited.
 cef = { version = "149", default-features = false, optional = true }
 cef-dll-sys = { workspace = true, optional = true }
 
-# Optional, feature-gated (webview backend). `gtk` + `gtk-layer-shell` are the
-# kirie-webviewhost window stack (background layer) and are linked normally;
-# GTK 3 is present on every target distro. `libloading` carries the runtime
-# `dlopen` of webkit itself — declared directly rather than via the workspace
-# because the root manifest must not be edited, and pinned to the 0.8 line
-# already in the lock file (wgpu/ash pull it) so no new crate enters the tree.
 libloading = { version = "0.8", optional = true }
 gtk = { workspace = true, optional = true }
 gtk-layer-shell = { workspace = true, optional = true }
@@ -72,11 +38,9 @@ gtk-layer-shell = { workspace = true, optional = true }
 [[bin]]
 name = "kirie-cef-helper"
 path = "src/bin/kirie-cef-helper.rs"
-# The subprocess entrypoint links libcef, so it only exists in the `cef` build.
 required-features = ["cef"]
 
 [dev-dependencies]
-# PNG encoding for the CEF OSR smoke test (tests/osr_smoke.rs, cef-only).
 image = { workspace = true }
 
 [[bin]]
@@ -87,5 +51,4 @@ required-features = ["cef"]
 [[bin]]
 name = "kirie-webviewhost"
 path = "src/bin/kirie-webviewhost.rs"
-# Links gtk (webkit is dlopen'd); only exists in the `webview` build.
 required-features = ["webview"]

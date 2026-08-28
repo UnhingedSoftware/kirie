@@ -1,18 +1,10 @@
-//! Corpus-gated content tests (skipped when the workshop corpus is
-//! absent): the single animated `.tex` in the corpus — workshop item
-//! 3585875739, a 39-frame TEXS0003 atlas (docs/format-tex.md §8.1 real
-//! sample, §10.3) — must decode into the documented placements and
-//! schedule.
-
 use std::path::{Path, PathBuf};
 
 use kirie_formats::pkg::OwnedPkg;
 use kirie_formats::tex::Tex;
 use kirie_render::ImageContent;
 
-/// Default corpus location (docs/corpus.md); override with `KIRIE_CORPUS`.
 const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
-/// The corpus item holding the animated texture (docs/format-tex.md §10.3).
 const ANIMATED_ITEM: &str = "3585875739";
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -30,8 +22,6 @@ fn corpus_dir() -> Option<PathBuf> {
     }
 }
 
-/// Find the animated (`flags & IsGif`) texture payload in the item's
-/// scene.pkg and hand it to `visit`.
 fn with_animated_tex(dir: &Path, visit: impl FnOnce(&str, &[u8])) {
     let pkg_path = dir.join(ANIMATED_ITEM).join("scene.pkg");
     let pkg = OwnedPkg::from_path(&pkg_path).expect("scene.pkg parses");
@@ -57,8 +47,6 @@ fn corpus_animated_tex_decodes_to_documented_frame_schedule() {
     with_animated_tex(&dir, |name, payload| {
         let content = ImageContent::from_tex_bytes(payload).unwrap_or_else(|e| panic!("{name}: {e}"));
 
-        // docs/format-tex.md §8.1 sample: 39 frames on a single
-        // 1608x1005 PNG-backed page, logical frame 201x201.
         assert_eq!(content.pages.len(), 1, "{name}: imageCount");
         let page = &content.pages[0];
         assert_eq!((page.width, page.height), (1608, 1005), "{name}: atlas dims");
@@ -66,9 +54,6 @@ fn corpus_animated_tex_decodes_to_documented_frame_schedule() {
         assert_eq!(content.frames.len(), 39, "{name}: frame count");
         assert_eq!(content.content_size(), (201, 201), "{name}: gifWidth/gifHeight");
 
-        // Frames laid out left-to-right, top-to-bottom in an 8x5 grid of
-        // 201x201 cells; every frameNumber = 0, no rotated frames
-        // (docs/format-tex.md §8.1, §10.3).
         let (w, h) = (1608.0f32, 1005.0f32);
         for (i, frame) in content.frames.iter().enumerate() {
             assert_eq!(frame.page, 0, "{name}: frame {i} page");
@@ -84,7 +69,6 @@ fn corpus_animated_tex_decodes_to_documented_frame_schedule() {
                 [201.0 / w, 0.0, 0.0, 201.0 / h],
                 "{name}: frame {i} axes"
             );
-            // Every frametime = 1/39 s (docs/format-tex.md §8.1).
             assert!(
                 (frame.duration - 1.0 / 39.0).abs() < 1e-6,
                 "{name}: frame {i} duration {}",
@@ -92,8 +76,6 @@ fn corpus_animated_tex_decodes_to_documented_frame_schedule() {
             );
         }
 
-        // Schedule semantics over the real table: total exactly 1 s, the
-        // §8.1 walk hits every slot at its midpoint and wraps.
         let schedule = content.schedule();
         assert!(schedule.is_animated(), "{name}");
         assert!(
@@ -105,14 +87,12 @@ fn corpus_animated_tex_decodes_to_documented_frame_schedule() {
         for k in 0..39usize {
             let midpoint = (k as f64 + 0.5) * slot;
             assert_eq!(schedule.frame_at(midpoint), k, "{name}: slot {k}");
-            // One full loop later, same frame (fmod wrap, §8.1 step 2).
             assert_eq!(
                 schedule.frame_at(midpoint + schedule.total_seconds()),
                 k,
                 "{name}: wrapped slot {k}"
             );
         }
-        // The frame after slot k's boundary is k+1.
         assert_eq!(schedule.frame_at(1.5 * slot), 1, "{name}");
         assert_eq!(schedule.frame_at(38.5 * slot), 38, "{name}");
     });

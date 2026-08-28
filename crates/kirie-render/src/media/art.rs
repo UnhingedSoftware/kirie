@@ -1,62 +1,20 @@
-//! Album-art decoding and the script/web-facing playback event.
-//!
-//! MPRIS delivers cover art as `mpris:artUrl`. The C++ reference resolves local
-//! art (`file://` URL or a bare absolute path) into pixels a scene shader can
-//! sample (the `$mediaThumbnail` virtual asset) and, for web wallpapers, into a
-//! `data:` URL plus a computed palette (docs/subsystems-misc.md §3.5, §5,
-//! `CWeb.cpp:64-152`). This module decodes local + `data:` art into an
-//! [`AlbumArt`] RGBA image and derives that palette in [`MediaPlaybackEvent`].
-//!
-//! Remote (`http(s)://`) art is fetched via `curl`, as the reference does — a
-//! streaming player publishes nothing else, so refusing would leave every such
-//! wallpaper with an empty cover. The fetch runs on the MPRIS worker thread and
-//! is cached by URL, so it costs one request per track change and never blocks
-//! the render thread.
-
-/// Longest edge a [`AlbumArt::png_data_uri`] thumbnail is downscaled to.
-///
-/// The data URI is delivered to a web wallpaper **inline**, as a base64 string
-/// spliced into one `window.__wpMediaThumb({...})` JavaScript statement, and on
-/// the out-of-process backends that statement's JSON crosses a line-based pipe
-/// to the host. Album art off MPRIS is routinely 1000px+ (Spotify hands out
-/// 640px, local files whatever the tagger embedded), which re-encodes to
-/// megabytes of PNG and ~1.37× that as base64 — per track change, on the render
-/// thread. 512 keeps a cover sharp on any realistic on-screen thumbnail (WE's
-/// own media wallpapers draw them a few hundred pixels wide) while bounding the
-/// payload to a few hundred KB.
 pub const MAX_THUMBNAIL_EDGE: u32 = 512;
 
-/// A decoded album-art image (RGBA8, row-major, top-left origin).
-///
-/// Cheap to share across snapshots via `Arc` — the render/script side binds
-/// [`pixels`](Self::pixels) as a texture without re-decoding (SPEC §V4/§V5).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AlbumArt {
-    /// Image width in pixels.
     pub width: u32,
-    /// Image height in pixels.
     pub height: u32,
-    /// Tightly-packed RGBA8 pixels (`width * height * 4` bytes).
     pub pixels: Vec<u8>,
-    /// Dominant colour, derived from `pixels` once at decode.
-    ///
-    /// Held rather than recomputed because the consumers ask for it *per
-    /// frame* (`scene/scripting.rs` builds a `MediaPlaybackEvent` every tick),
-    /// while the answer only changes when the art does. Deriving it here also
-    /// puts the work on the MPRIS worker thread instead of the render thread
-    /// (SPEC §V4).
     primary: [u8; 3],
 }
 
 impl AlbumArt {
-    /// Build from an already-decoded [`image::RgbaImage`].
     #[must_use]
     fn from_rgba(img: image::RgbaImage) -> Self {
         let (width, height) = img.dimensions();
         Self::new(width, height, img.into_raw())
     }
 
-    /// Build from raw RGBA8 pixels, deriving the dominant colour once.
     #[must_use]
     pub fn new(width: u32, height: u32, pixels: Vec<u8>) -> Self {
         let primary = compute_primary_color(width, height, &pixels);
@@ -68,26 +26,17 @@ impl AlbumArt {
         }
     }
 
-    /// Saturation·brightness-weighted dominant color, lifted out of darkness,
-    /// matching the C++ `primaryColor` derivation (docs/subsystems-misc.md
-    /// §3.5, `CWeb.cpp:64-152`): each pixel contributes with weight
-    /// `saturation * brightness`; if the result's max channel is `< 170` it is
-    /// scaled up so the max channel reaches 170 (avoids a near-black swatch).
     #[must_use]
     pub fn primary_color(&self) -> [u8; 3] {
         self.primary
     }
 }
 
-/// The dominant-colour derivation itself. Called once per decoded image by
-/// [`AlbumArt::new`].
 fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
     {
         let mut acc = [0.0f64; 3];
         let mut weight_sum = 0.0f64;
 
-        // Subsample large images so palette extraction stays O(1)-ish and never
-        // stalls the worker: cap at ~64x64 sampled pixels.
         let step_x = (width / 64).max(1);
         let step_y = (height / 64).max(1);
 
@@ -96,9 +45,6 @@ fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
             let mut x = 0;
             while x < width {
                 let idx = ((y * width + x) * 4) as usize;
-                // The buffer is allowed to disagree with the declared size
-                // (V9: odd art must not panic); such pixels simply do not
-                // contribute.
                 let Some(px) = pixels.get(idx..idx + 4) else {
                     x += step_x;
                     continue;
@@ -122,7 +68,6 @@ fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
         }
 
         if weight_sum <= f64::EPSILON {
-            // Fully desaturated (grayscale) art: fall back to mid-gray.
             return [128, 128, 128];
         }
 
@@ -131,7 +76,6 @@ fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
             (acc[1] / weight_sum).round(),
             (acc[2] / weight_sum).round(),
         ];
-        // Lift dark colors so the max channel reaches at least 170.
         let max = color[0].max(color[1]).max(color[2]);
         if max > 0.0 && max < 170.0 {
             let scale = 170.0 / max;
@@ -144,28 +88,11 @@ fn compute_primary_color(width: u32, height: u32, pixels: &[u8]) -> [u8; 3] {
 }
 
 impl AlbumArt {
-    /// Encode this art as a `data:image/png;base64,…` URI, the exact shape a WE
-    /// web wallpaper expects in `event.thumbnail`.
-    ///
-    /// The reference hands pages the cover as a base64 `data:` URL
-    /// (docs/subsystems-misc.md §3.5, `CWeb.cpp:64-152`) and real workshop
-    /// wallpapers depend on the `image/png` spelling: the popular media players
-    /// strip the literal `"data:image/png;base64,"` prefix off `event.thumbnail`
-    /// to test for "no cover", and assign the whole string to an `<img>` `src`.
-    /// PNG (not JPEG) is therefore part of the contract, not a choice.
-    ///
-    /// Downscaled to [`MAX_THUMBNAIL_EDGE`] on the longest edge first — see that
-    /// constant for why the size bound is load-bearing rather than cosmetic.
-    /// Returns `None` only if the pixel buffer is inconsistent with its declared
-    /// size or the encoder fails (V9: never panics on odd art).
     #[must_use]
     pub fn png_data_uri(&self) -> Option<String> {
         let img = image::RgbaImage::from_raw(self.width, self.height, self.pixels.clone())?;
         let longest = self.width.max(self.height);
         let img = if longest > MAX_THUMBNAIL_EDGE {
-            // Triangle: cheap, and a smooth downscale matters here because the
-            // page usually scales the thumbnail up again for a blurred
-            // background layer.
             let scale = f64::from(MAX_THUMBNAIL_EDGE) / f64::from(longest);
             let w = ((f64::from(self.width) * scale).round() as u32).max(1);
             let h = ((f64::from(self.height) * scale).round() as u32).max(1);
@@ -185,12 +112,6 @@ impl AlbumArt {
     }
 }
 
-/// Standard-alphabet, padded base64 encoder appending into `out`.
-///
-/// Hand-rolled for the same reason [`base64_decode`] is: the workspace carries
-/// no base64 crate, and this is the one direction the web bridge needs (an
-/// album cover on its way into a `data:` URI). Appending rather than returning
-/// lets the caller pre-seed the `data:` prefix and grow one allocation.
 fn base64_encode_into(data: &[u8], out: &mut String) {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     out.reserve(data.len().div_ceil(3) * 4);
@@ -212,54 +133,24 @@ fn base64_encode_into(data: &[u8], out: &mut String) {
     }
 }
 
-/// The script/web-facing now-playing event.
-///
-/// This is the aggregate a `wallpaperRegisterMedia*Listener` callback receives
-/// (docs/subsystems-misc.md §3.5): typed props, an integer playback state, a
-/// seconds-based timeline, and — when art is available — a thumbnail plus a
-/// derived `#rrggbb` palette. Built from a [`super::MediaState`] snapshot via
-/// [`super::MediaState`]'s data with [`MediaPlaybackEvent::from_state`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct MediaPlaybackEvent {
-    /// Whether a player is present (mirrors `MediaState::available`).
     pub available: bool,
-    /// `xesam:title`.
     pub title: String,
-    /// First `xesam:artist`.
     pub artist: String,
-    /// `xesam:album`.
     pub album: String,
-    /// Playback state integer (`0` Stopped / `1` Playing / `2` Paused) — the
-    /// `__wpMediaPlayback` contract.
     pub state: i32,
-    /// Playback position in seconds (`__wpMediaTimeline.position`).
     pub position_secs: f64,
-    /// Track duration in seconds (`__wpMediaTimeline.duration`), `0.0` unknown.
     pub duration_secs: f64,
-    /// Decoded album art, when local/`data:` art was loadable.
     pub thumbnail: Option<std::sync::Arc<AlbumArt>>,
-    /// The raw `mpris:artUrl` (useful for remote art the renderer may fetch).
     pub art_url: Option<String>,
-    /// Dominant color `#rrggbb` (`__wpMediaThumb.primaryColor`), or `None` when
-    /// no art is decoded.
     pub primary_color: Option<String>,
-    /// `primary × 0.4` `#rrggbb` (`secondaryColor`), or `None`.
     pub secondary_color: Option<String>,
-    /// `#ffffff` when the primary's luma `< 150`, else `#101010`
-    /// (`textColor`), or `None` when no art is decoded.
     pub text_color: Option<String>,
-    /// Pure `#ffffff`/`#000000` — whichever contrasts the primary hardest
-    /// (`highContrastColor` in the WE thumbnail event). Distinct from
-    /// [`text_color`](Self::text_color), which softens its dark end to
-    /// `#101010`; this one never does, so a page can use it for hairlines and
-    /// focus rings that must stay legible. `None` when no art is decoded.
     pub high_contrast_color: Option<String>,
 }
 
 impl MediaPlaybackEvent {
-    /// Project a [`super::MediaState`] snapshot into the page/script event,
-    /// converting µs → seconds and deriving the palette from decoded art
-    /// (docs/subsystems-misc.md §3.5).
     #[must_use]
     pub fn from_state(state: &super::MediaState) -> Self {
         let (primary, secondary, text, contrast) = match &state.art {
@@ -270,15 +161,12 @@ impl MediaPlaybackEvent {
                     (f64::from(p[1]) * 0.4) as u8,
                     (f64::from(p[2]) * 0.4) as u8,
                 ];
-                // Rec.601 luma.
                 let luma = 0.299 * f64::from(p[0]) + 0.587 * f64::from(p[1]) + 0.114 * f64::from(p[2]);
                 let text = if luma < 150.0 {
                     [255, 255, 255]
                 } else {
                     [0x10, 0x10, 0x10]
                 };
-                // Same split point, but never softened: this is the "always
-                // legible" swatch, so it stays at the extremes.
                 let contrast = if luma < 150.0 { [255, 255, 255] } else { [0, 0, 0] };
                 (Some(hex(p)), Some(hex(sec)), Some(hex(text)), Some(hex(contrast)))
             }
@@ -303,19 +191,11 @@ impl MediaPlaybackEvent {
     }
 }
 
-/// Format an RGB triple as `#rrggbb`.
 #[must_use]
 fn hex(c: [u8; 3]) -> String {
     format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])
 }
 
-/// Resolve an `mpris:artUrl` into decoded [`AlbumArt`].
-///
-/// Handles `file://` URLs (percent-decoded), bare absolute paths, and
-/// `data:...;base64,...` URIs. `http(s)://` and anything unrecognized return
-/// `None` (never fetched here — the worker must not block on the network, V4).
-/// Decode failures also return `None` (V9: no panic on a broken/oversized
-/// image).
 #[must_use]
 pub fn load_art(url: &str) -> Option<AlbumArt> {
     if let Some(rest) = url.strip_prefix("data:") {
@@ -327,10 +207,8 @@ pub fn load_art(url: &str) -> Option<AlbumArt> {
     let path = if let Some(rest) = url.strip_prefix("file://") {
         percent_decode(rest)
     } else if url.starts_with('/') {
-        // Bare absolute path (some players emit this).
         url.to_owned()
     } else {
-        // Unknown scheme — nothing safe to open.
         return None;
     };
 
@@ -343,28 +221,9 @@ pub fn load_art(url: &str) -> Option<AlbumArt> {
     }
 }
 
-/// Longest a remote fetch may take before the cover is given up on.
 const REMOTE_TIMEOUT_SECS: &str = "6";
-/// Hard ceiling on a downloaded cover, handed to curl so an oversized body is
-/// refused rather than streamed into memory and discarded.
 const REMOTE_MAX_BYTES: &str = "16777216";
 
-/// Fetch cover art served over HTTP(S) and decode it.
-///
-/// Every streaming player publishes `mpris:artUrl` as a remote URL — Spotify
-/// only ever does — so refusing to fetch means those wallpapers show an empty
-/// cover no matter what else works. The reference solves this the same way,
-/// by shelling out to `curl` (docs/subsystems-misc.md §5); doing likewise keeps
-/// a TLS stack out of a wallpaper renderer, and a machine without curl simply
-/// gets the behaviour it has today: no cover, nothing else disturbed.
-///
-/// This runs on the MPRIS worker thread, never the render thread, and the whole
-/// result is cached by URL upstream, so a track change costs one fetch.
-///
-/// The URL comes from whichever media player happens to be running, so it is
-/// constrained rather than trusted: the scheme is pinned to http/https on both
-/// the initial request and any redirect, redirects are bounded, and the
-/// response is capped in both time and size.
 fn load_remote(url: &str) -> Option<AlbumArt> {
     let output = std::process::Command::new("curl")
         .args([
@@ -373,8 +232,6 @@ fn load_remote(url: &str) -> Option<AlbumArt> {
             "--location",
             "--max-redirs",
             "3",
-            // Pin the scheme on the first request *and* every redirect, so a
-            // redirect cannot walk the fetch onto file:// or another protocol.
             "--proto",
             "=http,https",
             "--proto-redir",
@@ -415,13 +272,11 @@ fn load_remote(url: &str) -> Option<AlbumArt> {
     }
 }
 
-/// Decode the body of a `data:[<mime>][;base64],<data>` URI (base64 only).
 fn load_data_uri(rest: &str) -> Option<AlbumArt> {
     let comma = rest.find(',')?;
     let (meta, data) = rest.split_at(comma);
-    let data = &data[1..]; // skip the comma
+    let data = &data[1..];
     if !meta.contains("base64") {
-        // Non-base64 (percent-encoded) data URIs are not expected for images.
         return None;
     }
     let bytes = base64_decode(data)?;
@@ -434,8 +289,6 @@ fn load_data_uri(rest: &str) -> Option<AlbumArt> {
     }
 }
 
-/// Minimal percent-decoder for `file://` paths (`%20` → space, etc.). Invalid
-/// escapes are left verbatim.
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -456,8 +309,6 @@ fn percent_decode(input: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-/// Standard-alphabet base64 decode (no external crate). Ignores ASCII
-/// whitespace; returns `None` on any invalid symbol.
 fn base64_decode(input: &str) -> Option<Vec<u8>> {
     fn val(b: u8) -> Option<u32> {
         match b {
@@ -494,33 +345,24 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    /// A 2x2 image with one saturated red pixel dominates the palette.
     #[test]
     fn primary_color_prefers_saturated_pixel() {
-        // Pixels: red (saturated), gray, gray, black.
         let pixels = vec![
-            255, 0, 0, 255, // red
-            128, 128, 128, 255, // gray (0 saturation)
-            128, 128, 128, 255, // gray
-            0, 0, 0, 255, // black
+            255, 0, 0, 255, 128, 128, 128, 255, 128, 128, 128, 255, 0, 0, 0, 255,
         ];
         let art = AlbumArt::new(2, 2, pixels);
         let c = art.primary_color();
-        // Red channel dominates strongly.
         assert!(c[0] > c[1] && c[0] > c[2], "got {c:?}");
     }
 
-    /// A fully-gray image (zero saturation) falls back to mid-gray, no NaN.
     #[test]
     fn primary_color_grayscale_fallback() {
         let art = AlbumArt::new(2, 1, vec![100, 100, 100, 255, 40, 40, 40, 255]);
         assert_eq!(art.primary_color(), [128, 128, 128]);
     }
 
-    /// A dark dominant color is lifted so its max channel reaches 170.
     #[test]
     fn primary_color_lifts_dark() {
-        // Single dark-blue saturated pixel.
         let art = AlbumArt::new(1, 1, vec![0, 0, 60, 255]);
         let c = art.primary_color();
         assert_eq!(c.iter().copied().max(), Some(170));
@@ -534,25 +376,19 @@ mod tests {
     #[test]
     fn percent_decode_spaces_and_literals() {
         assert_eq!(percent_decode("/tmp/My%20Cover.jpg"), "/tmp/My Cover.jpg");
-        // Bad escape left verbatim.
         assert_eq!(percent_decode("/a%2"), "/a%2");
         assert_eq!(percent_decode("/plain/path.png"), "/plain/path.png");
     }
 
     #[test]
     fn base64_decode_roundtrip_known_vector() {
-        // "Man" → "TWFu"
         assert_eq!(base64_decode("TWFu").as_deref(), Some(&b"Man"[..]));
-        // With padding + whitespace: "Ma" → "TWE="
         assert_eq!(base64_decode("TW E=").as_deref(), Some(&b"Ma"[..]));
-        // Invalid symbol.
         assert_eq!(base64_decode("****"), None);
     }
 
     #[test]
     fn load_art_unknown_scheme_returns_none() {
-        // Remote URLs are covered by `load_remote`, which is deliberately not
-        // exercised here: it would make the unit suite depend on the network.
         assert!(load_art("weird:thing").is_none());
         assert!(load_art("ftp://example.com/cover.jpg").is_none());
     }
@@ -565,7 +401,6 @@ mod tests {
 
     #[test]
     fn load_art_decodes_data_uri_png() {
-        // Encode a 1x1 red PNG in-memory, wrap as a data: URI, decode back.
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([200, 10, 10, 255]));
         let mut buf = std::io::Cursor::new(Vec::new());
         image::DynamicImage::ImageRgba8(img)
@@ -578,8 +413,6 @@ mod tests {
         assert_eq!(&art.pixels[..4], &[200, 10, 10, 255]);
     }
 
-    /// Wrapper over the production encoder, so the round-trip test exercises
-    /// the encoder the web bridge actually ships.
     fn base64_encode(data: &[u8]) -> String {
         let mut out = String::new();
         base64_encode_into(data, &mut out);
@@ -594,8 +427,6 @@ mod tests {
         assert_eq!(base64_encode(b""), "");
     }
 
-    /// The thumbnail URI must carry the exact prefix workshop pages strip, and
-    /// must decode back to an image (round-trip through `load_art`).
     #[test]
     fn png_data_uri_round_trips_through_load_art() {
         let art = AlbumArt::new(2, 1, vec![10, 200, 30, 255, 0, 0, 0, 255]);
@@ -606,7 +437,6 @@ mod tests {
         assert_eq!(&back.pixels[..4], &[10, 200, 30, 255]);
     }
 
-    /// Oversized art is downscaled so the inline payload stays bounded.
     #[test]
     fn png_data_uri_downscales_to_the_edge_cap() {
         let w = MAX_THUMBNAIL_EDGE * 2;
@@ -616,8 +446,6 @@ mod tests {
         assert_eq!(back.height, MAX_THUMBNAIL_EDGE / 2);
     }
 
-    /// A pixel buffer that disagrees with its declared size yields `None`
-    /// rather than panicking (V9).
     #[test]
     fn png_data_uri_rejects_inconsistent_pixels() {
         let art = AlbumArt::new(4, 4, vec![0; 8]);

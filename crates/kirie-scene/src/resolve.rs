@@ -1,10 +1,3 @@
-//! Property resolution and asset loading → the immutable [`SceneModel`].
-//!
-//! Spec: docs/format-scene-json.md §3.2 (bindings connect a field to a
-//! property), §3.3 (conditional bindings become `property == C`), §9–§11 (asset
-//! files loaded by path). [`SceneModel`] is the resolved snapshot the renderer
-//! consumes (SPEC.md §V3: `Clone + Send`, serde-serializable for bake).
-
 use serde::{Deserialize, Serialize};
 
 use crate::material::{EffectFile, Material, ModelFile};
@@ -14,11 +7,6 @@ use crate::property::{PropertyBag, Resolvable};
 use crate::scene::{Camera, General, Scene};
 use crate::user::{ConstantValues, UserRef, UserSetting};
 
-/// Resolve one user setting against the bag (docs/format-scene-json.md §3.2/§3.3).
-///
-/// A `Name` binding overwrites the value with the property's value (kept if the
-/// property is undeclared); a `Conditional` binding sets the value to the §3.3
-/// boolean `property == condition`. Script drivers are left for the runtime.
 pub fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &PropertyBag) {
     match &us.user {
         Some(UserRef::Name(name)) => {
@@ -36,11 +24,6 @@ pub fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &Property
     }
 }
 
-/// Resolve a script's `scriptproperties` map in place: each entry may be a
-/// plain value or a `{user, value}` setting (docs §3.2/§3.3). The script
-/// engine receives PLAIN values — handing it the raw binding object made JS
-/// truthiness read `{user, value: false}` as `true` (3421423611's clock
-/// showed seconds and 24h time with both bound `false`).
 pub fn resolve_script_properties(props: &mut serde_json::Map<String, serde_json::Value>, bag: &PropertyBag) {
     use serde_json::Value;
     for v in props.values_mut() {
@@ -49,8 +32,6 @@ pub fn resolve_script_properties(props: &mut serde_json::Map<String, serde_json:
             continue;
         };
         let resolved = match o.get("user") {
-            // `"user": "propname"` — the property's current value, else the
-            // literal fallback.
             Some(Value::String(name)) => bag.get(name).map_or(fallback, |pv| match pv {
                 crate::property::PropertyValue::Bool(b) => Value::Bool(*b),
                 crate::property::PropertyValue::Number(n) => {
@@ -58,7 +39,6 @@ pub fn resolve_script_properties(props: &mut serde_json::Map<String, serde_json:
                 }
                 other => Value::String(other.as_condition_string()),
             }),
-            // `"user": {"name": …, "condition": …}` — §3.3 boolean.
             Some(Value::Object(u)) => {
                 let name = u.get("name").and_then(Value::as_str);
                 let condition = u.get("condition").and_then(Value::as_str);
@@ -76,11 +56,6 @@ pub fn resolve_script_properties(props: &mut serde_json::Map<String, serde_json:
     }
 }
 
-/// Resolve a `constantshadervalues` map in place.
-/// Re-resolve a material pass's `constantshadervalues` against `bag` in place.
-/// Bindings persist after the initial resolve (docs §3.2), so a live
-/// `setProperty` can call this to update a running pass's shader-parameter values
-/// without a rebuild.
 pub fn resolve_constants(constants: &mut ConstantValues, bag: &PropertyBag) {
     for us in constants.values_mut() {
         resolve_us(us, bag);
@@ -88,16 +63,12 @@ pub fn resolve_constants(constants: &mut ConstantValues, bag: &PropertyBag) {
 }
 
 impl Camera {
-    /// Re-resolve the property-bound camera fields (currently `fov`) against the
-    /// bag — for a live `setProperty` on the FOV slider (docs §3.2).
     pub fn reresolve(&mut self, bag: &PropertyBag) {
         resolve_us(&mut self.fov, bag);
     }
 }
 
 impl General {
-    /// Resolve every property-bound `general` field against the bag. Public so a
-    /// live `setProperty` can re-resolve bloom/ambient/clearcolor etc. in place.
     pub fn resolve(&mut self, bag: &PropertyBag) {
         resolve_us(&mut self.ambientcolor, bag);
         resolve_us(&mut self.skylightcolor, bag);
@@ -118,7 +89,6 @@ impl General {
 }
 
 impl Object {
-    /// Resolve every property-bound field of this object against the bag.
     fn resolve(&mut self, bag: &PropertyBag) {
         resolve_us(&mut self.base.origin, bag);
         resolve_us(&mut self.base.scale, bag);
@@ -218,19 +188,13 @@ impl ParticleObject {
     }
 }
 
-/// Resolve every pass's `constantshadervalues` in a material.
 fn resolve_material(material: &mut Material, bag: &PropertyBag) {
     for pass in &mut material.passes {
         resolve_constants(&mut pass.constantshadervalues, bag);
     }
 }
 
-/// A source of asset-file bytes by relative path (pkg entry, loose dir, …).
 pub trait AssetSource: Sync {
-    /// Load the raw bytes of `path`, or `None` if it is not available.
-    ///
-    /// `Sync` supertrait: the renderer's object-build loop shares one source
-    /// across worker threads (parallel texture/shader loads).
     fn load(&self, path: &str) -> Option<Vec<u8>>;
 }
 
@@ -240,17 +204,12 @@ impl<F: Fn(&str) -> Option<Vec<u8>> + Sync> AssetSource for F {
     }
 }
 
-/// An asset that could not be loaded or parsed during resolution
-/// (docs/format-scene-json.md §9–§11).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetProblem {
-    /// The referenced asset path.
     pub path: String,
-    /// Why it failed (missing, invalid JSON, required key absent).
     pub reason: String,
 }
 
-/// Load and parse a JSON asset, recording a problem on failure.
 fn load_json(
     source: &dyn AssetSource,
     path: &str,
@@ -275,26 +234,14 @@ fn load_json(
     }
 }
 
-/// The resolved, immutable scene snapshot the renderer consumes.
-///
-/// Holds a fully-resolved [`Scene`] (property bindings collapsed, asset files
-/// loaded) and the [`PropertyBag`] it resolved against so a later `setProperty`
-/// can produce a fresh snapshot. `Clone + Send + Serialize` per SPEC.md §V3.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SceneModel {
-    /// The resolved scene graph.
     pub scene: Scene,
 }
 
 impl SceneModel {
-    /// Resolve a parsed [`Scene`] against a [`PropertyBag`]
-    /// (docs/format-scene-json.md §3.2). Collapses every property binding into
-    /// its current value; asset files are loaded separately via
-    /// [`SceneModel::load_assets`].
     pub fn resolve(mut scene: Scene, bag: &PropertyBag) -> Self {
         scene.general.resolve(bag);
-        // The camera FOV is commonly bound to a `fov` slider — resolve it so the
-        // user's FOV drives the perspective (a static parse ignored it).
         resolve_us(&mut scene.camera.fov, bag);
         for object in &mut scene.objects {
             object.resolve(bag);
@@ -302,14 +249,6 @@ impl SceneModel {
         SceneModel { scene }
     }
 
-    /// Re-resolve the whole model against `bag` in place. Bindings persist
-    /// after resolution (docs §3.2 — `UserSetting` keeps its `user` ref), so
-    /// this collapses every binding to the new bag's values: it is exactly the
-    /// resolution pass [`SceneModel::resolve`] + [`SceneModel::load_assets`]
-    /// perform, re-runnable. This is what lets a prebaked bundle store the
-    /// DEFAULTS-resolved model once and serve every property override without
-    /// re-baking (scene/bundle.rs), and what a live `setProperty` rebuild
-    /// avoids re-parsing for.
     pub fn reresolve(&mut self, bag: &PropertyBag) {
         self.scene.general.resolve(bag);
         resolve_us(&mut self.scene.camera.fov, bag);
@@ -318,12 +257,6 @@ impl SceneModel {
         }
     }
 
-    /// Load every referenced material / effect / model / particle file from
-    /// `source`, filling the `resolved` slots (docs/format-scene-json.md
-    /// §9–§11, §14.2), then re-resolve the newly-loaded materials against
-    /// `bag`. Returns the assets that could not be loaded/parsed (empty on a
-    /// fully-resolvable scene). Builtin shared assets (WE `assets/`) are not
-    /// referenced by these JSON files, so a self-contained pkg resolves fully.
     pub fn load_assets(&mut self, source: &dyn AssetSource, bag: &PropertyBag) -> Vec<AssetProblem> {
         let mut problems = Vec::new();
         for object in &mut self.scene.objects {
@@ -333,7 +266,6 @@ impl SceneModel {
                 _ => {}
             }
         }
-        // Newly-loaded materials carry their own constantshadervalues bindings.
         for object in &mut self.scene.objects {
             object.resolve(bag);
         }
@@ -341,8 +273,6 @@ impl SceneModel {
     }
 }
 
-/// Load an image object's model file, its material, and every effect file/pass
-/// material (docs/format-scene-json.md §8/§9/§10/§11).
 fn load_image_assets(img: &mut ImageObject, source: &dyn AssetSource, problems: &mut Vec<AssetProblem>) {
     if let Some(value) = load_json(source, &img.image, problems) {
         match ModelFile::from_value(&value) {
@@ -373,8 +303,6 @@ fn load_image_assets(img: &mut ImageObject, source: &dyn AssetSource, problems: 
     }
 }
 
-/// Load a particle object's external definition (if any) and its material
-/// (docs/format-scene-json.md §14.2).
 fn load_particle_assets(p: &mut ParticleObject, source: &dyn AssetSource, problems: &mut Vec<AssetProblem>) {
     if let Some(path) = p.particle_file.clone()
         && let Some(value) = load_json(source, &path, problems)

@@ -1,65 +1,34 @@
-//! Global pointer position via the Hyprland IPC socket (T26).
-//!
-//! A wallpaper layer surface has an empty input region — the compositor never
-//! sends it `wl_pointer` events — so, like the reference's `WaylandMouseInput`,
-//! the cursor is polled out-of-band from Hyprland's control socket
-//! (`$XDG_RUNTIME_DIR/hypr/<HIS>/.socket.sock`, request `cursorpos`, reply
-//! `"x, y"` in global logical coordinates). A background thread polls at
-//! ~60 Hz into a lock-guarded slot the render thread reads per frame (SPEC
-//! §V4: the render thread never blocks on the socket).
-//!
-//! On non-Hyprland compositors the poller never starts and the position stays
-//! `None`; consumers fall back to the centered pointer they used before.
-
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
-/// Pointer button state, fed by the Wayland seat listener.
-///
-/// Buttons arrive only while the cursor is over the wallpaper surface — that
-/// is, over bare desktop — which is exactly the reference's semantics: a
-/// click on a window belongs to the window, a click on the desktop belongs
-/// to the wallpaper.
 #[derive(Clone, Default)]
 pub struct PointerButtons {
     left: Arc<AtomicBool>,
 }
 
 impl PointerButtons {
-    /// Whether the left button is currently held over the wallpaper.
     #[must_use]
     pub fn left(&self) -> bool {
         self.left.load(Ordering::Relaxed)
     }
 
-    /// Record a left-button transition (seat listener only).
     pub(crate) fn set_left(&self, down: bool) {
         self.left.store(down, Ordering::Relaxed);
     }
 }
 
-/// Shared global cursor position (logical coordinates), `None` until the first
-/// successful poll (or forever, off Hyprland).
 #[derive(Clone, Default)]
 pub struct PointerPoll {
     pos: Arc<RwLock<Option<(f64, f64)>>>,
-    /// Demand gate, written by the platform: true while at least one output
-    /// is live (unpaused, non-static). While false the poller sleeps in long
-    /// strides and opens no sockets — a fullscreen game or an all-static
-    /// desktop costs zero pointer round-trips.
     active: Arc<AtomicBool>,
 }
 
 impl PointerPoll {
-    /// Start the poller if a Hyprland instance is reachable. Always returns a
-    /// handle; it just stays `None` when there is nothing to poll.
     #[must_use]
     pub fn start() -> Self {
         let handle = PointerPoll {
-            // Assume demand until the platform's first recompute says
-            // otherwise — the launch frame wants a real pointer.
             active: Arc::new(AtomicBool::new(true)),
             ..PointerPoll::default()
         };
@@ -68,8 +37,6 @@ impl PointerPoll {
         };
         let slot = handle.pos.clone();
         let active = handle.active.clone();
-        // The engine runs for the process lifetime; the poller thread parks on
-        // sleep and exits with the process (detached by design, like audio).
         let _ = std::thread::Builder::new()
             .name("kirie-pointer-poll".into())
             .spawn(move || {
@@ -88,19 +55,16 @@ impl PointerPoll {
         handle
     }
 
-    /// Platform-side demand gate (see the field doc).
     pub(crate) fn set_active(&self, active: bool) {
         self.active.store(active, Ordering::Relaxed);
     }
 
-    /// The latest global cursor position, if known.
     #[must_use]
     pub fn get(&self) -> Option<(f64, f64)> {
         self.pos.read().ok().and_then(|g| *g)
     }
 }
 
-/// `$XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket.sock`.
 fn hypr_socket_path() -> Option<std::path::PathBuf> {
     let run = std::env::var_os("XDG_RUNTIME_DIR")?;
     let his = std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE")?;
@@ -111,7 +75,6 @@ fn hypr_socket_path() -> Option<std::path::PathBuf> {
     p.exists().then_some(p)
 }
 
-/// One `cursorpos` round-trip. Any failure ⇒ `None` (treated as unknown).
 fn query_cursorpos(sock: &std::path::Path) -> Option<(f64, f64)> {
     let mut s = std::os::unix::net::UnixStream::connect(sock).ok()?;
     s.set_read_timeout(Some(Duration::from_millis(50))).ok()?;

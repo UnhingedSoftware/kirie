@@ -1,40 +1,3 @@
-//! Run-mode dispatch for the compat surface (docs/compat-cli.md §3.3): pick
-//! the exit-early modes (`--list-properties*`, `--screenshot`) or run the
-//! per-screen wallpapers on the wayland presentation layer with the control
-//! socket wired in.
-//!
-//! Per-screen dispatch by resolved type (task scope): video → kirie-video,
-//! image/gif/`.tex` file → kirie-render, scene → kirie-render scene renderer,
-//! web → the kirie-web CEF backend **when built with `--features web-cef`**
-//! (a [`WebRenderer`] blitting CEF's off-screen frames through the presentation
-//! layer). An application-type item is launch-fatal with the reference's exact
-//! refusal ("Application wallpapers are not supported on this platform",
-//! WallpaperParser.cpp:22-24 — the C++ exception escapes the startup
-//! `loadBackgrounds` and kills the whole launch). Any other background that
-//! cannot run on this build — e.g. a web item in a binary without the CEF
-//! backend — gets a clean per-screen message + nonzero exit *unless* another
-//! screen can run (doc §3.1: unconfigured/unsupported screens do not sink the
-//! whole launch when a sibling is renderable).
-//!
-//! # Web feature variants
-//!
-//! * **`web-cef`** — the Chromium Embedded Framework off-screen backend. It is
-//!   a [`kirie_platform::Renderer`] (it uploads CEF's BGRA frames to a texture
-//!   and blits), so it slots straight into the wgpu presentation layer here and
-//!   into `--screenshot`.
-//! * **`web-webview`** — webkit2gtk has no off-screen/pixel-readback path
-//!   (upstream won't-fix; see `kirie-web/src/webview/mod.rs` for the
-//!   API-level evidence), so this variant presents web wallpapers NATIVELY:
-//!   the engine spawns the out-of-process `kirie-webviewhost`, which owns a
-//!   gtk-layer-shell window on the compositor's background layer and lets
-//!   webkit render straight into it. The engine's own surface stays black
-//!   beneath it ([`WebRenderer`] over a backend whose `latest_frame()` is
-//!   always `None`). `--screenshot` of web items stays CEF-only.
-//! * **Both enabled** — the CEF backend is preferred (it is the one that
-//!   composites through this layer).
-//! * **Neither** — the default build: web wallpapers report a clean message
-//!   naming the two features to rebuild with.
-
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -60,19 +23,12 @@ use crate::compat::webfeed::EngineWebFeed;
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
 use kirie_web::{WebBackend, WebRenderer, WebSize};
 
-/// The live web backend for this build. CEF (off-screen, composited) wins
-/// when both features are on; the webview build uses the out-of-process
-/// `kirie-webviewhost` (native background-layer presentation, no frames).
 #[cfg(feature = "web-cef")]
 type LiveWebBackend = kirie_web::hosted::HostedBackend;
 #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
 type LiveWebBackend = kirie_web::viewhost::ViewHostBackend;
 
-/// `--render-scale`, stored once at launch for every scene build (including
-/// live swaps/preloads, which share the same engine invocation). f32 bits in an
-/// atomic; 1.0 when unset. The reference treats render scale as engine-global
-/// too (FBOProvider root scale).
-static RENDER_SCALE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000); // 1.0f32
+static RENDER_SCALE_BITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
 
 pub(crate) fn set_render_scale(scale: f32) {
     let s = if scale.is_finite() {
@@ -87,8 +43,6 @@ pub(crate) fn render_scale() -> f32 {
     f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// `--disable-parallax`, stored once at launch like [`RENDER_SCALE_BITS`]
-/// (the reference keeps it engine-global in settings.mouse.disableparallax).
 static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn set_disable_parallax(on: bool) {
@@ -99,8 +53,6 @@ pub(crate) fn disable_parallax() -> bool {
     DISABLE_PARALLAX.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// `--fit-render-to-output`, stored once at launch like [`RENDER_SCALE_BITS`]
-/// so live swaps and preloads inherit it.
 static FIT_RENDER_TO_OUTPUT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn set_fit_render_to_output(on: bool) {
@@ -111,7 +63,6 @@ pub(crate) fn fit_render_to_output() -> bool {
     FIT_RENDER_TO_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Map the compat scaling enum to kirie-video's (doc §3.1 value table).
 #[must_use]
 pub fn to_video_scaling(mode: ScalingMode) -> kirie_video::ScalingMode {
     match mode {
@@ -122,7 +73,6 @@ pub fn to_video_scaling(mode: ScalingMode) -> kirie_video::ScalingMode {
     }
 }
 
-/// Map the compat scaling enum to kirie-render's (doc §3.1 value table).
 #[must_use]
 pub fn to_render_scaling(mode: ScalingMode) -> kirie_render::ScalingMode {
     match mode {
@@ -133,13 +83,6 @@ pub fn to_render_scaling(mode: ScalingMode) -> kirie_render::ScalingMode {
     }
 }
 
-/// Whether this spec's renderer reads the system-audio spectrum.
-///
-/// Scenes bind it to the `g_AudioSpectrum*` uniforms; web wallpapers forward it
-/// to the page's `wallpaperRegisterAudioListener` (docs/subsystems-misc.md §1.3
-/// "Consumers", §3.5). Nothing else touches it, and the capture is only started
-/// when some output answers `true` here — an image/video-only launch still
-/// never connects to PulseAudio.
 fn wants_audio(spec: &RunSpec) -> bool {
     match spec {
         RunSpec::Scene { .. } => true,
@@ -149,25 +92,11 @@ fn wants_audio(spec: &RunSpec) -> bool {
     }
 }
 
-/// Whether this spec's renderer reads MPRIS now-playing state.
-///
-/// Only web wallpapers do today — they hand it to the page's four
-/// `wallpaperRegisterMedia*Listener` callbacks (docs/subsystems-misc.md §3.5).
-/// The scene-side consumer described in §5 (the `$mediaThumbnail` virtual
-/// asset) is not wired yet, so a build with no web backend starts no D-Bus
-/// worker at all.
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn wants_media(spec: &RunSpec) -> bool {
     matches!(spec, RunSpec::Web { .. })
 }
 
-/// Build the audio-capture config from the parsed CLI (doc §2).
-///
-/// `--no-audio-processing` disables the reactive capture entirely (permanent
-/// silent spectrum, no threads — cpp `settings.audio.audioprocessing`).
-/// `--audio-device` selects the PulseAudio *source* (`None` = default sink
-/// monitor). `--silent` mutes the *wallpaper's own audio output* (video path),
-/// not the system-audio reactive input, so it does not gate capture here.
 #[must_use]
 pub fn audio_config(args: &CompatArgs) -> AudioConfig {
     let mut config = if args.no_audio_processing {
@@ -175,23 +104,16 @@ pub fn audio_config(args: &CompatArgs) -> AudioConfig {
     } else {
         AudioConfig::with_device(args.audio_device.clone())
     };
-    // On battery the FFT halves its publish rate (compat::power).
     config.power_save = Some(power_save_flag());
     config
 }
 
-/// The process-wide on-battery flag (written by the power watcher, read by
-/// the audio FFT and web feed cadences). A `OnceLock` global for the same
-/// reason as the render-scale bits: it must reach lazily-built renderers
-/// without threading through every build path.
 pub(crate) fn power_save_flag() -> Arc<std::sync::atomic::AtomicBool> {
     static FLAG: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> = std::sync::OnceLock::new();
     FLAG.get_or_init(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
         .clone()
 }
 
-/// The on-battery frame cap (`--battery-fps`, retunable via `set batteryfps`).
-/// `0` disables the battery profile.
 pub(crate) fn battery_fps_target() -> Arc<std::sync::atomic::AtomicU32> {
     static TARGET: std::sync::OnceLock<Arc<std::sync::atomic::AtomicU32>> = std::sync::OnceLock::new();
     TARGET
@@ -199,27 +121,9 @@ pub(crate) fn battery_fps_target() -> Arc<std::sync::atomic::AtomicU32> {
         .clone()
 }
 
-/// The system-audio capture and the MPRIS now-playing source, each started the
-/// first time a wallpaper actually asks for it.
-///
-/// Both used to be decided once at launch, from the wallpapers named on the
-/// command line. That was right when an engine ran one wallpaper for its
-/// lifetime, and wrong now: a single engine drives every output and swaps
-/// wallpapers over the control socket, so an engine launched on a scene can be
-/// showing a web wallpaper a moment later. MPRIS is wanted by web wallpapers
-/// only, so that engine started no D-Bus worker and the page's
-/// `wallpaperRegisterMedia*Listener` callbacks never fired for the life of the
-/// process — the wallpaper looked broken, with nothing in any log to say why.
-///
-/// Deferring the decision to the point of use keeps what the launch-time gate
-/// was actually for (an image wallpaper still opens neither PulseAudio nor
-/// D-Bus) while making it track what is on screen rather than what was on the
-/// command line.
 pub(crate) struct LazySources {
     audio_config: AudioConfig,
     audio: std::sync::OnceLock<Arc<AudioCapture>>,
-    /// Only a web backend reads now-playing state, so the field only exists in
-    /// a build that has one.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     media: std::sync::OnceLock<Arc<MediaSource>>,
 }
@@ -234,9 +138,6 @@ impl LazySources {
         }
     }
 
-    /// The shared capture handle, connecting PulseAudio on the first call.
-    /// `--no-audio-processing` still yields a handle here — a disabled config
-    /// starts no threads and reads as permanent silence (V9).
     fn audio(&self) -> Arc<AudioCapture> {
         self.audio
             .get_or_init(|| {
@@ -247,13 +148,10 @@ impl LazySources {
             .clone()
     }
 
-    /// The shared MPRIS source, connecting D-Bus on the first call.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     fn media(&self) -> Arc<MediaSource> {
         self.media
             .get_or_init(|| {
-                // Default 1 s tick: the reference re-fetches every 2 s, and the
-                // page's timeline listener is what benefits from the faster one.
                 let src = Arc::new(MediaSource::start(MediaConfig::default()));
                 tracing::info!(status = ?src.status(), "mpris media source");
                 src
@@ -261,20 +159,16 @@ impl LazySources {
             .clone()
     }
 
-    /// The capture handle if `spec` reads the spectrum, else `None` — the call
-    /// that keeps an image-only output from ever opening PulseAudio.
     fn audio_for(&self, spec: &RunSpec) -> Option<Arc<AudioCapture>> {
         wants_audio(spec).then(|| self.audio())
     }
 
-    /// The now-playing source if `spec` reads it, else `None`.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     fn media_for(&self, spec: &RunSpec) -> Option<Arc<MediaSource>> {
         wants_media(spec).then(|| self.media())
     }
 }
 
-/// Map the compat clamp enum to kirie-render's (doc §3.1 value table).
 #[must_use]
 pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
     match mode {
@@ -284,17 +178,10 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
     }
 }
 
-/// Dispatch the validated args to the right run mode (doc §3.3, §3.6, §3.8).
 pub fn dispatch(args: CompatArgs) -> ExitCode {
-    // Launch-wide render settings, applied before ANY mode runs. These used to
-    // be set inside `run_wallpapers`, which `--screenshot` returns before ever
-    // reaching — so a screenshot silently ignored `--render-scale` and rendered
-    // the scene at a different size than the live wallpaper it was meant to
-    // reproduce.
     set_render_scale(args.render_scale as f32);
     set_fit_render_to_output(args.fit_render_to_output);
 
-    // `-l`/`--list-properties-json` load, print, and exit (doc §3.8).
     if args.list_properties || args.list_properties_json {
         return match list_props::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
@@ -305,9 +192,6 @@ pub fn dispatch(args: CompatArgs) -> ExitCode {
         };
     }
 
-    // `--screenshot`: kirie captures one frame offscreen and exits (task
-    // scope; the C++ engine keeps running, doc §3.6 — kirie's offscreen shot
-    // exists to unlock the P4 SSIM gate).
     if let Some(path) = args.screenshot.clone() {
         return run_screenshot(&args, &path);
     }
@@ -315,7 +199,6 @@ pub fn dispatch(args: CompatArgs) -> ExitCode {
     run_wallpapers(args)
 }
 
-/// Offscreen `--screenshot` capture of the default background (doc §3.6).
 fn run_screenshot(args: &CompatArgs, path: &Path) -> ExitCode {
     let Some(bg) = args.default_background.clone() else {
         eprintln!("At least one background ID must be specified");
@@ -328,12 +211,6 @@ fn run_screenshot(args: &CompatArgs, path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Screenshot uses the window/global scaling+clamp (doc §3.1: screenshot is
-    // a single composited background, no per-screen viewport here).
-    // A short-lived capture for reactive scenes: it connects off-thread and
-    // publishes lock-free, so the shot reflects whatever audio is playing by the
-    // time the delay frames elapse (silent/zero if none). Disabled by
-    // `--no-audio-processing` (doc §2).
     let audio = Arc::new(AudioCapture::start(audio_config(args)));
     match screenshot::capture(
         &wallpaper,
@@ -355,66 +232,38 @@ fn run_screenshot(args: &CompatArgs, path: &Path) -> ExitCode {
     }
 }
 
-/// What to build for one screen once its background is classified.
 #[derive(Clone)]
 enum RunSpec {
-    /// Video wallpaper (kirie-video).
     Video {
-        /// Media file path.
         media: PathBuf,
-        /// Output scaling mode for this screen.
         scaling: ScalingMode,
     },
-    /// Image/gif/`.tex` wallpaper (kirie-render).
     Image {
-        /// Content file path.
         file: PathBuf,
-        /// Output scaling mode for this screen.
         scaling: ScalingMode,
-        /// UV clamp mode for this screen.
         clamp: ClampMode,
     },
-    /// Scene wallpaper (kirie-render scene renderer).
     Scene {
-        /// Workshop item directory (`scene.pkg` + `project.json`).
         dir: PathBuf,
-        /// Output scaling mode for this screen.
         scaling: ScalingMode,
-        /// UV clamp mode for this screen.
         clamp: ClampMode,
     },
-    /// Web wallpaper (kirie-web). Only constructed in a build with a web
-    /// backend: `web-cef` (off-screen frames composited by the engine) or
-    /// `web-webview` (out-of-process webkit presenting natively on the
-    /// background layer). No scaling/clamp — the page fills the surface.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     Web {
-        /// `file://` (or `http(s)://`) URL of the wallpaper's entry page.
         url: String,
-        /// The wallpaper directory (its `project.json` declares the typed user
-        /// properties delivered to the page as `applyUserProperties`, doc §3.5).
         dir: PathBuf,
     },
-    /// Not runnable (unsupported type or a load error) — this output renders
-    /// black; a note was already emitted at startup.
     Skip,
 }
 
-/// One resolved screen target: its key, background path, and build spec.
 struct Target {
     screen: String,
     bg: PathBuf,
     spec: RunSpec,
     runnable: bool,
-    /// The background is an application-type item, which is launch-fatal in
-    /// the reference (WallpaperParser.cpp:22-24 throws out of the startup
-    /// `loadBackgrounds`, main catches → exit 1) — matched in
-    /// [`run_wallpapers`].
     app_fatal: bool,
 }
 
-/// Run the per-screen wallpapers on the wayland presentation layer, with the
-/// control socket (if any) wired to a dedicated applier thread.
 fn run_wallpapers(args: CompatArgs) -> ExitCode {
     set_disable_parallax(args.disable_parallax);
     let window_mode = args.mode != WindowMode::DesktopBackground;
@@ -424,28 +273,18 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    // Reference parity: an application-type background is launch-fatal even
-    // when sibling screens could run — `WallpaperParser::parse` throws
-    // "Application wallpapers are not supported on this platform"
-    // (WallpaperParser.cpp:22-24) out of the startup `loadBackgrounds`
-    // (WallpaperApplication.cpp:72/187), main catches it and exits 1. The
-    // message appears twice on stderr (`sLog.exception` writes it, then main's
-    // catch prints `e.what()` — the same string).
     if targets.iter().any(|t| t.app_fatal) {
         eprintln!("Application wallpapers are not supported on this platform");
         eprintln!("Application wallpapers are not supported on this platform");
         return ExitCode::FAILURE;
     }
 
-    // If nothing is runnable, fail with the per-screen reasons (doc §3.3;
-    // task scope: scene/web → clean message + nonzero exit).
     if !targets.iter().any(|t| t.runnable) {
         for t in &targets {
             eprintln!("{}: {} — {}", t.screen, t.bg.display(), unrunnable_note(&t.bg));
         }
         return ExitCode::FAILURE;
     }
-    // Warn about the non-runnable siblings that will render black.
     for t in &targets {
         if !t.runnable {
             eprintln!(
@@ -457,9 +296,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         }
     }
 
-    // Bind the control socket first so the daemon's readiness probe (a socket
-    // file within ~5s of exec, doc §8.3) is satisfied before the slower
-    // wayland/GPU bring-up.
     let seed: Vec<(String, Option<PathBuf>)> = targets
         .iter()
         .map(|t| (t.screen.clone(), Some(t.bg.clone())))
@@ -467,30 +303,17 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let (socket, ipc_app) = setup_socket(&args, seed);
     let registrar = ipc_app.as_ref().map(IpcApp::registrar);
 
-    // On SIGTERM/SIGINT unlink the control socket like the clean-exit path
-    // (the daemon TERMs the engine before removing the socket, doc §1). No-op
-    // when no `--control-socket` was given.
     signals::install_cleanup(args.control_socket.clone());
 
-    // Per-screen build specs owned by the factory (must be `'static`).
     let specs: Vec<(String, RunSpec)> = targets.into_iter().map(|t| (t.screen, t.spec)).collect();
-    // Captured before `specs` moves into the renderer factory below.
     let prebake_root: Option<PathBuf> = specs.iter().find_map(|(_, spec)| match spec {
         RunSpec::Scene { dir, .. } => dir.parent().map(std::path::Path::to_path_buf),
         _ => None,
     });
     let volume = args.volume;
     let silent = args.silent;
-    // `--set-property` overrides (scene user properties), captured for the
-    // factory closure — folded into the scene's property bag at build time so
-    // color/combo/slider changes drive the render (docs/format-scene-json.md §3.2).
     let properties = args.set_properties.clone();
 
-    // Playlists to rotate (reference `initializePlaylists`,
-    // WallpaperApplication.cpp:265-327): the window-mode default playlist
-    // drives the single `default` wallpaper; in desktop mode each screen with
-    // a `--playlist` rotates independently. Each carries the currently shown
-    // path so rotation starts from it (WallpaperApplication.cpp:290-298).
     let active_playlists: Vec<(String, PlaylistDefinition, Option<PathBuf>)> = if window_mode {
         args.window_playlist
             .clone()
@@ -515,47 +338,24 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let playlist_stop = Arc::new(AtomicBool::new(false));
     let mut playlist_handle: Option<std::thread::JoinHandle<()>> = None;
 
-    // One shared system-audio capture and one shared MPRIS source for every
-    // output (the spectrum is scene-global, docs subsystems-misc.md §1.3; the
-    // now-playing state is per-machine, §5). Neither is started here: each
-    // begins on the first build that asks for it, so an image-only output still
-    // opens neither PulseAudio nor D-Bus (SPEC.md §V5/§V6 spirit) while a
-    // wallpaper swapped in later over the socket gets both.
     let sources = Arc::new(LazySources::new(audio_config(&args)));
 
-    // Automute: mute the wallpaper's own audio while another application is
-    // playing sound (docs subsystems-misc.md §1.2/§2.3). `--noautomute`
-    // disables it. Only video wallpapers expose a mute control here (the sole
-    // consumer wired), so the PulseAudio detector is only opened when a video
-    // output exists — an image/scene-only launch never connects (no needless
-    // work, SPEC §V6 spirit; scene sound muting is not yet plumbed).
     let has_video = specs
         .iter()
         .any(|(_, spec)| matches!(spec, RunSpec::Video { .. }));
     let automute = Arc::new(AutoMute::start(!args.noautomute && has_video));
     tracing::info!(enabled = automute.enabled(), "automute detector");
 
-    // Video controls registered as outputs come up, so the automute applier can
-    // toggle their mute flag live.
     let video_controls: Arc<Mutex<Vec<VideoControl>>> = Arc::new(Mutex::new(Vec::new()));
     let applier_stop = Arc::new(AtomicBool::new(false));
     let applier = spawn_automute_applier(&automute, &video_controls, &applier_stop);
 
-    // Restrict wallpaper surfaces to the outputs the user actually configured
-    // (`--screen-root <name>`), so unconfigured monitors are left untouched
-    // instead of being blacked out by a stray surface (SPEC T30/V6). Window
-    // mode registers its single wallpaper as `default` (not a real output
-    // name) and is shown on every output, so its screen_roots stay empty.
-    // Computed before the factory takes ownership of `specs`.
     let screen_roots: Vec<String> = if window_mode {
         Vec::new()
     } else {
         specs.iter().map(|(name, _)| name.clone()).collect()
     };
 
-    // Params the IPC applier needs to build a replacement wallpaper off the
-    // render thread for a live `bg`/`preload` (cloned before the factory takes
-    // the originals). Scaling/clamp default to the first configured screen's.
     let (bg_scaling, bg_clamp) = args
         .screens
         .first()
@@ -571,12 +371,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         automute_controls: video_controls.clone(),
     });
 
-    // P1.6: build each output's launch wallpaper on a worker rather than
-    // inside the render thread's first `draw`. The event loop then stays live
-    // during a cold start (IPC answers, configure/resize are handled) and
-    // multi-monitor setups build concurrently instead of one output blocking
-    // the next. Owns its own copy of the specs — the factory keeps its own for
-    // the synchronous fallback (web, `Skip`, and a later output hotplug).
     let initial_specs: std::collections::HashMap<String, RunSpec> =
         specs.iter().map(|(n, s)| (n.clone(), s.clone())).collect();
     let window_spec: Option<RunSpec> = specs.first().map(|(_, s)| s.clone());
@@ -585,7 +379,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let ib_properties = properties.clone();
     let ib_controls = video_controls.clone();
     let initial_build: kirie_platform::InitialBuildFn = Box::new(move |output: &str| {
-        // Same screen→spec resolution as `build_renderer`.
         let (screen_key, spec) = if window_mode {
             ("default".to_owned(), window_spec.clone()?)
         } else {
@@ -593,8 +386,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         };
         match spec {
             RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
-            // Web is `!Send` (render-thread only) and `Skip` renders black —
-            // both stay on the synchronous factory.
             _ => return None,
         }
         let registrar = ib_registrar.clone();
@@ -640,16 +431,12 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         )
     });
 
-    // §V7: platform writes this while any output is fullscreen-paused; the
-    // baker's pause gate below reads it.
     let fullscreen_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let present = kirie_platform::PresentOptions {
         screen_roots,
         activity_paused: Some(fullscreen_paused.clone()),
         fps: u32::try_from(args.fps).ok().filter(|f| *f > 0),
         playback_speed: args.playback_speed,
-        // Fullscreen pause is on by default in the reference engine, so the
-        // flag is the opt-out and inverts here (docs/compat-cli.md §2).
         fullscreen_pause: !args.no_fullscreen_pause,
         fullscreen_pause_only_active: args.fullscreen_pause_only_active,
         fullscreen_pause_ignore_appids: args.fullscreen_pause_ignore_appid.clone(),
@@ -657,13 +444,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         ..Default::default()
     };
 
-    // Background pre-bake (idle, single thread): warm the bundle + shader
-    // caches for every sibling workshop item, so the FIRST switch to a
-    // never-seen wallpaper loads like a warm one. Root = the current
-    // background's workshop directory parent; skipped for non-workshop paths
-    // or with KIRIE_NO_PREBAKE=1. The handle lives for the engine's lifetime.
-    // §V7 pause gate: fullscreen activity (platform-written) OR battery
-    // (power watcher via the power-save flag) suspends the idle baker.
     let prebaker = if std::env::var_os("KIRIE_NO_PREBAKE").is_none() {
         let fullscreen = fullscreen_paused.clone();
         let power = power_save_flag();
@@ -679,9 +459,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     }
     .map(std::sync::Arc::new);
 
-    // On-battery throttle state (see compat::power): the watcher writes,
-    // feed/audio cadences read. Battery fps target is shared so the
-    // `set batteryfps` socket key can retune it live.
     let power_save = power_save_flag();
     let normal_fps = u32::try_from(args.fps).ok().filter(|f| *f > 0);
     let battery_fps = battery_fps_target();
@@ -691,18 +468,10 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
 
     let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {
         Ok(mut platform) => {
-            // Launch builds go to a worker (P1.6); outputs it declines fall
-            // back to the synchronous factory.
-            // A driver we pinned ourselves that yields no usable surface would
-            // leave the desktop black; retry unpinned instead. Never returns
-            // when it acts.
             if platform.output_count() > 0 && platform.surface_count() == 0 {
                 crate::compat::autopin::recover_from_bad_pin();
             }
             platform.set_initial_build(initial_build);
-            // Enable live `bg`/`preload` swaps: hand the applier the render
-            // thread's command channel + the build params (Wayland only; X11
-            // has no channel yet and falls back to relaunch).
             if let (Some(app), Some(cmd_tx)) = (ipc_app.as_ref(), platform.command_sender())
                 && let Ok(mut slot) = app.swap_slot().lock()
             {
@@ -711,9 +480,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
                     build: build_ctx.clone(),
                 });
             }
-            // Playlist rotation rides the same live-swap channel as the socket
-            // `bg` command (the reference drives it from the render loop via
-            // `updatePlaylists`, WallpaperApplication.cpp:962).
             if !active_playlists.is_empty() {
                 match platform.command_sender() {
                     Some(cmd_tx) => {
@@ -731,9 +497,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
                     ),
                 }
             }
-            // On-battery power profile: fps cap + pre-baker pause + halved
-            // feed cadences while unplugged. No-op (not even a thread) on
-            // machines without a battery.
             if let Some(cmd_tx) = platform.command_sender() {
                 power_handle = power::spawn(power::PowerWatch {
                     cmd_tx,
@@ -744,8 +507,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
                     stop: power_stop.clone(),
                 });
             }
-            // A test/CI bound on the otherwise-infinite run; the daemon never
-            // sets it, so live behavior is unchanged (runs until stopped).
             let duration = std::env::var("KIRIE_RUN_SECONDS")
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
@@ -753,8 +514,6 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
             match platform.run(duration) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(err) => {
-                    // Losing the last layer surface is an abnormal exit the
-                    // supervisor relaunches on (doc §5).
                     tracing::error!(%err, "presentation layer stopped");
                     ExitCode::FAILURE
                 }
@@ -766,45 +525,29 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         }
     };
 
-    // Stop the playlist rotator and join it (unpark ends its deadline wait).
     playlist_stop.store(true, Ordering::Relaxed);
     if let Some(h) = playlist_handle {
         h.thread().unpark();
         let _ = h.join();
     }
 
-    // Stop the power watcher and join it (unpark cuts the poll wait short).
     power_stop.store(true, Ordering::Relaxed);
     if let Some(h) = power_handle {
         h.thread().unpark();
         let _ = h.join();
     }
 
-    // Stop the automute applier and join it, then drop the detector (joins its
-    // PulseAudio monitor thread) before returning.
     applier_stop.store(true, Ordering::Relaxed);
     if let Some(h) = applier {
         let _ = h.join();
     }
     drop(automute);
 
-    // Drop the control socket (unlinks the socket file on the clean-exit path,
-    // doc §1) and the IPC app last.
     drop(socket);
     drop(ipc_app);
     exit
 }
 
-/// Spawn the playlist rotation thread — the stand-in for the reference's
-/// per-frame `updatePlaylists` call on the render loop
-/// (WallpaperApplication.cpp:451-475/962): kirie's render thread belongs to the
-/// platform, so a dedicated timer thread polls the same conditions (timer mode,
-/// more than one item, delay elapsed) and drives swaps through the live-swap
-/// channel — the exact path the control socket's `bg` command uses.
-///
-/// `playlists` is `(screen key, definition, currently shown path)`. In window
-/// mode the single `default` wallpaper is swapped via the platform's `"*"`
-/// output selector. Returns `None` when no playlist survives registration.
 fn spawn_playlist_rotator(
     playlists: Vec<(String, PlaylistDefinition, Option<PathBuf>)>,
     window_mode: bool,
@@ -836,10 +579,6 @@ fn spawn_playlist_rotator(
         .name("kirie-playlist".into())
         .spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                // Sleep to the earliest rotation deadline (rotation intervals
-                // are typically minutes; the old loop woke 4×/s to compare
-                // clocks). Capped so a clock jump or an all-manual playlist
-                // still re-checks eventually; shutdown unparks (see the join).
                 let now = Instant::now();
                 let wait = active
                     .iter()
@@ -857,8 +596,6 @@ fn spawn_playlist_rotator(
                     if !state.due(now) {
                         continue;
                     }
-                    // Desktop mode targets the screen's own output; window mode
-                    // swaps the platform's primary output (`"*"`).
                     let swap_screen = if window_mode { "*" } else { screen.as_str() };
                     let screen_key = screen.clone();
                     state.advance(
@@ -874,10 +611,6 @@ fn spawn_playlist_rotator(
         .ok()
 }
 
-/// Playlist candidate preflight (the reference `preflightWallpaper`,
-/// WallpaperApplication.cpp:369-389, parses the item's `project.json` before
-/// switching): can kirie build this item on this build? Web items pass only on
-/// a `web-cef` build (they swap via the render-thread path).
 fn playlist_preflight(
     build: &Arc<BuildContext>,
     screen: &str,
@@ -900,13 +633,6 @@ fn playlist_preflight(
     false
 }
 
-/// Show a playlist item (the reference `setBackground` call in
-/// `advancePlaylist`, WallpaperApplication.cpp:433-437): same dispatch as the
-/// socket `bg` swap — off-thread build + [`RenderCommand::Swap`] for
-/// video/image/scene, render-thread [`RenderCommand::SwapLocal`] for web on a
-/// `web-cef` build. On success the IPC applier is told the new background so
-/// socket `status` stays truthful (reference updates `screenBackgrounds`,
-/// WallpaperApplication.cpp:1050).
 fn playlist_show(
     cmd_tx: &CommandSender,
     build: &Arc<BuildContext>,
@@ -944,10 +670,6 @@ fn playlist_show(
     false
 }
 
-/// Spawn the automute applier thread: while the detector reports another app is
-/// playing, keep every registered video output muted; unmute when it stops. New
-/// controls (later-registered outputs) are caught by the length check. Returns
-/// `None` when automute is disabled (`--noautomute` or no video output).
 fn spawn_automute_applier(
     automute: &Arc<AutoMute>,
     controls: &Arc<Mutex<Vec<VideoControl>>>,
@@ -967,16 +689,14 @@ fn spawn_automute_applier(
                 let mut applied_len = 0usize;
                 while !stop.load(Ordering::Relaxed) {
                     let playing = automute.is_playing();
-                    if let Ok(guard) = controls.lock() {
-                        // Re-apply on a state change or when a new control was
-                        // registered (so late outputs inherit the current mute).
-                        if last != Some(playing) || guard.len() != applied_len {
-                            for c in guard.iter() {
-                                c.set_mute(playing);
-                            }
-                            last = Some(playing);
-                            applied_len = guard.len();
+                    if let Ok(guard) = controls.lock()
+                        && (last != Some(playing) || guard.len() != applied_len)
+                    {
+                        for c in guard.iter() {
+                            c.set_mute(playing);
                         }
+                        last = Some(playing);
+                        applied_len = guard.len();
                     }
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -985,14 +705,9 @@ fn spawn_automute_applier(
     )
 }
 
-/// Build the per-output list of screen targets (doc §3.1, §3.3).
 fn build_targets(args: &CompatArgs) -> Vec<Target> {
     let default_bg = args.default_background.clone();
     if args.mode != WindowMode::DesktopBackground {
-        // Window / preview mode: one wallpaper registered as `default`
-        // (doc §3.3), rendered on every output. With a default playlist its
-        // first item is what actually shows, even over an explicit `--bg`
-        // (WallpaperApplication.cpp:187-195).
         let bg = args
             .window_playlist
             .as_ref()
@@ -1010,8 +725,6 @@ fn build_targets(args: &CompatArgs) -> Vec<Target> {
         )];
     }
 
-    // Desktop-background mode: one target per declared screen; a screen with no
-    // `--bg` inherits `default_background` at load time (doc §3.1).
     args.screens
         .iter()
         .map(|screen| {
@@ -1025,7 +738,6 @@ fn build_targets(args: &CompatArgs) -> Vec<Target> {
         .collect()
 }
 
-/// Classify a screen's background and turn it into a build spec.
 fn make_target(screen: String, bg: String, scaling: ScalingMode, clamp: ClampMode) -> Target {
     let bg_path = PathBuf::from(&bg);
     match resolve::classify(&bg) {
@@ -1058,8 +770,6 @@ fn make_target(screen: String, bg: String, scaling: ScalingMode, clamp: ClampMod
                 bg: bg_path,
                 spec: RunSpec::Skip,
                 runnable: false,
-                // Application items are refused for the whole launch, exactly
-                // like the reference (WallpaperParser.cpp:22-24).
                 app_fatal: kind == "application",
             }
         }
@@ -1087,11 +797,6 @@ fn make_target(screen: String, bg: String, scaling: ScalingMode, clamp: ClampMod
     }
 }
 
-/// Build a target for a web wallpaper (feature-gated on a web backend).
-///
-/// With `web-cef` or `web-webview` the entry page becomes a runnable
-/// [`RunSpec::Web`]; without either the screen is not runnable (see
-/// [`web_unrunnable_note`] for why).
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn make_web_target(screen: String, bg: PathBuf, dir: &Path, file: &str) -> Target {
     let url = resolve::web_entry_url(dir, file);
@@ -1111,8 +816,6 @@ fn make_web_target(screen: String, bg: PathBuf, dir: &Path, file: &str) -> Targe
     }
 }
 
-/// Build a target for a web wallpaper on a build without any web backend: not
-/// runnable (this output stays black; a per-screen note is emitted).
 #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
 fn make_web_target(screen: String, bg: PathBuf, _dir: &Path, _file: &str) -> Target {
     tracing::warn!(%screen, "web wallpaper not runnable in this build");
@@ -1125,15 +828,10 @@ fn make_web_target(screen: String, bg: PathBuf, _dir: &Path, _file: &str) -> Tar
     }
 }
 
-/// A short reason string for a classification failure.
 fn classify_reason(err: &ClassifyError) -> String {
     err.to_string()
 }
 
-/// The per-screen note for a web wallpaper that cannot run on this build,
-/// naming the features to rebuild with. Only reachable in a build with no web
-/// backend at all — both `web-cef` (composited off-screen) and `web-webview`
-/// (out-of-process native-layer webkit) run web items.
 fn web_unrunnable_note() -> String {
     #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
     {
@@ -1141,19 +839,14 @@ fn web_unrunnable_note() -> String {
          (composited) or --features web-webview (system webkit)"
             .to_owned()
     }
-    // A web-capable build never calls this; give it a body so it compiles.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     {
         "web wallpapers are supported on this build".to_owned()
     }
 }
 
-/// The per-screen notice explaining why a non-runnable background stays black
-/// (web/application unimplemented, asset non-renderable, or a load error).
 fn unrunnable_note(bg: &Path) -> String {
     match resolve::classify(&bg.to_string_lossy()) {
-        // Web runnability depends on the compiled web feature; the precise
-        // message lives here rather than in the feature-agnostic classifier.
         Ok(Wallpaper::Web { .. }) => web_unrunnable_note(),
         Ok(w) => w
             .unrunnable_reason()
@@ -1162,7 +855,6 @@ fn unrunnable_note(bg: &Path) -> String {
     }
 }
 
-/// Build one output's renderer from the matching screen spec (or black).
 #[allow(clippy::too_many_arguments)]
 fn build_renderer(
     target: &RenderTarget<'_>,
@@ -1175,12 +867,6 @@ fn build_renderer(
     properties: &[(String, String)],
     automute_controls: &Arc<Mutex<Vec<VideoControl>>>,
 ) -> Box<dyn Renderer> {
-    // Window mode: the single wallpaper is registered as `default` and shown
-    // on every output (doc §3.3). Desktop mode: match by output name. Outputs
-    // the user did not configure never reach here — `PresentOptions::screen_roots`
-    // keeps kirie-platform from creating a surface for them (SPEC T30), matching
-    // the C++ engine which only surfaces the requested screens. The `black`
-    // fallback below is a defensive default only.
     let (screen_key, spec) = if window_mode {
         match specs.first() {
             Some((_, spec)) => ("default".to_owned(), spec),
@@ -1193,10 +879,6 @@ fn build_renderer(
         }
     };
 
-    // Web is built here on the render thread (the CEF client is `!Send`; the
-    // webview client shares the same path for simplicity). Everything else is
-    // `Send` and goes through `build_for_spec`, which the preload /
-    // async-swap paths also call from a worker thread.
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     if let RunSpec::Web { url, dir } = spec {
         return build_web(
@@ -1222,11 +904,6 @@ fn build_renderer(
     )
 }
 
-/// Build the web renderer for `url` on the render thread. Degrades to `black`
-/// on a backend-start failure rather than crashing the output. Shared by the
-/// initial-launch path ([`build_renderer`]) and the live-swap path
-/// ([`BuildContext::build_local_fn`]) so both build web identically. The
-/// backend is [`LiveWebBackend`] — CEF when available, else the webview host.
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
 fn build_web(
     target: &RenderTarget<'_>,
@@ -1237,9 +914,6 @@ fn build_web(
     audio: Option<Arc<AudioCapture>>,
     media: Option<Arc<MediaSource>>,
 ) -> Box<dyn Renderer> {
-    // Initial size is arbitrary: `WebRenderer` resizes the browser surface
-    // to the real output on its first frame. `--silent` mutes the page's audio
-    // (docs/subsystems-misc.md §3: host mute).
     let size = WebSize {
         width: 1920,
         height: 1080,
@@ -1249,22 +923,12 @@ fn build_web(
             if silent {
                 backend.set_muted(true);
             }
-            // Deliver the full typed property set once (project.json defaults
-            // with `--set-property` overrides folded in) — the reference sends
-            // this on the first frame and pages may block init on it
-            // (CWeb.cpp `__wpApplyProps`; the CEF thread queues it until the
-            // page's main frame exists).
             let props = web_props_json(dir, properties);
             if props != "{}" {
                 backend.apply_properties(&props);
             }
             tracing::info!(output = %target.output_name, url, "web wallpaper ready");
             let mut renderer = WebRenderer::new(target, Box::new(backend));
-            // The live data half of the WE bridge: without this the page's
-            // audio + `wallpaperRegisterMedia*Listener` callbacks are
-            // registered and never fired, which is why an audio-reactive page
-            // sat still and a media page sat on "Loading…". The renderer polls
-            // it and pushes only what changed (kirie_web::feed).
             renderer.set_power_save(power_save_flag());
             if let Some(feed) = EngineWebFeed::new(audio, media) {
                 renderer.set_feed(Box::new(feed));
@@ -1283,11 +947,6 @@ fn build_web(
     }
 }
 
-/// The `{name:{value:..}}` JSON batch for a web wallpaper's `applyUserProperties`
-/// (doc §3.5), typed like the reference encoder (`CWeb.cpp`): bool bare, slider
-/// bare number, color an `"r g b"` float string, `text` UI labels skipped,
-/// everything else a JSON string. `--set-property` overrides replace the
-/// project defaults by declared type.
 #[cfg(any(feature = "web-cef", feature = "web-webview"))]
 pub(super) fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> String {
     use kirie_formats::project::{Project, PropertyEntry, PropertyKind};
@@ -1316,11 +975,9 @@ pub(super) fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> Stri
                 format!("{v}")
             }
             PropertyKind::Color { value: [r, g, b] } => {
-                // Override form is "r g b" floats; keep the reference's string form.
                 let s = raw.map_or_else(|| format!("{r:.4} {g:.4} {b:.4}"), str::to_owned);
                 format!("\"{}\"", esc(&s))
             }
-            // `text` entries are UI labels, not values (the reference skips them).
             PropertyKind::Text => continue,
             PropertyKind::Combo { value, .. }
             | PropertyKind::TextInput { value }
@@ -1341,11 +998,6 @@ pub(super) fn web_props_json(dir: &Path, overrides: &[(String, String)]) -> Stri
     out
 }
 
-/// Build a `Send` (non-web) renderer for `spec` + `screen_key`. Returns
-/// `Box<dyn Renderer + Send>` so it can be built off the render thread (preload /
-/// async `bg` swap) as well as on it; the render thread stores it as a plain
-/// `Box<dyn Renderer>`. Web backends are `!Send` and stay on the render thread in
-/// [`build_renderer`].
 #[allow(clippy::too_many_arguments)]
 fn build_for_spec(
     target: &RenderTarget<'_>,
@@ -1358,10 +1010,6 @@ fn build_for_spec(
     properties: &[(String, String)],
     automute_controls: &Arc<Mutex<Vec<VideoControl>>>,
 ) -> Box<dyn Renderer + Send> {
-    // Builds allocate large transient buffers (texture decode, shader
-    // translation) that glibc retains after free — return them to the kernel
-    // once the renderer is up so standby RSS tracks live assets, not the
-    // build peak.
     struct TrimOnExit;
     impl Drop for TrimOnExit {
         fn drop(&mut self) {
@@ -1377,16 +1025,11 @@ fn build_for_spec(
                 silent,
                 paused: false,
                 scaling: to_video_scaling(*scaling),
-                // Full-screen video keeps the proven RGBA delivery; the
-                // NV12/GPU-convert path currently serves scene video textures.
                 nv12: false,
                 enable_audio: true,
             };
             match VideoPlayer::open(media, options) {
                 Ok((player, control)) => {
-                    // Register a clone with the automute applier so its mute
-                    // flag tracks other-app playback (docs subsystems-misc.md
-                    // §2.3). `VideoControl` is cheap to clone (channel senders).
                     if let Ok(mut guard) = automute_controls.lock() {
                         guard.push(control.clone());
                     }
@@ -1460,31 +1103,18 @@ fn build_for_spec(
                 }
             }
         }
-        // Web is routed to the render thread by `build_renderer` and never
-        // reaches here; keep the arm total + defensive.
         #[cfg(any(feature = "web-cef", feature = "web-webview"))]
         RunSpec::Web { .. } => black(target),
         RunSpec::Skip => black(target),
     }
 }
 
-/// Send parameters the IPC applier needs to build a wallpaper renderer off the
-/// render thread for a live `bg`/`preload` (everything [`build_for_spec`] needs
-/// besides the per-command screen/spec/properties). Cheap clones of the launch
-/// params, so the factory keeps its own copies.
 pub(crate) struct BuildContext {
-    /// Output scaling/clamp used for every (re)build. Mutexes so the IPC
-    /// `scaling`/`clamp` commands can retarget them live — the reference
-    /// stores per-screen modes and rebuilds the wallpaper
-    /// (WallpaperApplication.cpp:1237-1276); kirie runs one engine per
-    /// monitor, so engine-global is per-screen in practice.
     scaling: Mutex<ScalingMode>,
     clamp: Mutex<ClampMode>,
     volume: i64,
     silent: bool,
     registrar: Option<crossbeam_channel::Sender<Register>>,
-    /// The audio/MPRIS sources, resolved per wallpaper at build time rather
-    /// than held as a launch-time decision (see [`LazySources`]).
     sources: Arc<LazySources>,
     automute_controls: Arc<Mutex<Vec<VideoControl>>>,
 }
@@ -1498,9 +1128,6 @@ impl BuildContext {
         self.clamp.lock().map(|g| *g).unwrap_or_default()
     }
 
-    /// Live `scaling` retarget (doc §4.10) — the next (re)build uses it.
-    /// Returns whether the mode actually changed (callers skip the rebuild
-    /// when the daemon re-pushes an unchanged setting on every switch).
     pub(crate) fn set_scaling(&self, mode: ScalingMode) -> bool {
         match self.scaling.lock() {
             Ok(mut g) if *g != mode => {
@@ -1511,8 +1138,6 @@ impl BuildContext {
         }
     }
 
-    /// Live `clamp` retarget (doc §4.11) — the next (re)build uses it.
-    /// Returns whether the mode actually changed.
     pub(crate) fn set_clamp(&self, mode: ClampMode) -> bool {
         match self.clamp.lock() {
             Ok(mut g) if *g != mode => {
@@ -1523,10 +1148,6 @@ impl BuildContext {
         }
     }
 
-    /// Report an engine-driven background change (playlist rotation) to the
-    /// IPC applier so socket `status` reflects the on-screen path — the
-    /// reference's `setBackground` updates `screenBackgrounds` the same way
-    /// (WallpaperApplication.cpp:1050). No-op without a control socket.
     pub(crate) fn notify_background(&self, screen: &str, path: &Path) {
         if let Some(reg) = &self.registrar {
             let _ = reg.send(Register::Background {
@@ -1536,9 +1157,6 @@ impl BuildContext {
         }
     }
 
-    /// Classify `path` and return an off-thread [`kirie_platform::BuildFn`] that
-    /// builds it for `screen` with `properties`. `None` when the wallpaper isn't
-    /// runnable, or is web (web is `!Send` / render-thread-only).
     pub(crate) fn build_fn(
         self: &Arc<Self>,
         screen: String,
@@ -1553,7 +1171,6 @@ impl BuildContext {
         );
         match &target.spec {
             RunSpec::Video { .. } | RunSpec::Image { .. } | RunSpec::Scene { .. } => {}
-            // Skip (unsupported) and Web (render-thread-only) are not swappable.
             _ => return None,
         }
         let ctx = self.clone();
@@ -1581,13 +1198,6 @@ impl BuildContext {
         Some(build)
     }
 
-    /// Classify `path` and, for a **web** item, return a render-thread
-    /// [`kirie_platform::BuildLocalFn`] that builds it (CEF is `!Send`, so it
-    /// can't use the off-thread [`build_fn`]). `None` for non-web / unsupported
-    /// items (use `build_fn`). This is what lets the daemon's live `bg` swap
-    /// bring in a web wallpaper without relaunching the engine — a brief hitch
-    /// while the browser builds, then it swaps in. Only compiled with a web
-    /// backend (`web-cef` or `web-webview`).
     #[cfg(any(feature = "web-cef", feature = "web-webview"))]
     pub(crate) fn build_local_fn(
         self: &Arc<Self>,
@@ -1605,11 +1215,6 @@ impl BuildContext {
             return None;
         };
         let silent = self.silent;
-        // Cloned out of the context here, not captured by `Arc<Self>`: the
-        // closure has to be `Send` and is run once on the render thread.
-        // Resolved here, before the closure crosses to the render thread: a
-        // web wallpaper wants both, and asking the sources now is what starts
-        // MPRIS for an engine that launched on something else.
         let audio = Some(self.sources.audio());
         let media = Some(self.sources.media());
         let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name, size| {
@@ -1626,17 +1231,11 @@ impl BuildContext {
     }
 }
 
-/// The live-swap context handed to the IPC applier once the platform is up (its
-/// command channel + the build params). Applier `bg`/`preload` use it to build
-/// off-thread and swap on the render thread.
 pub(crate) struct SwapCtx {
     pub cmd_tx: kirie_platform::CommandSender,
     pub build: Arc<BuildContext>,
 }
 
-/// Bind the control socket and spawn its applier thread, or `(None, None)` if
-/// no `--control-socket` was given or the bind failed (doc §1: bind failure is
-/// non-fatal — the engine runs without live control).
 fn setup_socket(
     args: &CompatArgs,
     seed: Vec<(String, Option<PathBuf>)>,
@@ -1663,14 +1262,11 @@ fn setup_socket(
     }
 }
 
-/// A renderer that clears its surface to opaque black — the fallback for an
-/// unconfigured or unsupported output.
 struct BlackRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
 }
 
-/// Build a [`BlackRenderer`] for `target`.
 fn black(target: &RenderTarget<'_>) -> Box<dyn Renderer + Send> {
     Box::new(BlackRenderer {
         device: target.device.clone(),

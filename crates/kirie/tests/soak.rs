@@ -1,14 +1,3 @@
-//! Ignored release-gate soak: proves the live build→render→drop cycle (every
-//! `bg` swap) is leak-free — bounded RSS across multiple full corpus cycles and
-//! stable open-fd count. Needs a GPU + the installed workshop corpus, so it is
-//! `#[ignore]`:
-//!
-//! ```text
-//! cargo test -p kirie --release --test soak -- --ignored --nocapture
-//! ```
-//!
-//! Point it at any corpus of workshop item folders with `KIRIE_SOAK_DIR`.
-
 use std::path::PathBuf;
 
 fn corpus_dir() -> Option<PathBuf> {
@@ -29,8 +18,6 @@ fn soak_is_leak_free() {
         return;
     };
 
-    // ~4 full cycles of a ~20-item corpus + margin — enough to separate a real
-    // plateau from a slow leak while staying quick.
     let report = kirie::soak::soak(&dir, 80, 4, 20).expect("soak run");
 
     assert_eq!(report.fails, 0, "some wallpapers failed to build: {report:?}");
@@ -41,9 +28,6 @@ fn soak_is_leak_free() {
         report.fd_end,
         report.fd_peak
     );
-    // With per-iteration `trim_heap` the end RSS returns to the warm baseline
-    // (post first full cycle); a real leak of tens of MB/iter would blow far
-    // past this generous bound.
     let cap = report.rss_warm_kb * 3 / 2 + 262_144;
     assert!(
         report.rss_end_kb <= cap,

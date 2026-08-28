@@ -1,6 +1,3 @@
-//! End-to-end tests: real JS through the embedded QuickJS runtime.
-//! docs/scripting-api.md is the behavior oracle.
-
 use kirie_script::{AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue};
 
 fn num(v: &ScriptValue) -> f64 {
@@ -11,24 +8,21 @@ fn num(v: &ScriptValue) -> f64 {
     }
 }
 
-// ---- builtins: Vec/Mat math (docs §9 fixed + §10) -------------------------
-
 #[test]
 fn vec_math_correct_and_operand_order_fixed() {
     let e = ScriptEngine::new().unwrap();
-    // add is commutative; subtract/divide/cross/mix use fixed operand order.
     assert_eq!(
         e.eval("new Vec3(5,5,5).subtract(new Vec3(1,2,3)).x").unwrap(),
         "4"
-    ); // this - v
-    assert_eq!(e.eval("new Vec2(10,10).divide(new Vec2(2,5)).y").unwrap(), "2"); // this / v
-    assert_eq!(e.eval("new Vec3(1,0,0).cross(new Vec3(0,1,0)).z").unwrap(), "1"); // this × v
+    );
+    assert_eq!(e.eval("new Vec2(10,10).divide(new Vec2(2,5)).y").unwrap(), "2");
+    assert_eq!(e.eval("new Vec3(1,0,0).cross(new Vec3(0,1,0)).z").unwrap(), "1");
     assert_eq!(
         e.eval("new Vec3(0,0,0).mix(new Vec3(10,10,10), 0.5).x").unwrap(),
         "5"
     );
     assert_eq!(e.eval("new Vec2(3,4).length()").unwrap(), "5");
-    assert_eq!(e.eval("new Vec2(3,4).lengthSqr()").unwrap(), "25"); // not aliased to length
+    assert_eq!(e.eval("new Vec2(3,4).lengthSqr()").unwrap(), "25");
     assert_eq!(
         e.eval("new Vec3(1,2,3).add(new Vec3(1,1,1)).toString()").unwrap(),
         "2.000000, 3.000000, 4.000000"
@@ -48,7 +42,6 @@ fn mat4_transform_and_compose() {
             .unwrap(),
         "6"
     );
-    // 90° about Z maps +X to +Y.
     assert_eq!(
         e.eval("Math.round(Mat4.fromRotation(90, new Vec3(0,0,1)).transformDirection(new Vec3(1,0,0)).y)")
             .unwrap(),
@@ -56,12 +49,9 @@ fn mat4_transform_and_compose() {
     );
 }
 
-// ---- console + localStorage (docs §6.5 / §10.3) ---------------------------
-
 #[test]
 fn console_and_localstorage() {
     let e = ScriptEngine::new().unwrap();
-    // localStorage round-trips; missing key => null.
     assert_eq!(
         e.eval("localStorage.set('k','v'); localStorage.get('k')")
             .unwrap(),
@@ -73,11 +63,8 @@ fn console_and_localstorage() {
             .unwrap(),
         "42"
     );
-    // MediaPlaybackEvent constants present.
     assert_eq!(e.eval("MediaPlaybackEvent.PLAYBACK_PLAYING").unwrap(), "1");
 }
-
-// ---- property script contract (docs §5.1) ---------------------------------
 
 #[test]
 fn update_return_applied_to_property() {
@@ -110,14 +97,12 @@ fn init_runs_once_before_update() {
     .unwrap();
     let a = e.tick(HostFrame::default(), vec![]).unwrap();
     let b = e.tick(HostFrame::default(), vec![]).unwrap();
-    assert_eq!(num(&a.property_results[0].1), 101.0); // init(100) then +1
-    assert_eq!(num(&b.property_results[0].1), 102.0); // init did NOT run again
+    assert_eq!(num(&a.property_results[0].1), 101.0);
+    assert_eq!(num(&b.property_results[0].1), 102.0);
 }
 
 #[test]
 fn script_properties_from_json_only() {
-    // docs §5.5: createScriptProperties descriptors are ignored; values come
-    // from JSON scriptproperties. `==` string/number coercion (corpus).
     let e = ScriptEngine::new().unwrap();
     e.load_property_script(
         "text_9",
@@ -131,8 +116,6 @@ fn script_properties_from_json_only() {
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Str("numeric".into()));
 }
-
-// ---- V9: throwing script yields a typed error, never a panic --------------
 
 #[test]
 fn throwing_update_is_typed_error_not_panic() {
@@ -152,7 +135,6 @@ fn throwing_update_is_typed_error_not_panic() {
         &out.errors[0],
         kirie_script::ScriptError::Runtime { phase: "update", .. }
     ));
-    // Engine still alive.
     assert_eq!(e.eval("1+1").unwrap(), "2");
 }
 
@@ -167,12 +149,9 @@ fn malformed_source_is_load_error_not_panic() {
         serde_json::json!({}),
     );
     assert!(matches!(r, Err(kirie_script::ScriptError::Load { .. })));
-    // A dropped script does not tick.
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert!(out.property_results.is_empty());
 }
-
-// ---- events: applyUserProperties (docs §5.3) ------------------------------
 
 #[test]
 fn apply_user_properties_fires_on_every_module() {
@@ -194,8 +173,6 @@ fn apply_user_properties_fires_on_every_module() {
     );
 }
 
-// ---- importable modules (docs §6.6) ---------------------------------------
-
 #[test]
 fn we_modules_import_and_compute() {
     let e = ScriptEngine::new().unwrap();
@@ -210,10 +187,8 @@ fn we_modules_import_and_compute() {
     )
     .unwrap();
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
-    assert_eq!(num(&out.property_results[0].1), 6.0); // 5 + red.x(1)
+    assert_eq!(num(&out.property_results[0].1), 6.0);
 }
-
-// ---- thisLayer writes become typed scene ops (docs §8) --------------------
 
 #[test]
 fn this_layer_write_records_scene_op() {
@@ -244,11 +219,6 @@ fn this_layer_write_records_scene_op() {
     );
 }
 
-// ---- input surface (docs §6.4) --------------------------------------------
-
-/// `input.cursorScreenPosition` is in pixels (reference d.ts), i.e. the same
-/// units as `engine.screenResolution` — scripts compute
-/// `screenResolution.y - cursorScreenPosition.y` for y-up deltas.
 #[test]
 fn cursor_screen_position_is_in_pixels() {
     let e = ScriptEngine::new().unwrap();
@@ -273,8 +243,6 @@ fn cursor_screen_position_is_in_pixels() {
     }
 }
 
-/// `engine.screenResolution`/`canvasSize` are real `Vec2`s (d.ts), so vector
-/// methods work on them.
 #[test]
 fn screen_resolution_and_canvas_size_are_vec2() {
     let e = ScriptEngine::new().unwrap();
@@ -290,11 +258,8 @@ fn screen_resolution_and_canvas_size_are_vec2() {
     )
     .unwrap();
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
-    // QuickJS surfaces integer-valued numbers as Int.
     assert_eq!(out.property_results[0].1, ScriptValue::Int(960));
 }
-
-// ---- cursor events (d.ts ScriptModule / ILayer.solid) ---------------------
 
 const CURSOR_LOG_SCRIPT: &str = "var log = [];
 export function cursorEnter(ev){ log.push('enter:' + ev.localPosition.x); }
@@ -325,7 +290,6 @@ fn cursor_frame(solid: Option<bool>, px: f32, py: f32, left: bool) -> HostFrame 
     }
 }
 
-/// enter → down → up+click over a solid layer, with the documented payloads.
 #[test]
 fn cursor_events_fire_on_solid_layer_edges() {
     let e = ScriptEngine::new().unwrap();
@@ -338,26 +302,20 @@ fn cursor_events_fire_on_solid_layer_edges() {
     )
     .unwrap();
     let solid = Some(true);
-    // Tick 1: baseline (outside bounds, button up) — transitions only, so
-    // nothing may fire yet.
     let out = e.tick(cursor_frame(solid, 0.0, 0.0, false), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
-    // Tick 2: move inside the 50×50 box at (100,100) → enter, local x = 10.
     let out = e.tick(cursor_frame(solid, 110.0, 95.0, false), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Str("enter:10".into()));
-    // Tick 3: press while inside → down.
     let out = e.tick(cursor_frame(solid, 110.0, 95.0, true), vec![]).unwrap();
     assert_eq!(
         out.property_results[0].1,
         ScriptValue::Str("enter:10,down".into())
     );
-    // Tick 4: release while inside → up, then click (same object as the press).
     let out = e.tick(cursor_frame(solid, 110.0, 95.0, false), vec![]).unwrap();
     assert_eq!(
         out.property_results[0].1,
         ScriptValue::Str("enter:10,down,up,click:110".into())
     );
-    // Tick 5: move back out → leave.
     let out = e.tick(cursor_frame(solid, 0.0, 0.0, false), vec![]).unwrap();
     assert_eq!(
         out.property_results[0].1,
@@ -365,8 +323,6 @@ fn cursor_events_fire_on_solid_layer_edges() {
     );
 }
 
-/// A layer without the solid flag never triggers cursor events (d.ts:
-/// "If set to true, the layer will trigger cursor events").
 #[test]
 fn cursor_events_require_the_solid_flag() {
     let e = ScriptEngine::new().unwrap();
@@ -384,8 +340,6 @@ fn cursor_events_require_the_solid_flag() {
     assert_eq!(out.property_results[0].1, ScriptValue::Str(String::new()));
 }
 
-/// A frame without audio must read as silence, not as the previous tick's
-/// bands (`skip_serializing_if` would otherwise leave `__host.audio` stale).
 #[test]
 fn audio_reads_silent_after_a_frame_without_bands() {
     let e = ScriptEngine::new().unwrap();
@@ -408,13 +362,10 @@ fn audio_reads_silent_after_a_frame_without_bands() {
     };
     let out = e.tick(frame, vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Float(0.75));
-    // No audio this frame → zeros, not the stale 0.75.
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
 }
 
-/// `getInitialLayerConfig` returns the authored values even after scripts
-/// mutated the layer (d.ts IScene).
 #[test]
 fn initial_layer_config_survives_script_writes() {
     let e = ScriptEngine::new().unwrap();
@@ -442,16 +393,12 @@ fn initial_layer_config_survives_script_writes() {
         ..Default::default()
     };
     e.tick(frame(), vec![]).unwrap();
-    // The scripted write is live in the snapshot the host feeds back…
     let mut mutated = frame();
     mutated.layers[0].alpha = Some(0.9);
     let out = e.tick(mutated, vec![]).unwrap();
-    // …but the initial config still reports the authored 0.25.
     assert_eq!(out.property_results[0].1, ScriptValue::Float(0.25));
 }
 
-/// media*Changed handlers fire only for flagged categories, with the
-/// documented payload shapes (thumbnail colors as Vec3).
 #[test]
 fn media_events_dispatch_by_category() {
     let e = ScriptEngine::new().unwrap();
@@ -473,7 +420,6 @@ fn media_events_dispatch_by_category() {
         colors: Some([[1.0, 0.0, 0.0]; 5]),
         playback_changed: true,
         thumbnail_changed: true,
-        // status unchanged — its handler must stay silent.
         status_changed: false,
         ..Default::default()
     };
@@ -488,15 +434,10 @@ fn media_events_dispatch_by_category() {
         "errors: {:?}",
         out.errors
     );
-    // No media this tick → nothing new fires.
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Str("pb:1,th:1".into()));
 }
 
-// ---- resizeScreen / applyGeneralSettings (d.ts ScriptModule) ---------------
-
-/// `resizeScreen(Vec2)` fires on resolution transitions only — the initial
-/// size is init()'s job.
 #[test]
 fn resize_screen_fires_on_resolution_change() {
     let e = ScriptEngine::new().unwrap();
@@ -510,13 +451,10 @@ fn resize_screen_fires_on_resolution_change() {
         serde_json::json!({}),
     )
     .unwrap();
-    // First tick (1920×1080 default): baseline, no dispatch.
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
-    // Same resolution: still nothing.
     let out = e.tick(HostFrame::default(), vec![]).unwrap();
     assert_eq!(out.property_results[0].1, ScriptValue::Int(0));
-    // Resolution change: dispatched with a real Vec2.
     let frame = HostFrame {
         res_x: 2560.0,
         res_y: 1440.0,
@@ -526,8 +464,6 @@ fn resize_screen_fires_on_resolution_change() {
     assert_eq!(out.property_results[0].1, ScriptValue::Int(2560));
 }
 
-/// `applyGeneralSettings({language})` is delivered once at load, so scripts
-/// can localize their text (the changed-keys guard pattern from the d.ts).
 #[test]
 fn apply_general_settings_delivers_language_at_load() {
     let e = ScriptEngine::new().unwrap();
@@ -548,9 +484,6 @@ fn apply_general_settings_delivers_language_at_load() {
     }
 }
 
-// ---- math surface completeness (d.ts Vec4/Mat3/Mat4) -----------------------
-
-/// One script exercising the added math; each check appends pass/fail.
 #[test]
 fn math_surface_matches_hand_computed_values() {
     let e = ScriptEngine::new().unwrap();
@@ -597,10 +530,6 @@ fn math_surface_matches_hand_computed_values() {
     );
 }
 
-// ---- persistent localStorage (docs §10.3 + persistence) --------------------
-
-/// Writes survive across engine instances via the storage file; delete
-/// returns whether the key existed (d.ts Boolean).
 #[test]
 fn local_storage_persists_across_engines() {
     let dir = std::env::temp_dir().join(format!("kirie-storage-test-{}", std::process::id()));
@@ -625,7 +554,6 @@ fn local_storage_persists_across_engines() {
     drop(e);
     assert!(path.exists(), "storage file written");
 
-    // A fresh engine seeded from the same path sees the value.
     let e2 = ScriptEngine::new().unwrap();
     e2.set_storage_path(path.clone()).unwrap();
     e2.load_property_script(
@@ -641,10 +569,6 @@ fn local_storage_persists_across_engines() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ---- stubbed surface (presence-correct, never a crash) ---------------------
-
-/// Every stubbed API returns its documented shape; a script chaining through
-/// them runs to completion.
 #[test]
 fn stubbed_surface_never_crashes() {
     let e = ScriptEngine::new().unwrap();
@@ -689,11 +613,8 @@ fn stubbed_surface_never_crashes() {
         out.errors,
         out.logs
     );
-    // The stub warnings surfaced (once per category).
     assert!(out.logs.iter().any(|l| l.message.contains("not simulated")));
 }
-
-// ---- timers (docs §5.4, canceller bug fixed) ------------------------------
 
 #[test]
 fn engine_interval_fires_by_frame_clock() {
@@ -716,7 +637,6 @@ fn engine_interval_fires_by_frame_clock() {
         )
         .unwrap();
     assert!(!t1.logs.iter().any(|l| l.message == "fire"));
-    // current value fed back = 1, so no re-register; now past 100ms → fires.
     let t2 = e
         .tick(
             HostFrame {
@@ -728,8 +648,6 @@ fn engine_interval_fires_by_frame_clock() {
         .unwrap();
     assert!(t2.logs.iter().any(|l| l.message == "fire"), "logs: {:?}", t2.logs);
 }
-
-// ---- text-layer scripts (docs §7) -----------------------------------------
 
 #[test]
 fn text_layer_script_ticks_and_reads_text() {
@@ -745,19 +663,12 @@ fn text_layer_script_ticks_and_reads_text() {
     e.tick_layer(h, 5.0, 0.016, 60.0).unwrap();
     assert_eq!(e.layer_text(h).unwrap(), "T:5");
     e.destroy_layer(h).unwrap();
-    assert_eq!(e.layer_text(h).unwrap(), ""); // invalid handle after destroy
+    assert_eq!(e.layer_text(h).unwrap(), "");
 }
 
-// ---- audio buffers (docs §6.1) --------------------------------------------
-
-/// `engine.registerAudioBuffers(res).average` must read the *matching* audioN
-/// reduction — the 16-band getter returns `audio16`, not the first 16 entries
-/// of `audio64` (docs/scripting-api.md §6.1). Distinct fill values per
-/// resolution prove the correct array is selected.
 #[test]
 fn register_audio_buffers_reads_matching_resolution() {
     let e = ScriptEngine::new().unwrap();
-    // Sum the whole requested buffer so the count *and* the source array matter.
     for (res, key) in [(16, "a16"), (32, "a32"), (64, "a64")] {
         e.load_property_script(
             format!("alpha_{res}"),
@@ -773,9 +684,9 @@ fn register_audio_buffers_reads_matching_resolution() {
         let _ = key;
     }
     let audio = AudioBuffers {
-        audio16: vec![0.5; 16],  // sum 8, len 16 → 16008
-        audio32: vec![0.25; 32], // sum 8, len 32 → 32008
-        audio64: vec![0.1; 64],  // sum 6.4, len 64 → 64006.4
+        audio16: vec![0.5; 16],
+        audio32: vec![0.25; 32],
+        audio64: vec![0.1; 64],
     };
     let out = e
         .tick(
@@ -808,8 +719,6 @@ fn register_audio_buffers_reads_matching_resolution() {
     );
 }
 
-/// Missing audio (`None`) yields a zero-filled buffer of the requested length,
-/// never a crash (V9).
 #[test]
 fn register_audio_buffers_silent_is_zeroed() {
     let e = ScriptEngine::new().unwrap();
@@ -829,8 +738,6 @@ fn register_audio_buffers_silent_is_zeroed() {
         "silent 32-band all zeros"
     );
 }
-
-// ---- version surface ------------------------------------------------------
 
 #[test]
 fn version_constants_exposed() {

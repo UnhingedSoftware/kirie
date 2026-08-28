@@ -1,60 +1,30 @@
-//! The builtin uniform set and its std140 packing into the `_WEGlobals` block.
-//!
-//! docs/render-architecture.md §8.3 lists the complete set of engine builtins
-//! (`g_Time`, `g_ModelViewProjectionMatrix`, `g_PointerPosition`, …). The
-//! shader crate aggregates every *loose* uniform a program actually uses into
-//! one `layout(std140) uniform _WEGlobals` block, reporting the member order in
-//! [`kirie_shader::Reflection::globals_block`] (see `modernize.rs`). This module
-//! reproduces the std140 offset math for that block and fills the bytes each
-//! frame from a [`Builtins`] snapshot plus resolved material-parameter values —
-//! one contiguous per-frame write, no steady-state allocation beyond the buffer
-//! (SPEC.md §V5).
-//!
-//! The reference's property-uniform *snapshot* semantics (docs §8.3: the bolded
-//! `g_Brightness`/`g_Alpha`/`g_Color` rows are frozen at pass setup) are
-//! deliberately made **live** here — a per-frame rewrite from the resolved
-//! model is what scripts/users expect and is cheaper than a pass rebuild
-//! (docs §8.3 "wgpu:" note leaves this a deliberate choice).
-
 use std::collections::BTreeMap;
 
 use kirie_shader::reflect::ParamType;
 
 use super::matrix::{IDENTITY, Mat4};
 
-/// The GLSL type of a `_WEGlobals` member, enough to derive its std140
-/// alignment/size and to pack its bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlType {
-    /// `float`.
     Float,
-    /// `vec2`.
     Vec2,
-    /// `vec3`.
     Vec3,
-    /// `vec4`.
     Vec4,
-    /// `mat3` (three column vec3s, each padded to 16 bytes).
     Mat3,
-    /// `mat4`.
     Mat4,
-    /// `float[N]` — std140 array stride 16 per element.
     FloatArray(usize),
 }
 
 impl GlType {
-    /// std140 base alignment in bytes.
     #[must_use]
     pub fn align(self) -> usize {
         match self {
             GlType::Float => 4,
             GlType::Vec2 => 8,
-            // vec3/vec4/matrices/arrays all align to 16 in std140.
             _ => 16,
         }
     }
 
-    /// std140 size consumed in bytes (before the next member is aligned).
     #[must_use]
     pub fn size(self) -> usize {
         match self {
@@ -68,7 +38,6 @@ impl GlType {
         }
     }
 
-    /// Map a reflected material-parameter type to a global member type.
     #[must_use]
     pub fn from_param(ty: ParamType) -> Self {
         match ty {
@@ -80,12 +49,8 @@ impl GlType {
     }
 }
 
-/// The declared type of a builtin `g_*` uniform (docs/render-architecture.md
-/// §8.3). `None` for names that are not engine builtins (material parameters,
-/// which the renderer types from shader reflection instead).
 #[must_use]
 pub fn builtin_type(name: &str) -> Option<GlType> {
-    // Texture-resolution / atlas members.
     if let Some(rest) = name.strip_prefix("g_Texture") {
         if let Some(idx) = rest.strip_suffix("Resolution")
             && idx.chars().all(|c| c.is_ascii_digit())
@@ -100,21 +65,25 @@ pub fn builtin_type(name: &str) -> Option<GlType> {
         }
     }
     Some(match name {
-        "g_TextureReductionScale" | "g_Time" | "g_Daytime" | "g_Brightness" | "g_UserAlpha"
-        | "g_Alpha" | "g_RefractAmount" => GlType::Float,
+        "g_TextureReductionScale"
+        | "g_Time"
+        | "g_Daytime"
+        | "g_Brightness"
+        | "g_UserAlpha"
+        | "g_Alpha"
+        | "g_RefractAmount" => GlType::Float,
         "g_PointerPosition" | "g_PointerPositionLast" | "g_TexelSize" | "g_TexelSizeHalf" => GlType::Vec2,
-        "g_Color" | "g_CompositeColor" | "g_LightAmbientColor" | "g_LightSkylightColor"
-        // Particle/model additions (docs §8.3): unit axes + camera eye. Typed
-        // here so their std140 offsets stay correct if an effect shader
-        // references them — omitting them defaults to `float` and misaligns
-        // every following member of the globals block.
-        | "g_EyePosition" | "g_OrientationUp" | "g_OrientationRight" | "g_OrientationForward"
-        // `g_Screen` = vec3(width, height, width/height) — screen resolution in
-        // px + aspect (`CPass.cpp:1046`). Generative effect shaders build UVs
-        // from it and divide by `g_Screen.y`; a zeroed uniform NaNs the shader
-        // to black (docs/render-architecture.md §8.3).
+        "g_Color"
+        | "g_CompositeColor"
+        | "g_LightAmbientColor"
+        | "g_LightSkylightColor"
+        | "g_EyePosition"
+        | "g_OrientationUp"
+        | "g_OrientationRight"
+        | "g_OrientationForward"
         | "g_Screen"
-        | "g_ViewUp" | "g_ViewRight" => GlType::Vec3,
+        | "g_ViewUp"
+        | "g_ViewRight" => GlType::Vec3,
         "g_Color4" | "g_RenderVar0" | "g_RenderVar1" => GlType::Vec4,
         "g_NormalModelMatrix" => GlType::Mat3,
         "g_ModelViewProjectionMatrix"
@@ -133,32 +102,20 @@ pub fn builtin_type(name: &str) -> Option<GlType> {
     })
 }
 
-/// One resolved member of the `_WEGlobals` block.
 #[derive(Debug, Clone)]
 pub struct Member {
-    /// Source uniform name (e.g. `g_Time`).
     pub name: String,
-    /// Its std140 type.
     pub ty: GlType,
-    /// Byte offset within the block.
     pub offset: usize,
 }
 
-/// The std140 layout of a program's `_WEGlobals` block: members in declaration
-/// order with computed offsets, plus the block's total (16-rounded) size.
 #[derive(Debug, Clone, Default)]
 pub struct GlobalsLayout {
-    /// Members in declaration order.
     pub members: Vec<Member>,
-    /// Total block size in bytes, rounded up to 16 (std140 struct rule).
     pub size: usize,
 }
 
 impl GlobalsLayout {
-    /// Build the layout from the reflected member order. `param_types` supplies
-    /// the type of any member that is not an engine builtin (material
-    /// parameters, keyed by uniform name); an unknown member is treated as a
-    /// `float` (the smallest well-defined slot) with a trace note.
     #[must_use]
     pub fn build(names: &[String], param_types: &BTreeMap<String, GlType>) -> Self {
         let mut members = Vec::with_capacity(names.len());
@@ -183,66 +140,34 @@ impl GlobalsLayout {
         GlobalsLayout { members, size }
     }
 
-    /// Whether the block is empty (no loose uniforms — the program binds no
-    /// globals UBO).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
 }
 
-/// A snapshot of the engine builtin values for one pass, one frame
-/// (docs/render-architecture.md §8.3). Matrices are per-pass (they carry the
-/// object/effect MVP of §7.1); scalars/vectors are scene-global.
 #[derive(Debug, Clone)]
 pub struct Builtins {
-    /// `g_Time` — seconds since start × playback speed.
     pub time: f32,
-    /// `g_Daytime` — `(hour*60+min)/1440`, in `[0, 1)`.
     pub daytime: f32,
-    /// `g_Brightness` — image brightness (default 1).
     pub brightness: f32,
-    /// `g_Alpha` / `g_UserAlpha` — image alpha (default 1).
     pub alpha: f32,
-    /// `g_Color` (rgb) and `g_Color4` (rgba) — image color (default white).
     pub color: [f32; 4],
-    /// `g_LightAmbientColor` — scene ambient (default 0).
     pub ambient: [f32; 3],
-    /// `g_LightSkylightColor` — scene skylight (default 0).
     pub skylight: [f32; 3],
-    /// `g_PointerPosition` — mouse in scene-UV space.
     pub pointer: [f32; 2],
-    /// `g_PointerPositionLast` — previous frame's pointer.
     pub pointer_last: [f32; 2],
-    /// `g_TexelSize` — `(1/sceneW, 1/sceneH)`.
     pub texel_size: [f32; 2],
-    /// `g_ModelViewProjectionMatrix` (and aliases) — pass MVP.
     pub mvp: Mat4,
-    /// Override for `g_ModelViewProjectionMatrixInverse` (effect passes: the
-    /// NDC→image-pixel mapping the reference's ortho inverse provides). `None`
-    /// ⇒ `inverse(mvp)`.
     pub mvp_inverse: Option<Mat4>,
-    /// `g_ModelMatrix` (and alias) — object/ortho model matrix.
     pub model: Mat4,
-    /// `g_ViewProjectionMatrix` — identity for images, camera VP for 3D.
     pub view_projection: Mat4,
-    /// `g_EyePosition` — camera eye in world space (docs §8.3). Drives
-    /// `v_ViewDir` in the 3D model vertex shader (`CModel.cpp` sets it per
-    /// frame). The 2D image path leaves it at the default eye-on-`+Z`.
     pub eye: [f32; 3],
-    /// `g_Texture0Translation` — atlas frame origin (0 when not animated).
     pub texture0_translation: [f32; 2],
-    /// `g_Texture0Rotation` — atlas frame axes (`(0,0,0,0)` when not animated).
     pub texture0_rotation: [f32; 4],
-    /// `g_TextureNResolution` — `{texW, texH, realW, realH}` per bound slot.
     pub texture_resolution: [[f32; 4]; 8],
-    /// `g_AudioSpectrum16Left/Right` — 16-band mono FFT snapshot (Left == Right;
-    /// docs/render-architecture.md §8.3, subsystems-misc.md §1.3). All-zero when
-    /// audio processing is off — the exact silent state a wallpaper sees (V9).
     pub audio16: [f32; 16],
-    /// `g_AudioSpectrum32Left/Right` — 32-band mono FFT snapshot.
     pub audio32: [f32; 32],
-    /// `g_AudioSpectrum64Left/Right` — 64-band mono FFT snapshot.
     pub audio64: [f32; 64],
 }
 
@@ -274,18 +199,11 @@ impl Default for Builtins {
     }
 }
 
-/// Max components in any builtin member — `g_AudioSpectrum64*` (64 floats).
-/// The pack scratch is sized to this so no member overflows it.
 const MAX_MEMBER_FLOATS: usize = 64;
 
 impl Builtins {
-    /// Write a builtin member's components (natural order, matrices column-major)
-    /// into `buf` and return the count. `None` for a name this snapshot does not
-    /// provide (a material parameter — resolved elsewhere). Allocation-free
-    /// (SPEC §V5); `buf` must hold at least [`MAX_MEMBER_FLOATS`] floats.
     #[must_use]
     pub fn components_into(&self, name: &str, buf: &mut [f32]) -> Option<usize> {
-        // Texture resolution slots.
         if let Some(rest) = name.strip_prefix("g_Texture")
             && let Some(idx) = rest.strip_suffix("Resolution")
             && let Ok(i) = idx.parse::<usize>()
@@ -307,7 +225,6 @@ impl Builtins {
             "g_PointerPositionLast" => set(buf, &self.pointer_last),
             "g_TexelSize" => set(buf, &self.texel_size),
             "g_TexelSizeHalf" => set(buf, &[self.texel_size[0] * 0.5, self.texel_size[1] * 0.5]),
-            // width, height, aspect — derived from the texel size (= 1/size).
             "g_Screen" => {
                 let w = 1.0 / self.texel_size[0];
                 let h = 1.0 / self.texel_size[1];
@@ -316,12 +233,6 @@ impl Builtins {
             "g_Texture0Translation" => set(buf, &self.texture0_translation),
             "g_Texture0Rotation" => set(buf, &self.texture0_rotation),
             "g_ModelViewProjectionMatrix" | "g_EffectModelViewProjectionMatrix" => set(buf, &self.mvp),
-            // Effect passes draw a pre-baked NDC quad with an identity MVP, but
-            // shaders unprojecting the pointer (xray's `mul(pointerNDC, MVPInv)`
-            // then `× 1/g_Texture0Resolution`) need the REAL inverse — the
-            // reference renders effect quads under an image-space ortho, whose
-            // inverse maps NDC → image pixels. `mvp_inverse` carries that
-            // override; `None` = plain inverse of `mvp` (scene passes).
             "g_ModelViewProjectionMatrixInverse" => match self.mvp_inverse {
                 Some(m) => set(buf, &m),
                 None => set(buf, &super::matrix::inverse(&self.mvp)),
@@ -333,19 +244,12 @@ impl Builtins {
                 set(buf, &IDENTITY)
             }
             "g_NormalModelMatrix" => set(buf, &[1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]),
-            // Particle/model additions (docs §8.3). The 2D image path does not
-            // drive these; supply non-degenerate defaults (unit axes, an eye on
-            // +Z, the reference's 0.05 refract) so a shader that reads them gets
-            // sane values instead of zeros.
             "g_OrientationUp" | "g_ViewUp" => set(buf, &[0.0, 1.0, 0.0]),
             "g_OrientationRight" | "g_ViewRight" => set(buf, &[1.0, 0.0, 0.0]),
             "g_OrientationForward" => set(buf, &[0.0, 0.0, 1.0]),
             "g_EyePosition" => set(buf, &self.eye),
             "g_RenderVar0" | "g_RenderVar1" => set(buf, &[0.0, 0.0, 0.0, 0.0]),
             "g_RefractAmount" => set(buf, &[0.05]),
-            // Mono capture: Left and Right feed from the same band array
-            // (subsystems-misc.md §1.3 "Consumers"). Silent (all-zero) unless
-            // the render loop has copied a live spectrum into these fields.
             "g_AudioSpectrum16Left" | "g_AudioSpectrum16Right" => set(buf, &self.audio16),
             "g_AudioSpectrum32Left" | "g_AudioSpectrum32Right" => set(buf, &self.audio32),
             "g_AudioSpectrum64Left" | "g_AudioSpectrum64Right" => set(buf, &self.audio64),
@@ -355,23 +259,12 @@ impl Builtins {
     }
 }
 
-/// Copy `src` into the head of `buf`, returning `src.len()` (a small helper so
-/// [`Builtins::components_into`] stays a flat match).
 #[inline]
 fn set(buf: &mut [f32], src: &[f32]) -> usize {
     buf[..src.len()].copy_from_slice(src);
     src.len()
 }
 
-/// Pack one program's `_WEGlobals` block into `out` (docs/render-architecture.md
-/// §8.3), reusing its capacity — no per-frame allocation (SPEC §V5). Each
-/// member's bytes come from `builtins` first, else `params` (resolved
-/// material-parameter values by uniform name); an unresolved member is left
-/// zero-filled.
-///
-/// Matrix members are written column-major (16 contiguous floats for a mat4);
-/// `mat3` writes three vec3 columns padded to 16 bytes each. `float[N]` writes
-/// each element on a 16-byte stride (std140).
 pub fn pack_globals(
     out: &mut Vec<u8>,
     layout: &GlobalsLayout,
@@ -390,8 +283,6 @@ pub fn pack_globals(
     }
 }
 
-/// Write a member's float components at its offset with std140 column/element
-/// padding.
 fn write_member(bytes: &mut [u8], member: &Member, comps: &[f32]) {
     let put = |bytes: &mut [u8], byte_off: usize, v: f32| {
         if byte_off + 4 <= bytes.len() {
@@ -400,7 +291,6 @@ fn write_member(bytes: &mut [u8], member: &Member, comps: &[f32]) {
     };
     match member.ty {
         GlType::Mat3 => {
-            // Three columns of 3 floats, each column on a 16-byte stride.
             for col in 0..3 {
                 for row in 0..3 {
                     let v = comps.get(col * 3 + row).copied().unwrap_or(0.0);
@@ -413,7 +303,6 @@ fn write_member(bytes: &mut [u8], member: &Member, comps: &[f32]) {
                 put(bytes, member.offset + i * 16, *v);
             }
         }
-        // Float/vec2/vec3/vec4/mat4 are contiguous floats from the offset.
         _ => {
             for (i, v) in comps.iter().enumerate() {
                 put(bytes, member.offset + i * 4, *v);
@@ -443,9 +332,6 @@ mod tests {
             builtin_type("g_AudioSpectrum64Left"),
             Some(GlType::FloatArray(64))
         );
-        // Particle/model additions (docs §8.3): typed so their std140 offsets
-        // stay correct if an effect shader references them (a `float` fallback
-        // would misalign every following globals-block member).
         assert_eq!(builtin_type("g_EyePosition"), Some(GlType::Vec3));
         assert_eq!(builtin_type("g_OrientationForward"), Some(GlType::Vec3));
         assert_eq!(builtin_type("g_ViewRight"), Some(GlType::Vec3));
@@ -456,12 +342,11 @@ mod tests {
 
     #[test]
     fn std140_offsets_pack_scalar_then_vec2() {
-        // float @0 (4), vec2 aligns to 8 → @8, vec4 aligns to 16 → @16.
         let layout = GlobalsLayout::build(&names(&["g_Time", "g_TexelSize", "g_Color4"]), &BTreeMap::new());
         assert_eq!(layout.members[0].offset, 0);
         assert_eq!(layout.members[1].offset, 8);
         assert_eq!(layout.members[2].offset, 16);
-        assert_eq!(layout.size, 32); // 16 + 16, already 16-multiple.
+        assert_eq!(layout.size, 32);
     }
 
     #[test]
@@ -477,7 +362,6 @@ mod tests {
 
     #[test]
     fn vec3_consumes_12_but_aligns_16() {
-        // vec3 @0 consumes 12; a following float packs into the trailing 4.
         let layout = GlobalsLayout::build(&names(&["g_Color", "g_Time"]), &BTreeMap::new());
         assert_eq!(layout.members[0].offset, 0);
         assert_eq!(layout.members[1].offset, 12, "float fills the vec3 tail padding");
@@ -510,14 +394,11 @@ mod tests {
             time: 2.5,
             ..Builtins::default()
         };
-        // A recognizable MVP: translation (7,8,9) → column-major cols in bytes.
         b.mvp = super::super::matrix::translation([7.0, 8.0, 9.0]);
         let mut bytes = Vec::new();
         pack_globals(&mut bytes, &layout, &b, &BTreeMap::new());
         assert_eq!(bytes.len(), 80);
-        // g_Time at offset 0.
         assert_eq!(f32::from_le_bytes(bytes[0..4].try_into().unwrap()), 2.5);
-        // MVP at offset 16; translation lives in the 4th column (elems 12,13,14).
         let elem = |i: usize| f32::from_le_bytes(bytes[16 + i * 4..16 + i * 4 + 4].try_into().unwrap());
         assert_eq!(elem(12), 7.0);
         assert_eq!(elem(13), 8.0);
@@ -527,8 +408,6 @@ mod tests {
 
     #[test]
     fn audio_spectrum_packs_live_bands_left_and_right() {
-        // A shader that samples both channels at 16 bands. Left and Right must
-        // read the same mono band array (subsystems-misc.md §1.3).
         let layout = GlobalsLayout::build(
             &names(&["g_AudioSpectrum16Left", "g_AudioSpectrum16Right"]),
             &BTreeMap::new(),
@@ -538,7 +417,6 @@ mod tests {
         b.audio16[15] = 0.25;
         let mut bytes = Vec::new();
         pack_globals(&mut bytes, &layout, &b, &BTreeMap::new());
-        // FloatArray stride is 16 bytes; the Right block starts right after Left.
         let right_off = layout.members[1].offset;
         let elem = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
         assert_eq!(elem(0), 0.5, "Left band 0");
@@ -561,10 +439,9 @@ mod tests {
         let mut bytes = Vec::new();
         pack_globals(&mut bytes, &layout, &Builtins::default(), &BTreeMap::new());
         assert_eq!(bytes.len(), 48);
-        // Identity mat3: diagonal 1s at column strides of 16.
         let elem = |off: usize| f32::from_le_bytes(bytes[off..off + 4].try_into().unwrap());
-        assert_eq!(elem(0), 1.0); // col0 row0
-        assert_eq!(elem(16 + 4), 1.0); // col1 row1
-        assert_eq!(elem(32 + 8), 1.0); // col2 row2
+        assert_eq!(elem(0), 1.0);
+        assert_eq!(elem(16 + 4), 1.0);
+        assert_eq!(elem(32 + 8), 1.0);
     }
 }

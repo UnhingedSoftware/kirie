@@ -1,10 +1,3 @@
-//! Headless GPU verification of the image pipeline: render synthetic
-//! content into an offscreen target and assert the exact pixels — quad
-//! orientation, atlas placement + frame advance (docs/format-tex.md §8.1),
-//! and border-mode letterboxing (docs/render-architecture.md §4).
-//!
-//! Skipped (with a note) when no wgpu adapter is available.
-
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 use kirie_render::{
     ClampMode, FramePlacement, ImageContent, ImageOptions, ImagePage, ImageRenderer, SamplerSpec, ScalingMode,
@@ -37,8 +30,6 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     }
 }
 
-/// Render one frame with `renderer` into a fresh `width`×`height` offscreen
-/// target and read back the RGBA rows.
 fn render_and_read(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -65,7 +56,6 @@ fn render_and_read(
 
     renderer.render(&view, SurfaceSize { width, height }, dt);
 
-    // 256-byte row alignment for texture→buffer copies.
     let padded_row = 256u32;
     assert!(width * 4 <= padded_row);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -134,9 +124,6 @@ const WHITE: [u8; 4] = [255, 255, 255, 255];
 #[test]
 fn stretch_renders_content_upright() {
     let Some((device, queue)) = gpu() else { return };
-    // 1x2 page: red on top, blue below. UvWindow v0 is the viewport's top
-    // edge (reference Wayland vflip convention,
-    // docs/render-architecture.md §2.4, §4).
     let page = ImagePage {
         width: 1,
         height: 2,
@@ -166,7 +153,6 @@ fn stretch_renders_content_upright() {
     .expect("renderer");
 
     let pixels = render_and_read(&device, &queue, &mut renderer, 2, 2, 0.0);
-    // Top row red, bottom row blue — not upside down.
     assert_eq!(&pixels[0..4], &RED, "top-left");
     assert_eq!(&pixels[4..8], &RED, "top-right");
     assert_eq!(&pixels[8..12], &BLUE, "bottom-left");
@@ -176,8 +162,6 @@ fn stretch_renders_content_upright() {
 #[test]
 fn atlas_frames_advance_on_schedule() {
     let Some((device, queue)) = gpu() else { return };
-    // 2x1 atlas: frame 0 = left (red) texel, frame 1 = right (blue) texel,
-    // 0.5 s each (§8.1 placements over a single page).
     let page = ImagePage {
         width: 2,
         height: 1,
@@ -216,19 +200,14 @@ fn atlas_frames_advance_on_schedule() {
     .expect("renderer");
     assert!(renderer.is_animated());
 
-    // t = 0 → frame 0 (red fills the target).
     let pixels = render_and_read(&device, &queue, &mut renderer, 4, 4, 0.0);
     for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(px, &RED, "pixel {i} at t=0");
     }
-    // t = 0.6 → frame 1 (§8.1 walk: 0.6-0.5 > 0, next frame) — the frame
-    // uniform is rewritten and blue fills the target.
     let pixels = render_and_read(&device, &queue, &mut renderer, 4, 4, 0.6);
     for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(px, &BLUE, "pixel {i} at t=0.6");
     }
-    // Half a second later the total elapsed is 1.1 s, which the §8.1 fmod
-    // wraps to 0.1 s: back to red.
     let pixels = render_and_read(&device, &queue, &mut renderer, 4, 4, 0.5);
     for (i, px) in pixels.as_chunks::<4>().0.iter().enumerate() {
         assert_eq!(px, &RED, "pixel {i} at t=1.1 (wrapped to 0.1)");
@@ -238,9 +217,6 @@ fn atlas_frames_advance_on_schedule() {
 #[test]
 fn fit_with_border_letterboxes_transparent_black() {
     let Some((device, queue)) = gpu() else { return };
-    // Square white content on a 2:1 viewport, fit + border: u window is
-    // [-0.5, 1.5] (docs/render-architecture.md §4), so the outer quarters
-    // sample the border — GL default transparent black (CFBO.cpp:31-33).
     let page = ImagePage {
         width: 1,
         height: 1,

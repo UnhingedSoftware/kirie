@@ -1,19 +1,3 @@
-//! `kirie workshop` — browse the Steam Workshop, not just what is installed.
-//!
-//! [`crate::list`] answers "what do I have"; this answers "what is there". The
-//! two report the same keys (`id`, `title`, `type`, `preview`, `renderable`)
-//! so a picker can show installed and browsable wallpapers side by side, with
-//! `dir: null` marking the ones whose files have not arrived yet.
-//!
-//! kirie never links Steam. Every call here spawns `kirie-steam-helper`, which
-//! dlopens the user's own Steam client, answers one request as JSON and exits
-//! — see that crate's docs for why the connection must not be held open, and
-//! SPEC §V2 for why the unsafe lives there instead of here.
-//!
-//! What kirie adds on top of Steam's own answer is the thing Steam cannot say:
-//! whether *this build* can render an item, decided from the item's type by
-//! the same match the engine uses on load.
-
 #[cfg(feature = "tui")]
 pub mod tui;
 
@@ -23,74 +7,38 @@ use anyhow::{Context, Result, anyhow};
 
 use crate::compat::resolve;
 
-/// The most results Steam returns for one query, and so the most this will
-/// parse out of a helper answer (V9: a wrong count must not drive a big
-/// allocation).
 const PAGE_SIZE: usize = 50;
 
-/// One Workshop item as a search returned it.
 #[derive(Debug, Clone)]
 pub struct Item {
-    /// Workshop id.
     pub id: String,
-    /// The item's Workshop title.
     pub title: String,
-    /// `scene` / `video` / `web` / `application` / `unknown`, from the type tag
-    /// Steam carries on every item.
     pub kind: &'static str,
-    /// Where the item is installed, when it already is.
     pub dir: Option<PathBuf>,
-    /// The Workshop preview image — a URL here, where an installed item has a
-    /// local path.
     pub preview: Option<String>,
-    /// Whether **this build** can render it. Decided from `kind` alone, since
-    /// there are no files to inspect until it is installed.
     pub renderable: bool,
-    /// Why not, when `renderable` is false.
     pub reason: Option<String>,
-    /// Whether this account is subscribed to it.
     pub subscribed: bool,
-    /// Whether its files are on disk.
     pub installed: bool,
-    /// Bytes, as Steam reports them.
     pub size: u64,
-    /// Upvotes and downvotes.
     pub votes: (u32, u32),
-    /// Steam's own 0..=1 score.
     pub score: f32,
-    /// When the item was last updated, as a Unix timestamp.
     pub updated: u32,
-    /// The item's Workshop tags, verbatim.
     pub tags: Vec<String>,
 }
 
-/// What to ask the Workshop for.
 #[derive(Debug, Default, Clone)]
 pub struct Query {
-    /// Free-text search.
     pub text: Option<String>,
-    /// Tags an item must all carry (or any of, with `match_any_tag`).
     pub tags: Vec<String>,
-    /// Tags that disqualify an item.
     pub excluded_tags: Vec<String>,
-    /// Match any required tag rather than all of them.
     pub match_any_tag: bool,
-    /// `popular` / `trend` / `recent` / `rated`.
     pub sort: String,
-    /// The window `--sort trend` ranks over.
     pub trend_days: Option<u32>,
-    /// 1-based page.
     pub page: u32,
-    /// Keep at most this many results of the page.
     pub limit: Option<usize>,
 }
 
-/// Run one Workshop query.
-///
-/// # Errors
-/// When the helper is missing, Steam is not running, the account does not own
-/// Wallpaper Engine, or Steam refuses the query — each with the helper's own
-/// message, which says which of those it was.
 pub fn search(query: &Query) -> Result<Vec<Item>> {
     let mut args: Vec<String> = vec!["search".to_owned()];
     if let Some(text) = &query.text {
@@ -130,13 +78,6 @@ pub fn search(query: &Query) -> Result<Vec<Item>> {
     Ok(items)
 }
 
-/// Fill in what this machine already has.
-///
-/// A Workshop query answers for the item, not for the account: Steam's search
-/// results carry no "you have this" flag. The answer is on disk anyway — the
-/// workshop content directories and Steam's own bookkeeping — and reading it
-/// here costs one directory listing rather than a round trip per result, and
-/// works with the client closed.
 fn mark_local(items: &mut [Item]) {
     if items.is_empty() {
         return;
@@ -161,11 +102,6 @@ fn mark_local(items: &mut [Item]) {
         if let Some(dir) = installed.get(&item.id) {
             item.installed = true;
             item.dir = Some(dir.clone());
-            // Steam's tags are a guess about the files; the files themselves
-            // are not. Once an item is on disk, classify it the way the engine
-            // will when it loads it — which is also the only way `state` and
-            // `subscribe`, which get no tags back from Steam at all, can say
-            // anything about the wallpaper beyond its id.
             if let Some(local) = crate::list::describe(dir) {
                 item.kind = local.kind;
                 item.renderable = local.renderable;
@@ -181,15 +117,6 @@ fn mark_local(items: &mut [Item]) {
     }
 }
 
-/// Subscribe to one item, so Steam downloads it into the workshop directory
-/// kirie already reads.
-///
-/// Returns as soon as Steam accepts; the files land later. Callers that need
-/// them wait by watching the directory, never by asking Steam again — see the
-/// helper's docs.
-///
-/// # Errors
-/// As [`search`], plus Steam refusing the subscription itself.
 pub fn subscribe(id: &str) -> Result<Item> {
     let answer = ask_helper(&["subscribe".to_owned(), id.to_owned()])?;
     let mut item = item_from(&answer)?;
@@ -197,13 +124,6 @@ pub fn subscribe(id: &str) -> Result<Item> {
     Ok(item)
 }
 
-/// Drop this account's subscription to an item.
-///
-/// Steam removes the files on its own schedule, so the returned item may still
-/// report a directory: the subscription is what changed.
-///
-/// # Errors
-/// As [`search`], plus Steam refusing the unsubscribe itself.
 pub fn unsubscribe(id: &str) -> Result<Item> {
     let answer = ask_helper(&["unsubscribe".to_owned(), id.to_owned()])?;
     let mut item = item_from(&answer)?;
@@ -211,10 +131,6 @@ pub fn unsubscribe(id: &str) -> Result<Item> {
     Ok(item)
 }
 
-/// Report what Steam knows about one item without changing anything.
-///
-/// # Errors
-/// As [`search`].
 pub fn state(id: &str) -> Result<Item> {
     let answer = ask_helper(&["state".to_owned(), id.to_owned()])?;
     let mut item = item_from(&answer)?;
@@ -222,20 +138,6 @@ pub fn state(id: &str) -> Result<Item> {
     Ok(item)
 }
 
-/// Wait for Steam to finish downloading an item, reporting progress.
-///
-/// Deliberately filesystem-only. Asking Steam how a download is going means
-/// initialising Steamworks again, and every one of those announces the process
-/// as *playing Wallpaper Engine* and accrues playtime (measured — see the
-/// helper's module docs). Steam's own bookkeeping says the same thing for
-/// free: an item appears under `WorkshopItemsInstalled` when its files are
-/// complete, and the partial download has a directory whose size grows.
-///
-/// `on_progress` is called with the bytes fetched so far, about twice a
-/// second, and only while the number changes.
-///
-/// # Errors
-/// When the item has not arrived within `timeout`.
 pub fn wait_for_install(
     id: &str,
     timeout: std::time::Duration,
@@ -265,10 +167,6 @@ pub fn wait_for_install(
     }
 }
 
-/// Where an item's finished files are, if Steam says they are finished.
-///
-/// Both halves are required: the directory appears while the download is still
-/// running, and Steam's record is what marks it complete.
 fn installed_dir(id: &str) -> Option<PathBuf> {
     let complete = crate::compat::steam::workshop_item_states(crate::compat::args::WORKSHOP_APP_ID)
         .into_iter()
@@ -282,11 +180,6 @@ fn installed_dir(id: &str) -> Option<PathBuf> {
         .find(|dir| dir.join("project.json").is_file())
 }
 
-/// Bytes Steam has fetched for an item that is still downloading.
-///
-/// Steam stages a download under `steamapps/workshop/downloads/<app>/<id>` and
-/// moves it into `content` when it is done, so the staging directory's size is
-/// the progress. Zero before the transfer starts.
 fn partial_bytes(id: &str) -> u64 {
     fn dir_size(dir: &std::path::Path, depth: u32) -> u64 {
         if depth == 0 {
@@ -312,14 +205,6 @@ fn partial_bytes(id: &str) -> u64 {
         .sum()
 }
 
-/// Point a running engine at a wallpaper, over its control socket.
-///
-/// The socket is the engine's own `bg <screen> <path>` verb
-/// (docs/compat-socket.md §4), so this works against kirie and against the
-/// reference engine alike.
-///
-/// # Errors
-/// When no engine is listening on `socket`, or it refuses the command.
 pub fn apply(socket: &Path, screen: &str, dir: &Path) -> Result<()> {
     use std::io::{Read, Write};
 
@@ -350,11 +235,6 @@ pub fn apply(socket: &Path, screen: &str, dir: &Path) -> Result<()> {
     ))
 }
 
-/// Run the helper with these arguments plus every Steam library root, and
-/// parse its single line of JSON.
-///
-/// The helper reports failure as `{"error": "…"}` on stdout rather than by
-/// exit code alone, so that a caller always has something to show the user.
 fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
     let (helper, prefix) = helper_command()?;
 
@@ -364,18 +244,11 @@ fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
     for root in crate::compat::steam::libraries() {
         command.arg(root);
     }
-    // The Steam client writes its own diagnostics to stderr; only stdout is
-    // the answer, and it is one line.
     command.stderr(std::process::Stdio::null());
 
     let output = command
         .output()
         .with_context(|| format!("could not run {}", helper.display()))?;
-    // The answer is the LAST line, not the whole of stdout: the Steam client
-    // library the helper dlopens prints banners of its own when it starts up,
-    // and a client still coming up put one in front of the reply — which read
-    // as "the helper did not answer with JSON" for as long as Steam took to
-    // finish launching.
     let stdout = String::from_utf8_lossy(&output.stdout);
     let answer = stdout
         .lines()
@@ -392,18 +265,8 @@ fn ask_helper(args: &[String]) -> Result<serde_json::Value> {
     Ok(value)
 }
 
-/// Whether Steam is reachable and this account owns Wallpaper Engine.
-///
-/// `Ok(false)` is the ownership answer; `Err` is everything that stopped us
-/// asking (no Steam running, a client too old to carry the library), already
-/// phrased for a user to read.
-///
-/// # Errors
-/// When the helper could not ask Steam at all.
 pub fn probe() -> Result<bool> {
     let answer = ask_helper(&["probe".to_owned()])?;
-    // A refusal that is *about Steam* comes back as a normal answer with a
-    // reason, not as `error` — see the helper's `probe`.
     if let Some(detail) = answer.get("detail").and_then(serde_json::Value::as_str) {
         return Err(anyhow!(detail.to_owned()));
     }
@@ -413,13 +276,6 @@ pub fn probe() -> Result<bool> {
         .unwrap_or(false))
 }
 
-/// How to run the Steam bridge: a program, and the arguments that come before
-/// the verb.
-///
-/// Normally this binary re-executing itself — kirie ships as one file, so the
-/// bridge is not a second executable beside it. `KIRIE_STEAM_HELPER` still
-/// points at a standalone build, which is how the crate's own binary is
-/// exercised by hand.
 fn helper_command() -> Result<(PathBuf, Vec<String>)> {
     if let Some(explicit) = std::env::var_os("KIRIE_STEAM_HELPER") {
         let path = PathBuf::from(explicit);
@@ -431,21 +287,11 @@ fn helper_command() -> Result<(PathBuf, Vec<String>)> {
     Ok((exe, vec![kirie_steam_helper::HELPER_ARG.to_owned()]))
 }
 
-/// Whether the Steam bridge can be run at all.
-///
-/// Always, now that it is carried inside the engine — kept as a function
-/// because `kirie check` reports it, and because an install can still point
-/// `KIRIE_STEAM_HELPER` at something that is not there.
 #[must_use]
 pub fn helper_path() -> Option<PathBuf> {
     helper_command().ok().map(|(program, _)| program)
 }
 
-/// Build an [`Item`] from one helper result.
-///
-/// The helper's JSON is untrusted input like any other (V9): every field is
-/// optional here, and a result missing its id is dropped rather than guessed
-/// at.
 fn item_from(value: &serde_json::Value) -> Result<Item> {
     let id = value
         .get("id")
@@ -507,11 +353,6 @@ fn item_from(value: &serde_json::Value) -> Result<Item> {
     })
 }
 
-/// The wallpaper type Steam's tags declare.
-///
-/// Every Workshop item carries exactly one type tag; the rest describe its
-/// content. `Application` is matched first because an application item also
-/// carries `Wallpaper`.
 fn kind_from_tags(tags: &[String]) -> &'static str {
     let has = |name: &str| tags.iter().any(|tag| tag.eq_ignore_ascii_case(name));
     if has("Application") {
@@ -529,7 +370,6 @@ fn kind_from_tags(tags: &[String]) -> &'static str {
     }
 }
 
-/// The listing as a JSON array, sharing `kirie list`'s key names.
 #[must_use]
 pub fn to_json(items: &[Item]) -> String {
     let values: Vec<serde_json::Value> = items
@@ -557,26 +397,16 @@ pub fn to_json(items: &[Item]) -> String {
     serde_json::Value::Array(values).to_string()
 }
 
-/// A subscription in flight, as `workshop job <n>` reports it.
-///
-/// The states are the ones a shell shows: Steam accepted it, the files are
-/// coming, they arrived, or it went wrong.
 #[derive(Debug, Clone)]
 pub struct Job {
-    /// The Workshop id being fetched.
     pub id: String,
-    /// `subscribing` / `downloading` / `installed` / `error`.
     pub state: &'static str,
-    /// Bytes fetched so far, while downloading.
     pub bytes: u64,
-    /// Where the files landed, once they did.
     pub dir: Option<PathBuf>,
-    /// What went wrong, when `state` is `error`.
     pub error: Option<String>,
 }
 
 impl Job {
-    /// The job as the socket reports it — one line, no embedded newline.
     #[must_use]
     fn to_json(&self, job: u64) -> String {
         serde_json::json!({
@@ -591,18 +421,11 @@ impl Job {
     }
 }
 
-/// Subscriptions started over the control socket.
-///
-/// A download outlives the request that started it — the socket has no event
-/// stream and clients time out in seconds (docs/compat-socket.md §6) — so the
-/// subscription answers with a job id and the progress is left here for
-/// whoever asks next.
 #[derive(Debug, Default)]
 pub struct Jobs {
     inner: std::sync::Mutex<JobTable>,
 }
 
-/// The job table itself: a counter and the jobs it has handed out.
 #[derive(Debug, Default)]
 struct JobTable {
     next: u64,
@@ -610,16 +433,12 @@ struct JobTable {
 }
 
 impl Jobs {
-    /// Record a new job for an id, returning its number.
     fn start(&self, id: &str) -> u64 {
         let Ok(mut table) = self.inner.lock() else {
             return 0;
         };
         table.next += 1;
         let number = table.next;
-        // Keep the table from growing without bound over a long-lived daemon:
-        // a finished job is only interesting until someone reads it, and 64 is
-        // far more than any shell has in flight.
         if table.jobs.len() >= 64
             && let Some(oldest) = table
                 .jobs
@@ -643,8 +462,6 @@ impl Jobs {
         number
     }
 
-    /// Update one job in place. A poisoned lock is dropped silently: losing
-    /// progress is better than taking the daemon down with it (V9).
     fn update(&self, number: u64, edit: impl FnOnce(&mut Job)) {
         if let Ok(mut table) = self.inner.lock()
             && let Some(job) = table.jobs.get_mut(&number)
@@ -653,17 +470,11 @@ impl Jobs {
         }
     }
 
-    /// One job, if it exists.
     fn get(&self, number: u64) -> Option<Job> {
         self.inner.lock().ok()?.jobs.get(&number).cloned()
     }
 }
 
-/// Parse a `workshop search` argument line (`key=value`, space-separated).
-///
-/// `text=` takes the rest of the line, since a search phrase has spaces in it;
-/// everything before it is a filter. An unknown key is ignored rather than
-/// refused — a newer shell talking to an older engine should still search.
 #[must_use]
 pub fn query_from_args(line: &str) -> Query {
     let mut query = Query {
@@ -679,16 +490,11 @@ pub fn query_from_args(line: &str) -> Query {
             rest = tail;
             continue;
         };
-        // A value may be quoted, because Workshop tags have spaces in them
-        // ("Audio responsive", "Puppet Warp"): unquoted, the tag was cut at
-        // the space and matched nothing at all.
         let value = value
             .strip_prefix('"')
             .and_then(|v| v.strip_suffix('"'))
             .unwrap_or(value);
         match key {
-            // A bare `text=` takes the rest of the line; a quoted one ends at
-            // its closing quote, so filters may follow it.
             "text" => {
                 let quoted = token.starts_with("text=\"");
                 let phrase = if quoted || tail.is_empty() {
@@ -715,11 +521,6 @@ pub fn query_from_args(line: &str) -> Query {
     query
 }
 
-/// Split one `key=value` token off an argument line, honouring quotes.
-///
-/// Returns the token and whatever follows it. A quoted value runs to its
-/// closing quote (or the end of the line, for an unterminated one — a bad
-/// request must not lose the rest of the query, V9).
 fn split_token(rest: &str) -> (&str, &str) {
     let quote_at = rest.find("=\"");
     let end = match quote_at {
@@ -728,8 +529,6 @@ fn split_token(rest: &str) -> (&str, &str) {
             .map_or(rest.len(), |close| open + 2 + close + 1),
         None => rest.len(),
     };
-    // A quote that turns up after the first whitespace belongs to a later
-    // token, so it does not extend this one.
     let space = rest.find(char::is_whitespace).unwrap_or(rest.len());
     let cut = if quote_at.is_some_and(|at| at < space) {
         end
@@ -739,12 +538,6 @@ fn split_token(rest: &str) -> (&str, &str) {
     (&rest[..cut], rest[cut..].trim_start())
 }
 
-/// Answer one control-socket `workshop` request.
-///
-/// Never blocks the caller: every verb that talks to Steam is run on its own
-/// thread and answers through `reply`, because the app loop it is called from
-/// also drives wallpaper swaps (SPEC V4). `subscribe` answers immediately with
-/// a job number and follows the download in the background.
 pub fn serve_socket(
     jobs: &std::sync::Arc<Jobs>,
     request: kirie_ipc::WorkshopRequest,
@@ -752,8 +545,6 @@ pub fn serve_socket(
 ) {
     use kirie_ipc::WorkshopRequest as W;
 
-    /// An error the shell can show, in the same one-line JSON shape as a
-    /// result.
     fn error(message: &str) -> String {
         serde_json::json!({ "error": message }).to_string()
     }
@@ -791,8 +582,6 @@ pub fn serve_socket(
             }
             W::Subscribe(id) => {
                 let number = jobs.start(&id);
-                // Answer before the download, not after it: this is the whole
-                // reason subscriptions are jobs.
                 match subscribe(&id) {
                     Ok(item) => {
                         let _ = reply.send(serde_json::json!({ "job": number, "id": item.id }).to_string());
@@ -814,10 +603,6 @@ pub fn serve_socket(
     }
 }
 
-/// Follow a subscription's download to its end, recording progress on the job.
-///
-/// Filesystem-only, like [`wait_for_install`]: asking Steam would announce the
-/// daemon as playing Wallpaper Engine on every poll.
 fn follow_download(jobs: &Jobs, number: u64, item: &Item) {
     if let Some(dir) = &item.dir {
         jobs.update(number, |job| {
@@ -842,10 +627,6 @@ fn follow_download(jobs: &Jobs, number: u64, item: &Item) {
     }
 }
 
-/// Run `kirie workshop search`.
-///
-/// # Errors
-/// When the query itself could not be run — see [`search`].
 pub fn run_search(query: &Query, json: bool) -> Result<()> {
     let items = search(query)?;
 
@@ -861,8 +642,6 @@ pub fn run_search(query: &Query, json: bool) -> Result<()> {
 
     let width = items.iter().map(|i| i.id.len()).max().unwrap_or(0);
     for item in &items {
-        // Mirrors `kirie list`: a blank column is a wallpaper this build can
-        // render, `!` one it cannot, `-` an asset that was never meant to be.
         let mark = match (item.renderable, item.kind) {
             (true, _) => ' ',
             (false, "asset") => '-',
@@ -894,26 +673,11 @@ pub fn run_search(query: &Query, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// How long `--wait` gives Steam before handing the user back their shell.
-///
-/// Generous on purpose: a large scene wallpaper on a slow line takes minutes,
-/// and giving up does not cancel anything — Steam keeps downloading.
 const WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Run `kirie workshop subscribe`.
-///
-/// `wait` blocks until the files land; `apply` implies it, then shows the
-/// wallpaper on that screen through a running engine's control socket.
-///
-/// # Errors
-/// When Steam refuses the subscription, the download does not finish within
-/// [`WAIT_TIMEOUT`], or no engine is listening for `--apply`.
 pub fn run_subscribe(id: &str, wait: bool, apply_to: Option<&str>, socket: &Path, json: bool) -> Result<()> {
     let item = subscribe(id)?;
 
-    // JSON is a machine's view of one moment; waiting is a human affordance,
-    // so the two do not mix — a caller that wants progress watches the
-    // directory itself, exactly as this does.
     if json {
         println!("{}", to_json(std::slice::from_ref(&item)));
         return Ok(());
@@ -933,8 +697,6 @@ pub fn run_subscribe(id: &str, wait: bool, apply_to: Option<&str>, socket: &Path
             print!("downloading… ");
             let _ = std::io::Write::flush(&mut std::io::stdout());
             let dir = wait_for_install(id, WAIT_TIMEOUT, |bytes| {
-                // One line, rewritten: a progress log that scrolls is noise in
-                // a terminal and garbage in a pipe.
                 print!("\rdownloading… {}   ", human_size(bytes));
                 let _ = std::io::Write::flush(&mut std::io::stdout());
             })?;
@@ -954,10 +716,6 @@ pub fn run_subscribe(id: &str, wait: bool, apply_to: Option<&str>, socket: &Path
     Ok(())
 }
 
-/// Run `kirie workshop unsubscribe`.
-///
-/// # Errors
-/// As [`unsubscribe`].
 pub fn run_unsubscribe(id: &str, json: bool) -> Result<()> {
     let item = unsubscribe(id)?;
     if json {
@@ -972,10 +730,6 @@ pub fn run_unsubscribe(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run `kirie workshop state`.
-///
-/// # Errors
-/// As [`state`].
 pub fn run_state(id: &str, json: bool) -> Result<()> {
     let item = state(id)?;
     if json {
@@ -996,8 +750,6 @@ pub fn run_state(id: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-/// Bytes as a short human string (Steam reports sizes for items nobody has
-/// downloaded, so this is the only place they are formatted).
 fn human_size(bytes: u64) -> String {
     #[expect(
         clippy::cast_precision_loss,
@@ -1022,8 +774,6 @@ mod tests {
 
     #[test]
     fn a_quoted_tag_keeps_its_spaces() {
-        // Workshop tags have spaces in them; unquoted, "Audio responsive" was
-        // cut at the space and matched nothing.
         let query = query_from_args(r#"tag="Audio responsive" tag=Scene sort=trend"#);
         assert_eq!(query.tags, vec!["Audio responsive", "Scene"]);
         assert_eq!(query.sort, "trend");
@@ -1045,8 +795,6 @@ mod tests {
 
     #[test]
     fn an_unterminated_quote_does_not_eat_the_query() {
-        // V9: malformed input answers something sane rather than dropping the
-        // rest of the request on the floor.
         let query = query_from_args(r#"tag="Puppet Warp sort=trend"#);
         assert_eq!(query.tags, vec![r#""Puppet Warp sort=trend"#]);
     }
@@ -1086,7 +834,6 @@ mod tests {
 
     #[test]
     fn hostile_input_never_panics() {
-        // V9: the helper's output is untrusted. Nothing here may abort.
         for value in [
             serde_json::json!({}),
             serde_json::json!({ "id": 5 }),

@@ -1,17 +1,3 @@
-//! Integration tests for the `linux-wallpaperengine` compat surface
-//! (docs/compat-cli.md, docs/compat-socket.md).
-//!
-//! Two tiers:
-//!
-//! * **arg-parse table tests** call the library parser directly
-//!   ([`kirie::compat::args`]) — the exact daemon launch line
-//!   (fixtures/cpp-live-cmdline.txt) and the doc §3/§4 edge cases;
-//! * **live e2e** (gated on `$WAYLAND_DISPLAY` + the workshop corpus) drives
-//!   the built binary against the real compositor: a video wallpaper in
-//!   `--window` for a few seconds, an offscreen `--screenshot`, and the
-//!   control socket with byte-exact responses (doc §9). The live scenarios
-//!   run sequentially inside one test to avoid GPU/compositor contention.
-
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::Shutdown;
@@ -22,21 +8,15 @@ use std::time::{Duration, Instant};
 
 use kirie::compat::args::{self, ClampMode, ScalingMode, WindowMode};
 
-/// The corpus video item (SPEC §C: the one `"type":"video"` workshop item).
 const CORPUS_VIDEO: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960/3600453929";
-/// The corpus scene item used by the live daemon (fixtures/cpp-live-cmdline.txt).
 const CORPUS_SCENE: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960/3047596375";
 
 fn os(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
 }
 
-// ---- arg-parse table tests (corpus-independent) ---------------------------
-
 #[test]
 fn exact_live_cmdline_parses_to_expected_model() {
-    // fixtures/cpp-live-cmdline.txt (doc §8.1 [observed]) with the task's test
-    // socket path substituted for the daemon's.
     let argv = os(&[
         "linux-wallpaperengine",
         "--control-socket",
@@ -104,16 +84,12 @@ fn exact_live_cmdline_parses_to_expected_model() {
 #[test]
 fn geometry_parse_cases() {
     let g = |s: &str| args::parse(&os(&["kirie", "--window", s, "/tmp/x"])).map(|a| a.window);
-    // Full geometry.
     let w = g("100x200x1920x1080").unwrap().unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (100, 200, 1920, 1080));
-    // doc §3.2: extra x components are ignored.
     let w = g("1x2x3x4x5").unwrap().unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (1, 2, 3, 4));
-    // doc §3.2: garbage components strtol to 0.
     let w = g("axbx1920x1080").unwrap().unwrap();
     assert_eq!((w.x, w.y, w.w, w.h), (0, 0, 1920, 1080));
-    // Fewer than three delimiters is fatal.
     assert!(g("1920x1080").is_err());
 }
 
@@ -133,8 +109,6 @@ fn help_flag_exits_zero() {
 
 #[test]
 fn unknown_flag_is_ignored_then_missing_background_fails() {
-    // doc §4.1: an unknown flag is not itself an error; the run fails only on
-    // the missing background (doc §4.8).
     let out = Command::new(env!("CARGO_BIN_EXE_kirie"))
         .arg("--bogus-flag")
         .output()
@@ -149,7 +123,6 @@ fn unknown_flag_is_ignored_then_missing_background_fails() {
 
 #[test]
 fn bad_choice_exits_nonzero() {
-    // doc §4.6: a bad --scaling choice is fatal with the allowed-options message.
     let out = Command::new(env!("CARGO_BIN_EXE_kirie"))
         .args(["--scaling", "nope", "/tmp/x"])
         .output()
@@ -161,8 +134,6 @@ fn bad_choice_exits_nonzero() {
 
 #[test]
 fn info_subcommand_still_works() {
-    // The existing subcommand surface must keep working (task: extend, don't
-    // break). `info` on a missing path fails cleanly.
     let out = Command::new(env!("CARGO_BIN_EXE_kirie"))
         .args(["info", "/nonexistent/kirie-compat-test"])
         .output()
@@ -171,9 +142,6 @@ fn info_subcommand_still_works() {
     assert!(!out.stderr.is_empty());
 }
 
-// ---- live e2e (gated on $WAYLAND_DISPLAY + the corpus) ---------------------
-
-/// The socket path the task specifies; a unique suffix avoids stale-file races.
 fn socket_path() -> PathBuf {
     let dir = std::env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
@@ -190,7 +158,6 @@ fn have_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
-/// Wait up to `timeout` for `child` to exit; kill it if it overruns.
 fn wait_or_kill(child: &mut Child, timeout: Duration) -> Option<std::process::ExitStatus> {
     let deadline = Instant::now() + timeout;
     loop {
@@ -209,12 +176,10 @@ fn wait_or_kill(child: &mut Child, timeout: Duration) -> Option<std::process::Ex
     }
 }
 
-/// One request/response round trip (doc §2: one line, one response, close).
 fn socket_roundtrip(path: &Path, request: &[u8]) -> std::io::Result<Vec<u8>> {
     let mut stream = UnixStream::connect(path)?;
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.write_all(request)?;
-    // Half-close so the server also sees EOF (doc §2 step 3-4).
     let _ = stream.shutdown(Shutdown::Write);
     let mut buf = Vec::new();
     stream.read_to_end(&mut buf)?;
@@ -234,10 +199,6 @@ fn live_e2e_video_window_screenshot_and_socket() {
     let video_str = video.to_string_lossy().into_owned();
     let bin = env!("CARGO_BIN_EXE_kirie");
 
-    // (1) Video wallpaper in --window mode for 5s → clean exit 0. --window
-    // falls back to a layer-shell surface (kirie-platform exposes no xdg
-    // toplevel — reported as a blocker); the run is bounded by
-    // KIRIE_RUN_SECONDS so it exits on its own.
     {
         let mut child = Command::new(bin)
             .args(["--window", "0x0x1280x720", "--bg", &video_str])
@@ -254,7 +215,6 @@ fn live_e2e_video_window_screenshot_and_socket() {
         );
     }
 
-    // (2) Offscreen --screenshot → a non-black PNG (unlocks the P4 SSIM gate).
     {
         let shot = std::env::temp_dir().join(format!("kirie-shot-{}.png", std::process::id()));
         let _ = std::fs::remove_file(&shot);
@@ -284,7 +244,6 @@ fn live_e2e_video_window_screenshot_and_socket() {
         let _ = std::fs::remove_file(&shot);
     }
 
-    // (3) Control socket: byte-exact responses (doc §9) + clean shutdown.
     {
         let sock = socket_path();
         let _ = std::fs::remove_file(&sock);
@@ -298,13 +257,11 @@ fn live_e2e_video_window_screenshot_and_socket() {
             .spawn()
             .expect("spawn --control-socket");
 
-        // Daemon readiness: the socket file must appear within ~5s (doc §8.3).
         let deadline = Instant::now() + Duration::from_secs(5);
         while !sock.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(sock.exists(), "control socket never appeared (doc §8.3)");
-        // Give the applier a moment to seed its screen registry.
         std::thread::sleep(Duration::from_millis(200));
 
         let want_status = format!("speed=1\nscreen=HDMI-A-1 bg={video_str}\n").into_bytes();
@@ -314,10 +271,8 @@ fn live_e2e_video_window_screenshot_and_socket() {
         assert_eq!(socket_roundtrip(&sock, b"speed 0.5\n").unwrap(), b"ok\n");
         assert_eq!(socket_roundtrip(&sock, b"volume 30\n").unwrap(), b"ok\n");
         assert_eq!(socket_roundtrip(&sock, b"mute 1\n").unwrap(), b"ok\n");
-        // Speed change is reflected in status (doc §4.2/§4.3).
         let after = format!("speed=0.5\nscreen=HDMI-A-1 bg={video_str}\n").into_bytes();
         assert_eq!(socket_roundtrip(&sock, b"status\n").unwrap(), after);
-        // Fixed vocabulary (doc §9).
         assert_eq!(
             socket_roundtrip(&sock, b"frobnicate\n").unwrap(),
             b"unknown command\n"
@@ -326,12 +281,8 @@ fn live_e2e_video_window_screenshot_and_socket() {
             socket_roundtrip(&sock, b"scaling HDMI-A-1 bogusmode\n").unwrap(),
             b"error\n"
         );
-        // Empty request → zero response bytes (doc §2 step 5).
         assert_eq!(socket_roundtrip(&sock, b"\n").unwrap(), Vec::<u8>::new());
 
-        // Clean shutdown: the bounded run exits 0 and unlinks the socket file
-        // on the clean teardown path (doc §1). No `stop` command exists in the
-        // protocol (doc §6) — the engine stops on the run bound / a signal.
         let status =
             wait_or_kill(&mut child, Duration::from_secs(10)).expect("socket run did not exit within 10s");
         assert!(status.success(), "socket run exited with {status:?}");

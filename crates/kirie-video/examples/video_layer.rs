@@ -1,25 +1,9 @@
-//! Play a video wallpaper on every output as a background layer-shell
-//! surface for `--seconds N` (default 4), then exit cleanly. Live-verify
-//! harness for SPEC T10, patterned after kirie-platform's `layer_clear`.
-//!
-//! ```sh
-//! cargo run -p kirie-video --example video_layer -- \
-//!     --path ~/.steam/steam/steamapps/workshop/content/431960/3600453929/*.mp4 \
-//!     --seconds 4 --scaling fill --volume 0
-//! ```
-//!
-//! Defaults: the corpus video (docs/subsystems-misc.md header, item
-//! 3600453929), 4 seconds, `fill`, volume 0 (audio pipeline still runs so
-//! the audio-master clock is exercised — `--silent` semantics,
-//! docs/subsystems-misc.md §2.3).
-
 use std::path::PathBuf;
 use std::time::Duration;
 
 use kirie_platform::Platform;
 use kirie_video::{ScalingMode, VideoOptions, VideoPlayer, VideoRenderer};
 
-/// Corpus fallback (SPEC §C corpus; the one `"type":"video"` item).
 const CORPUS_ITEM: &str = ".steam/steam/steamapps/workshop/content/431960/3600453929";
 
 struct Args {
@@ -92,8 +76,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let options = VideoOptions {
             volume: args.volume,
             mute: args.mute,
-            // Volume 0 ≙ --silent playback; keep the audio pipeline (and
-            // therefore the audio-master clock) alive regardless.
             silent: args.volume <= 0.0,
             scaling: args.scaling,
             ..VideoOptions::default()

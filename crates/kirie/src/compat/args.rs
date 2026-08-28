@@ -1,52 +1,29 @@
-//! The `linux-wallpaperengine` compat flag surface: the parsed model
-//! ([`CompatArgs`]), the hand-rolled parser ([`parse`]), the exact `--help`
-//! synopsis, and typed parse errors — all per docs/compat-cli.md.
-//!
-//! The parser is hand-rolled rather than clap-driven because spec fidelity
-//! wins over ergonomics: argument *order* is load-bearing for the per-screen
-//! options (doc §3.1), unknown flags must be silently ignored (doc §4.1),
-//! `--flag=value` must split at the first `=` (doc §4.2), repeating a
-//! non-repeatable flag is fatal (doc §4.4), and the mutually-exclusive
-//! `-w`/`-r` and `-v`/`-s` groups are *not* enforced (doc §4.3) — only the
-//! hand-coded window/background mode conflict is (doc §3.1, §3.2).
-
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 use crate::compat::playlist::{self, PlaylistDefinition};
 use crate::compat::resolve;
 
-/// Wallpaper Engine's Steam Workshop app id (doc §3.4, ApplicationContext.cpp:19).
 pub const WORKSHOP_APP_ID: &str = "431960";
 
-/// The three window modes (doc §3.3, ApplicationContext.h:34-41).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WindowMode {
-    /// `NORMAL_WINDOW`: preview window, no `-w`/`-r` given.
     #[default]
     Normal,
-    /// `DESKTOP_BACKGROUND`: at least one `-r`/`--screen-span`.
     DesktopBackground,
-    /// `EXPLICIT_WINDOW`: `-w`/`--window` given.
     ExplicitWindow,
 }
 
-/// Wayland `wlr-layer-shell` layer, CLI `--layer` (doc §2, default `bottom`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Layer {
-    /// `background` layer (use on niri with `place-within-backdrop`).
     Background,
-    /// `bottom` layer — the C++ default (doc §2).
     #[default]
     Bottom,
-    /// `top` layer.
     Top,
-    /// `overlay` layer.
     Overlay,
 }
 
 impl Layer {
-    /// The CLI spelling of this layer (doc §2 choices).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -58,24 +35,16 @@ impl Layer {
     }
 }
 
-/// Output scaling mode, CLI `--scaling` (doc §2, §3.1: `stretch`/`fit`/
-/// `fill`/`default`). Compat-local so the parser is self-contained; mapped to
-/// the `kirie-render`/`kirie-video` enums at run time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScalingMode {
-    /// `default` → `DefaultUVs` (the CLI default, doc §2).
     #[default]
     Default,
-    /// `fit` → `ZoomFitUVs`.
     Fit,
-    /// `fill` → `ZoomFillUVs`.
     Fill,
-    /// `stretch` → `StretchUVs`.
     Stretch,
 }
 
 impl ScalingMode {
-    /// The CLI spelling (doc §2 choices).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -87,20 +56,15 @@ impl ScalingMode {
     }
 }
 
-/// UV clamp mode, CLI `--clamp` (doc §2, §3.1: `clamp`/`border`/`repeat`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ClampMode {
-    /// `clamp` → `TextureFlags_ClampUVs` (the CLI default, doc §2).
     #[default]
     Clamp,
-    /// `border` → `TextureFlags_ClampUVsBorder`.
     Border,
-    /// `repeat` → `TextureFlags_NoFlags`.
     Repeat,
 }
 
 impl ClampMode {
-    /// The CLI spelling (doc §2 choices).
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -111,151 +75,72 @@ impl ClampMode {
     }
 }
 
-/// `--window XxYxWxH` geometry (doc §3.2): X/Y position, width, height,
-/// `strtol` base-10 parsed (garbage → 0, no range validation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowGeometry {
-    /// X position.
     pub x: i64,
-    /// Y position.
     pub y: i64,
-    /// Width.
     pub w: i64,
-    /// Height.
     pub h: i64,
 }
 
-/// One `--render-debug` switch (doc §3.9).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderDebug {
-    /// `base-only`.
     BaseOnly,
-    /// `no-solid-final`.
     NoSolidFinal,
-    /// `pass-log`.
     PassLog,
-    /// `object=<id>`.
     Object(i64),
-    /// `skip-object=<id>`.
     SkipObject(i64),
-    /// `skip-effect=<id>`.
     SkipEffect(i64),
 }
 
-/// One `-r`/`--screen-root` or `--screen-span` output, in declaration order,
-/// with the per-screen options that followed it (doc §3.1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScreenConfig {
-    /// Registration key: the `-r` output name, or `span:<raw value>` for a
-    /// span group (doc §3.1).
     pub name: String,
-    /// Whether this is a `--screen-span` group.
     pub is_span: bool,
-    /// Member output names (span groups only).
     pub members: Vec<String>,
-    /// Background for this screen (`translateBackground`-resolved, doc §3.4);
-    /// `None` means inherit `default_background` at load time (doc §3.1).
     pub background: Option<String>,
-    /// Scaling mode for this screen (inherits the window default at `-r`
-    /// time, doc §3.1).
     pub scaling: ScalingMode,
-    /// Clamp mode for this screen (inherits the window default at `-r` time).
     pub clamp: ClampMode,
-    /// Per-screen playlist, if a `--playlist` followed this `-r` (doc §3.5):
-    /// resolved from wallpaper engine's `config.json` at parse time
-    /// (ApplicationContext.cpp:378-403); its first item seeded `background`.
     pub playlist: Option<PlaylistDefinition>,
 }
 
-/// The fully parsed compat command line (doc §2 flag table).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompatArgs {
-    /// Every argv element verbatim, for the `Running with:` banner (doc §1.2)
-    /// and the `--help` error suffix (doc §4.7).
     pub argv: Vec<String>,
-    /// `-h`/`--help` seen.
     pub help: bool,
-    /// Declared screens/spans in order (doc §3.1).
     pub screens: Vec<ScreenConfig>,
-    /// `-w`/`--window` geometry (doc §3.2).
     pub window: Option<WindowGeometry>,
-    /// Window/global default scaling — the value inherited by later `-r`
-    /// screens and used in window mode (doc §3.1).
     pub window_scaling: ScalingMode,
-    /// Window/global default clamp (doc §3.1).
     pub window_clamp: ClampMode,
-    /// Window-mode default playlist (doc §3.5), if `--playlist` was given
-    /// before any `-r` — resolved from wallpaper engine's `config.json` at
-    /// parse time (ApplicationContext.cpp:378-403). Its first item is what
-    /// window mode shows (WallpaperApplication.cpp:192-195).
     pub window_playlist: Option<PlaylistDefinition>,
-    /// `general.defaultBackground`: the last `--bg`/positional wins (doc §3.1,
-    /// §3.4-resolved). `None` when never set → fatal at validation (doc §4.8).
     pub default_background: Option<String>,
-    /// The resolved window mode (doc §3.3).
     pub mode: WindowMode,
-    /// `--layer` (doc §2).
     pub layer: Layer,
-    /// `-f`/`--fps` (doc §2, default 30).
     pub fps: i64,
-    /// `--playback-speed`/`--clock` (doc §2, default 1.0).
     pub playback_speed: f64,
-    /// `--render-scale` (doc §2, default 1.0; clamped [0.5, 2.0] at use).
     pub render_scale: f64,
-    /// `--control-socket` path (doc §2, `None` = disabled).
     pub control_socket: Option<PathBuf>,
-    /// `--audio-device` (doc §2, `None` = default monitor).
     pub audio_device: Option<String>,
-    /// `--no-fullscreen-pause` (doc §2).
     pub no_fullscreen_pause: bool,
-    /// `--fullscreen-pause-only-active` (doc §2).
     pub fullscreen_pause_only_active: bool,
-    /// `--fullscreen-pause-ignore-appid` values (doc §2, repeatable; empty
-    /// values discarded, doc §2 note).
     pub fullscreen_pause_ignore_appid: Vec<String>,
-    /// `--release-hidden-after <secs>`: drop a wallpaper's renderer once it has
-    /// been hidden behind a fullscreen app this long, rebuilding it when it
-    /// becomes visible again. `None` (the default) keeps it resident.
     pub release_hidden_after: Option<u64>,
-    /// `--battery-fps <n>`: the frame cap the power watcher applies while the
-    /// machine runs on battery (kirie extension). `0` disables the battery
-    /// profile entirely. Default 10.
     pub battery_fps: u32,
-    /// `--fit-render-to-output`: cap scene render targets at the output size
-    /// instead of the scene's authored projection (trades the reference's
-    /// implicit supersampling AA for ~20% fewer fragments when the projection
-    /// is larger than the display).
     pub fit_render_to_output: bool,
-    /// `-v`/`--volume` (doc §2, default 15; clamped [0,128] at validation).
     pub volume: i64,
-    /// `-s`/`--silent` (doc §2).
     pub silent: bool,
-    /// `--noautomute` (doc §2).
     pub noautomute: bool,
-    /// `--no-audio-processing` (doc §2).
     pub no_audio_processing: bool,
-    /// `--screenshot` path (doc §2/§3.6, `None` = off).
     pub screenshot: Option<PathBuf>,
-    /// `--screenshot-delay` frames (doc §2, default 5; clamped [0,600]).
     pub screenshot_delay: u32,
-    /// `--assets-dir` (doc §2, `None` = auto-detect).
     pub assets_dir: Option<PathBuf>,
-    /// `--disable-particles` (doc §2).
     pub disable_particles: bool,
-    /// `--disable-mouse` (doc §2).
     pub disable_mouse: bool,
-    /// `--disable-parallax` (doc §2).
     pub disable_parallax: bool,
-    /// `-l`/`--list-properties` (doc §3.8).
     pub list_properties: bool,
-    /// `--list-properties-json` (doc §3.8).
     pub list_properties_json: bool,
-    /// `--set-property`/`--property` `(key, value)` pairs (doc §3.10, order
-    /// preserved; bare key → value `"1"`).
     pub set_properties: Vec<(String, String)>,
-    /// `-z`/`--dump-structure` (doc §2).
     pub dump_structure: bool,
-    /// `--render-debug` switches (doc §3.9).
     pub render_debug: Vec<RenderDebug>,
 }
 
@@ -302,15 +187,9 @@ impl Default for CompatArgs {
     }
 }
 
-/// A fatal parse error (doc §4). `doubled` controls the doc §4.7 stderr
-/// doubling: `sLog.exception` errors print once bare, then again with the
-/// `. Use <argv0> --help for more information` suffix; argparse scan/choices
-/// errors print once (the suffix is embedded in `message` where present).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParseError {
-    /// The primary message (matches the C++ text reasonably closely).
     pub message: String,
-    /// Whether to reproduce the doc §4.7 doubling.
     pub doubled: bool,
 }
 
@@ -330,13 +209,6 @@ impl ParseError {
     }
 }
 
-/// The exact `--help` synopsis the real binary prints (doc §2 [observed]),
-/// rendered as a single Usage line followed by the grouped detail listing.
-///
-/// The real binary prints the synopsis on one physical line; this wraps it
-/// only for readability of the leading `Usage:` block, matching the doc's
-/// verbatim capture in fixtures/cpp-help-capture.txt closely enough for
-/// tooling (no daemon script parses `--help`).
 pub const HELP_TEXT: &str = concat!(
     "Usage: linux-wallpaperengine [--help] [[--window VAR]...|[--screen-root VAR]...] ",
     "[--screen-span VAR]... [--bg VAR]... [--playlist VAR]... [--scaling VAR]... ",
@@ -351,9 +223,6 @@ pub const HELP_TEXT: &str = concat!(
     "[--render-debug VAR]... background id\n",
 );
 
-/// Parse an integer with C `strtol` base-10 semantics used by `--window`
-/// (doc §3.2): optional sign, longest decimal-digit prefix, garbage → 0. No
-/// range validation (the C++ stores whatever `strtol` returns).
 fn strtol(s: &str) -> i64 {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -380,9 +249,6 @@ fn strtol(s: &str) -> i64 {
     if neg { -v } else { v }
 }
 
-/// Parse `--window XxYxWxH` (doc §3.2): at least three `x` delimiters
-/// (≥ 4 components) required; each component's `strtol` stops at the next
-/// non-digit, so extra `x`s are harmless (`1x2x3x4x5` → x=1 y=2 w=3 h=4).
 fn parse_geometry(value: &str) -> Result<WindowGeometry, ParseError> {
     let parts: Vec<&str> = value.split('x').collect();
     if parts.len() < 4 {
@@ -398,9 +264,6 @@ fn parse_geometry(value: &str) -> Result<WindowGeometry, ParseError> {
     })
 }
 
-/// Longest-prefix decimal parse for `--fps`/`--volume`/`--screenshot-delay`
-/// (argparse `.scan<'i', int>()`): a bare integer. A value that is not a
-/// clean integer is a fatal scan error (doc §4.5).
 fn scan_int(flag: &str, value: &str) -> Result<i64, ParseError> {
     value
         .trim()
@@ -408,8 +271,6 @@ fn scan_int(flag: &str, value: &str) -> Result<i64, ParseError> {
         .map_err(|_| ParseError::single(format!("Invalid numeric value '{value}' for {flag}")))
 }
 
-/// Float parse for `--playback-speed`/`--render-scale` (argparse
-/// `.scan<'g', double>()`).
 fn scan_float(flag: &str, value: &str) -> Result<f64, ParseError> {
     value
         .trim()
@@ -417,8 +278,6 @@ fn scan_float(flag: &str, value: &str) -> Result<f64, ParseError> {
         .map_err(|_| ParseError::single(format!("Invalid numeric value '{value}' for {flag}")))
 }
 
-/// Validate a `.choices(...)` value (doc §4.6), producing the C++ message
-/// shape on rejection.
 fn choice<T: Copy>(argv0: &str, flag_value: &str, allowed: &[(&str, T)]) -> Result<T, ParseError> {
     if let Some((_, v)) = allowed.iter().find(|(s, _)| *s == flag_value) {
         return Ok(*v);
@@ -430,13 +289,11 @@ fn choice<T: Copy>(argv0: &str, flag_value: &str, allowed: &[(&str, T)]) -> Resu
     )))
 }
 
-/// A `render-debug` numeric argument (doc §3.9); non-numeric is fatal.
 fn render_debug_int(rest: &str) -> Result<i64, ParseError> {
     rest.parse::<i64>()
         .map_err(|_| ParseError::doubled(format!("Invalid numeric value for --render-debug: {rest}")))
 }
 
-/// Parse one `--render-debug MODE` value (doc §3.9 table).
 fn parse_render_debug(value: &str) -> Result<RenderDebug, ParseError> {
     match value {
         "base-only" => Ok(RenderDebug::BaseOnly),
@@ -456,8 +313,6 @@ fn parse_render_debug(value: &str) -> Result<RenderDebug, ParseError> {
     }
 }
 
-/// Which flags may appear only once (doc §2 "Rep?" = no, doc §4.4). A second
-/// use is a fatal `Duplicate argument --X` error.
 fn is_non_repeatable(canonical: &str) -> bool {
     matches!(
         canonical,
@@ -486,8 +341,6 @@ fn is_non_repeatable(canonical: &str) -> bool {
     )
 }
 
-/// Whether a flag consumes a following value (or the inline `--flag=value`).
-/// Flag-only options (booleans, `--help`) take no value (doc §2 table).
 fn flag_takes_value(canonical: &str) -> bool {
     matches!(
         canonical,
@@ -517,23 +370,12 @@ fn flag_takes_value(canonical: &str) -> bool {
     )
 }
 
-/// The parse cursor tracking the current per-screen target (doc §3.1
-/// `lastScreen`): options apply to the window defaults until the first `-r`,
-/// then to the most recently declared screen/span.
 enum Cursor {
     Window,
     Screen(usize),
 }
 
-/// Parse the compat command line (`args[0]` is the program name).
-///
-/// Total on any input (SPEC V9): every failure is a typed [`ParseError`],
-/// never a panic. Semantics mirror docs/compat-cli.md §3-§4.
 pub fn parse(args: &[OsString]) -> Result<CompatArgs, ParseError> {
-    // Lazy config.json load (`m_loadedConfigPlaylists`, ApplicationContext.cpp
-    // :161-166): the first `--playlist` loads wallpaper engine's config once;
-    // every lookup then resolves from the cached map. No `--playlist` on the
-    // command line never touches the filesystem.
     let mut cache: Option<std::collections::BTreeMap<String, PlaylistDefinition>> = None;
     parse_with(args, &mut |name| {
         if cache.is_none() {
@@ -546,9 +388,6 @@ pub fn parse(args: &[OsString]) -> Result<CompatArgs, ParseError> {
     })
 }
 
-/// [`parse`] with an injectable playlist loader (the C++
-/// `getPlaylistFromConfig`, called from inside the `--playlist` argparse
-/// action) so tests can resolve playlists without a Steam install.
 fn parse_with(
     args: &[OsString],
     load_playlist: &mut dyn FnMut(&str) -> Result<PlaylistDefinition, ParseError>,
@@ -564,16 +403,11 @@ fn parse_with(
     let mut cursor = Cursor::Window;
     let mut seen: Vec<String> = Vec::new();
 
-    // Value-fetch helper state: we iterate manually so a flag can consume the
-    // next argv element as its value (or the inline `--flag=value` form).
     let mut i = 1;
     while i < args.len() {
         let raw = &args[i];
         let token = raw.to_string_lossy();
 
-        // A bare positional (no leading '-', or the lone "-"): the background
-        // id (doc §2 positional, nargs 0..1). First non-empty wins; extras are
-        // ignored like argparse's discarded extra positionals (doc §4.1).
         if !token.starts_with('-') || token.as_ref() == "-" {
             if !token.is_empty() {
                 out.default_background = Some(resolve::translate_background(&token)?);
@@ -582,8 +416,6 @@ fn parse_with(
             continue;
         }
 
-        // Split the `--flag=value` inline form at the first '=' (doc §4.2).
-        // Short flags (`-x`) are never given inline values here.
         let (name, inline): (String, Option<String>) = if token.starts_with("--") {
             match token.split_once('=') {
                 Some((n, v)) => (n.to_owned(), Some(v.to_owned())),
@@ -595,8 +427,6 @@ fn parse_with(
 
         let canonical = canonical_flag(&name);
         let Some(canonical) = canonical else {
-            // Unknown flag (incl. CEF `--type=...`): silently ignored, and we
-            // do NOT consume a following value (doc §4.1, §1.1).
             i += 1;
             continue;
         };
@@ -608,9 +438,6 @@ fn parse_with(
         }
         seen.push(canonical.to_owned());
 
-        // Pre-fetch this flag's value (inline `--flag=v` form, else the next
-        // argv element) so the borrow of `consumed_next` closes before we act
-        // on it below. Flags that take no value never consume the next token.
         let mut consumed_next = false;
         let fetched: Result<String, ParseError> = if flag_takes_value(canonical) {
             if let Some(v) = inline {
@@ -627,7 +454,6 @@ fn parse_with(
         } else {
             Ok(String::new())
         };
-        // A no-op for value-less flags; value-taking flags read via `value()`.
         let value = || fetched.clone();
 
         match canonical {
@@ -660,12 +486,6 @@ fn parse_with(
                 }
             }
             "--playlist" => {
-                // ApplicationContext.cpp:378-403: resolve the named playlist
-                // from wallpaper engine's config.json at parse time (a bad
-                // name/config is fatal here, like the other argparse actions).
-                // After `--screen-root` it applies to that screen and its first
-                // item becomes the screen's background; either way the first
-                // item backfills an unset default background.
                 let name = value()?;
                 let def = load_playlist(&name)?;
                 let first = def.items.first().map(|p| p.to_string_lossy().into_owned());
@@ -743,7 +563,6 @@ fn parse_with(
             "--fullscreen-pause-only-active" => out.fullscreen_pause_only_active = true,
             "--fullscreen-pause-ignore-appid" => {
                 let v = value()?;
-                // Empty values are discarded (doc §2 note).
                 if !v.is_empty() {
                     out.fullscreen_pause_ignore_appid.push(v);
                 }
@@ -758,9 +577,6 @@ fn parse_with(
                 out.screenshot_delay = n.clamp(0, u32::MAX as i64) as u32;
             }
             "--assets-dir" => out.assets_dir = Some(PathBuf::from(value()?)),
-            // Consumed before parsing (compat::run pins the Vulkan driver
-            // before any instance exists); accepted here so its value is never
-            // taken for a background path.
             "--gpu" => drop(value()?),
             "--release-hidden-after" => {
                 let n = scan_int("--release-hidden-after", &value()?)?;
@@ -794,8 +610,6 @@ fn parse_with(
     Ok(out)
 }
 
-/// `-b/--bg`/`--set-property` value grammar (doc §3.10): split at the first
-/// `=`; a bare key with no `=` stores value `"1"`.
 fn split_property(kv: &str) -> (String, String) {
     match kv.split_once('=') {
         Some((k, v)) => (k.to_owned(), v.to_owned()),
@@ -803,8 +617,6 @@ fn split_property(kv: &str) -> (String, String) {
     }
 }
 
-/// `-r`/`--screen-root` action (doc §3.1): mode → DESKTOP_BACKGROUND, register
-/// the screen inheriting the current window defaults, make it current.
 fn apply_screen_root(out: &mut CompatArgs, cursor: &mut Cursor, name: String) -> Result<(), ParseError> {
     if out.mode == WindowMode::ExplicitWindow {
         return Err(ParseError::doubled(
@@ -835,8 +647,6 @@ fn apply_screen_root(out: &mut CompatArgs, cursor: &mut Cursor, name: String) ->
     Ok(())
 }
 
-/// `--screen-span` action (doc §3.1): split on `,`, ≥ 2 members, each unique
-/// across individual screens and other groups.
 fn apply_screen_span(out: &mut CompatArgs, cursor: &mut Cursor, raw: String) -> Result<(), ParseError> {
     if out.mode == WindowMode::ExplicitWindow {
         return Err(ParseError::doubled(
@@ -868,7 +678,6 @@ fn apply_screen_span(out: &mut CompatArgs, cursor: &mut Cursor, raw: String) -> 
                 "Screen {m} is already part of a span group"
             )));
         }
-        // Duplicate within this same group.
         if members.iter().filter(|x| *x == m).count() > 1 {
             return Err(ParseError::doubled(format!(
                 "Screen {m} is duplicated in the span group"
@@ -889,9 +698,6 @@ fn apply_screen_span(out: &mut CompatArgs, cursor: &mut Cursor, raw: String) -> 
     Ok(())
 }
 
-/// Map an argv flag spelling (long or short, incl. aliases) to its canonical
-/// long name, or `None` for an unknown flag (doc §2 aliases:
-/// `--clock`≡`--playback-speed`, `--property`≡`--set-property`).
 fn canonical_flag(name: &str) -> Option<&'static str> {
     Some(match name {
         "-h" | "--help" => "--help",
@@ -933,29 +739,17 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Post-parse validation (doc §4.8) that does not require I/O: the missing
-/// background check, the volume clamp, and the screenshot-delay clamp. The
-/// screenshot-extension check lives in run.rs (it only applies when the mode
-/// runs). Returns the validated args or the fatal error.
 pub fn validate(mut args: CompatArgs) -> Result<CompatArgs, ParseError> {
-    // (1) defaultBackground empty → fatal (doc §4.8). A positional, any
-    // `--bg`, or a `--playlist` (its first item is seeded into
-    // `default_background` at parse) satisfies this.
     if args.default_background.is_none() {
         return Err(ParseError::doubled(
             "At least one background ID must be specified",
         ));
     }
-    // (2) volume clamp [0, 128] (doc §4.8).
     args.volume = args.volume.clamp(0, 128);
-    // (3) screenshot-delay clamp [0, 600] (doc §4.8).
     args.screenshot_delay = args.screenshot_delay.min(600);
     Ok(args)
 }
 
-/// Screenshot path extension validation (doc §3.6): the extension must be one
-/// of `.bmp`/`.png`/`.jpeg`/`.jpg` (case-sensitive, lowercase). Any other
-/// extension is fatal.
 pub fn validate_screenshot_ext(path: &OsStr) -> Result<(), ParseError> {
     let name = path.to_string_lossy();
     let ok =
@@ -997,7 +791,6 @@ mod tests {
                 h: 1080
             }
         );
-        // doc §3.2: 1x2x3x4x5 → x=1 y=2 w=3 h=4, trailing x5 ignored.
         assert_eq!(
             parse_geometry("1x2x3x4x5").unwrap(),
             WindowGeometry {
@@ -1007,7 +800,6 @@ mod tests {
                 h: 4
             }
         );
-        // Fewer than three delimiters → fatal.
         assert!(parse_geometry("1x2").is_err());
         assert!(parse_geometry("1920x1080x0").is_err());
     }
@@ -1020,8 +812,6 @@ mod tests {
 
     #[test]
     fn unknown_flags_are_ignored() {
-        // doc §4.1: unknown flags do not error; parse fails later only on the
-        // missing background.
         let args = parse(&os(&["kirie", "--bogus-flag", "--type=zygote"])).unwrap();
         assert!(args.default_background.is_none());
         assert!(validate(args).is_err());
@@ -1070,7 +860,6 @@ mod tests {
             err.message
                 .contains("Cannot run in both background and window mode")
         );
-        // Order-reversed conflict too.
         let err = parse(&os(&[
             "kirie",
             "--screen-root",
@@ -1122,7 +911,6 @@ mod tests {
 
     #[test]
     fn inline_equals_form_parses() {
-        // doc §4.2: --fps=30 and --set-property=foo=bar.
         let args = parse(&os(&["kirie", "--fps=30", "--set-property=foo=bar", "/tmp/x"])).unwrap();
         assert_eq!(args.fps, 30);
         assert_eq!(args.set_properties, vec![("foo".into(), "bar".into())]);
@@ -1130,8 +918,6 @@ mod tests {
 
     #[test]
     fn per_screen_scaling_before_r_is_the_inherited_default() {
-        // doc §3.1: --scaling before any -r sets the window default, which
-        // every later -r screen inherits.
         let args = parse(&os(&[
             "kirie",
             "--scaling",
@@ -1185,7 +971,6 @@ mod tests {
         assert_eq!(args.default_background.as_deref(), Some("/b"));
     }
 
-    /// A stub playlist loader serving one two-item playlist named "day".
     fn stub_loader(name: &str) -> Result<PlaylistDefinition, ParseError> {
         if name == "day" {
             Ok(PlaylistDefinition {
@@ -1202,8 +987,6 @@ mod tests {
 
     #[test]
     fn playlist_before_any_screen_is_the_window_default() {
-        // ApplicationContext.cpp:386-391: no lastScreen -> defaultPlaylist; the
-        // first item backfills the (unset) default background.
         let args = parse_with(&os(&["kirie", "--playlist", "day"]), &mut stub_loader).unwrap();
         let pl = args.window_playlist.as_ref().unwrap();
         assert_eq!(pl.name, "day");
@@ -1217,8 +1000,6 @@ mod tests {
 
     #[test]
     fn playlist_after_screen_root_targets_that_screen() {
-        // ApplicationContext.cpp:391-400: lastScreen set -> screenPlaylists +
-        // the first item becomes that screen's background and the default.
         let args = parse_with(
             &os(&["kirie", "--screen-root", "HDMI-A-1", "--playlist", "day"]),
             &mut stub_loader,
@@ -1232,8 +1013,6 @@ mod tests {
 
     #[test]
     fn playlist_does_not_override_an_explicit_default_background() {
-        // defaultBackground is only backfilled when empty
-        // (ApplicationContext.cpp:388-390).
         let args = parse_with(
             &os(&["kirie", "--bg", "/explicit", "--playlist", "day"]),
             &mut stub_loader,
@@ -1252,8 +1031,6 @@ mod tests {
 
     #[test]
     fn the_exact_live_cmdline_parses_to_the_expected_model() {
-        // fixtures/cpp-live-cmdline.txt (doc §8.1 [observed]): the daemon's
-        // real launch argv. Socket path swapped for the task's test socket.
         let argv = os(&[
             "linux-wallpaperengine",
             "--control-socket",
@@ -1314,7 +1091,6 @@ mod tests {
         assert!((args.render_scale - 1.06).abs() < 1e-12);
         assert_eq!(args.volume, 0);
 
-        // 11 set-property pairs, values preserved verbatim (spaces intact).
         assert_eq!(args.set_properties.len(), 11);
         assert_eq!(
             args.set_properties[0],
@@ -1333,7 +1109,6 @@ mod tests {
             ("color2".to_owned(), "0.46951 0.00000 0.77439".to_owned())
         );
 
-        // default_background follows the (only) --bg (doc §3.1).
         assert_eq!(
             args.default_background.as_deref(),
             Some("/home/aiko/.local/share/Steam/steamapps/workshop/content/431960/3047596375")

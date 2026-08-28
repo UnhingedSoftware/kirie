@@ -1,10 +1,3 @@
-//! [`ScriptEngine`] — the public, `Send` handle to a scene's script world.
-//!
-//! The world (QuickJS `Runtime` + `Context`) is `!Send` (SPEC.md §V3) so it lives
-//! on a dedicated thread; this handle talks to it over a bounded
-//! `crossbeam-channel` (commands in, typed results out). Dropping the handle
-//! shuts the thread down.
-
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{Sender, bounded};
@@ -14,18 +7,10 @@ use crate::frame::{HostFrame, LogLine, TickOutput};
 use crate::value::ScriptValue;
 use crate::world::World;
 
-/// SceneScript API level this engine targets — Wallpaper Engine's
-/// `lib.sceneScript.d.ts` (docs/scripting-api.md §12). Reported so integrators
-/// and bake keys can gate on the surface version.
 pub const API_VERSION: &str = "2.8";
 
-/// This translator/embedding's own version. Part of the bake cache key
-/// (SPEC.md §V8): bumping it invalidates baked script results whose behavior
-/// depends on the JS surface.
 pub const TRANSLATOR_VERSION: u32 = 1;
 
-/// Bounded command-queue depth (SPEC.md §V3: bounded back-pressure, never an
-/// unbounded queue).
 const QUEUE_DEPTH: usize = 64;
 
 enum Command {
@@ -40,9 +25,6 @@ enum Command {
     Tick {
         frame: Box<HostFrame>,
         overrides: Vec<(String, ScriptValue)>,
-        /// The frame box rides back with the output so the integrator can
-        /// recycle its heap (audio/layers/user-props buffers) next tick
-        /// instead of re-allocating a fresh snapshot every frame.
         reply: Sender<(TickOutput, Box<HostFrame>)>,
     },
     DispatchUserProperty {
@@ -80,16 +62,12 @@ enum Command {
     },
 }
 
-/// A handle to one scene's SceneScript world. `Send` and cheap to move; all work
-/// happens on the owned script thread.
 pub struct ScriptEngine {
     tx: Sender<Command>,
     thread: Option<JoinHandle<()>>,
 }
 
 impl ScriptEngine {
-    /// Spawn a script world on its own thread. Fails only if the runtime or the
-    /// embedded builtins fail to initialize (a bug, not user input).
     pub fn new() -> Result<Self, ScriptError> {
         let (tx, rx) = bounded::<Command>(QUEUE_DEPTH);
         let (ready_tx, ready_rx) = bounded::<Result<(), ScriptError>>(1);
@@ -106,7 +84,6 @@ impl ScriptEngine {
                         return;
                     }
                 };
-                // Serve commands until the sender is dropped.
                 while let Ok(cmd) = rx.recv() {
                     serve(&mut world, cmd);
                 }
@@ -123,10 +100,6 @@ impl ScriptEngine {
         }
     }
 
-    /// Load a property script (docs §4.2). `key` is the module key
-    /// (`"<prop>_<objectId>"`); `owner_id` the scriptable layer id (for
-    /// `thisLayer`); `initial` the property's initial value; `script_properties`
-    /// the JSON `scriptproperties` bag.
     pub fn load_property_script(
         &self,
         key: impl Into<String>,
@@ -147,8 +120,6 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)?
     }
 
-    /// Run one frame (docs §3.2). `overrides` pushes user/integrator value
-    /// changes for specific module keys before the tick.
     pub fn tick(
         &self,
         frame: HostFrame,
@@ -157,11 +128,6 @@ impl ScriptEngine {
         self.tick_reuse(Box::new(frame), overrides).map(|(out, _)| out)
     }
 
-    /// [`Self::tick`], but the frame box is handed back with the output. The
-    /// world only *reads* the frame (SPEC.md §V3), so a per-scene integrator
-    /// can keep one boxed frame alive, mutate it in place each tick and reuse
-    /// every contained allocation instead of cloning layers/audio/user-props
-    /// into a fresh snapshot every frame.
     pub fn tick_reuse(
         &self,
         frame: Box<HostFrame>,
@@ -176,7 +142,6 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Fire `applyUserProperties({key: value})` on every module (docs §5.3).
     pub fn dispatch_user_property(
         &self,
         key: impl Into<String>,
@@ -191,8 +156,6 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Create a text-layer script (docs §7); returns a positive handle, 0 on
-    /// failure.
     pub fn create_layer_script(
         &self,
         source: impl Into<String>,
@@ -209,7 +172,6 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Tick a text layer (docs §7.2); returns any console output produced.
     pub fn tick_layer(&self, handle: u32, time: f64, dt: f64, fps: f64) -> Result<Vec<LogLine>, ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::TickLayer {
@@ -222,28 +184,22 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Read a text layer's current rendered text (docs §7.2).
     pub fn layer_text(&self, handle: u32) -> Result<String, ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::LayerText { handle, reply })?;
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Destroy a text layer (docs §7.2), running its `destroy()` if present.
     pub fn destroy_layer(&self, handle: u32) -> Result<(), ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::DestroyLayer { handle, reply })?;
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    /// Point `localStorage` at a per-wallpaper JSON file: existing contents
-    /// seed the buckets, later writes persist (debounced) to the same file.
     pub fn set_storage_path(&self, path: std::path::PathBuf) -> Result<(), ScriptError> {
         self.send(Command::SetStoragePath { path })
     }
 
-    /// Evaluate an arbitrary global script, returning its value stringified
-    /// (diagnostic / test helper).
     pub fn eval(&self, source: impl Into<String>) -> Result<String, ScriptError> {
         let (reply, rx) = bounded(1);
         self.send(Command::Eval {
@@ -260,8 +216,6 @@ impl ScriptEngine {
 
 impl Drop for ScriptEngine {
     fn drop(&mut self) {
-        // Dropping the sender ends the serve loop; join so the runtime is torn
-        // down cleanly before we return.
         if let Some(thread) = self.thread.take() {
             drop(std::mem::replace(&mut self.tx, bounded(0).0));
             let _ = thread.join();

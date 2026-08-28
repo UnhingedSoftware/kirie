@@ -1,21 +1,3 @@
-//! `VideoRenderer` — a [`kirie_platform::Renderer`] that presents decoded
-//! video frames.
-//!
-//! Per compositor frame callback it: drains control commands, reads the
-//! playback clock (audio master when the file has audio, else wall clock ×
-//! speed — docs/subsystems-misc.md §2.1), pulls the newest due frame from
-//! the decode queue without blocking (SPEC V4), uploads it into a wgpu
-//! texture sized to the video's *native* geometry (recreated only when the
-//! stream geometry changes, docs/subsystems-misc.md §2.2 — SPEC V5), and
-//! draws a fullscreen quad with the configured scaling mode
-//! (docs/render-architecture.md §4).
-//!
-//! Steady-state renders allocate nothing on our side: frames arrive in
-//! recycled buffers and go straight back through the recycle channel after
-//! upload (SPEC V5). When the output is occluded the compositor stops
-//! delivering frame callbacks, `render` is never called, the bounded frame
-//! queue fills and the decode thread parks — zero work (SPEC V6).
-
 use std::time::{Duration, Instant};
 
 use crossbeam_channel::{Receiver, Sender};
@@ -28,13 +10,8 @@ use crate::pacing::Pacer;
 use crate::player::{RendererCmd, VideoPlayer};
 use crate::scaling::{ScalingMode, UvRect, compute_uvs};
 
-/// Interval between playback statistics log lines.
 const STATS_INTERVAL: Duration = Duration::from_secs(2);
 
-/// Fullscreen textured quad. `rect` is (ustart, vstart, uend, vend); UVs
-/// outside [0, 1] (fit letterboxing) sample as black
-/// (docs/render-architecture.md §4 — fit crops via out-of-range UVs; the
-/// border behavior here is the letterbox).
 const SHADER: &str = r#"
 struct Uniforms {
     rect: vec4<f32>,
@@ -74,15 +51,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// Uniform block: (ustart, vstart, uend, vend).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     rect: [f32; 4],
 }
 
-/// GPU objects that depend on the video texture (rebuilt only on stream
-/// geometry change, docs/subsystems-misc.md §2.2 / SPEC V5).
 struct FrameTexture {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
@@ -90,7 +64,6 @@ struct FrameTexture {
     height: u32,
 }
 
-/// Video wallpaper renderer for one output surface.
 pub struct VideoRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -100,7 +73,6 @@ pub struct VideoRenderer {
     uniforms: wgpu::Buffer,
     texture_format: wgpu::TextureFormat,
     frame_tex: Option<FrameTexture>,
-    /// Cache key for the last uploaded uniform rect.
     uv_key: Option<(u32, u32, u32, u32, ScalingMode)>,
 
     frames_rx: Receiver<DecodedFrame>,
@@ -110,19 +82,15 @@ pub struct VideoRenderer {
     wall: WallClock,
     pacer: Pacer<DecodedFrame>,
     scaling: ScalingMode,
-    /// Monotonic guard for the audio-master clock.
     last_pos: f64,
 
     stats_anchor: Instant,
     stats_presented: u64,
     stats_dropped: u64,
-    /// Keeps the audio thread alive; dropping the renderer disconnects it.
     _shutdown: Sender<()>,
 }
 
 impl VideoRenderer {
-    /// Build the render pipeline for one output and take ownership of the
-    /// player's receiving ends.
     #[must_use]
     pub fn new(target: &RenderTarget<'_>, player: VideoPlayer) -> Self {
         let device = target.device;
@@ -215,10 +183,6 @@ impl VideoRenderer {
             cache: None,
         });
 
-        // Match the swapchain's color space: sample the video as sRGB iff
-        // the surface expects linear-light output (mpv contract is 8-bit
-        // RGBA output, docs/subsystems-misc.md §2.1 fbo-format=rgba8; the
-        // color-space handling is presentation-side).
         let texture_format = if target.format.is_srgb() {
             wgpu::TextureFormat::Rgba8UnormSrgb
         } else {
@@ -252,16 +216,12 @@ impl VideoRenderer {
         }
     }
 
-    /// Current playback time in monotonic seconds. Audio clock is master
-    /// when the file has audio, else wall clock × speed
-    /// (docs/subsystems-misc.md §2.1).
     fn clock_now(&mut self, now: Instant) -> f64 {
         match self.audio.as_mut() {
             Some(link) => {
                 let prod = *link.producer.read();
                 let cons = *link.consumer.read();
                 let pos = audio_position(&prod, &cons, link.sample_rate, now);
-                // Never step backwards (snapshot jitter guard).
                 self.last_pos = self.last_pos.max(pos);
                 self.last_pos
             }
@@ -269,7 +229,6 @@ impl VideoRenderer {
         }
     }
 
-    /// Handle control commands (SPEC V3: commands over channels).
     fn drain_commands(&mut self, now: Instant) {
         while let Ok(cmd) = self.commands_rx.try_recv() {
             match cmd {
@@ -280,8 +239,6 @@ impl VideoRenderer {
         }
     }
 
-    /// (Re)create the video texture — only on geometry change
-    /// (docs/subsystems-misc.md §2.2 VIDEO_RECONFIG; SPEC V5).
     fn ensure_texture(&mut self, width: u32, height: u32) {
         if self
             .frame_tex
@@ -332,7 +289,6 @@ impl VideoRenderer {
         });
     }
 
-    /// Upload one frame and hand its buffer back for recycling (SPEC V5).
     fn upload(&mut self, frame: DecodedFrame) {
         self.ensure_texture(frame.width, frame.height);
         let Some(tex) = &self.frame_tex else { return };
@@ -355,13 +311,9 @@ impl VideoRenderer {
                 depth_or_array_layers: 1,
             },
         );
-        // Return the pixel buffer to the decode thread; if the recycle
-        // queue is full the buffer is simply freed.
         let _ = self.recycle_tx.try_send(frame.data);
     }
 
-    /// Recompute + upload the UV rect when viewport/video/mode changed
-    /// (docs/render-architecture.md §4: UVs recomputed only on change).
     fn update_uvs(&mut self, size: SurfaceSize) {
         let Some(tex) = &self.frame_tex else { return };
         let key = (size.width, size.height, tex.width, tex.height, self.scaling);
@@ -384,7 +336,6 @@ impl VideoRenderer {
         );
     }
 
-    /// Log decoded-fps/dropped statistics at a low rate.
     fn maybe_log_stats(&mut self, now: Instant) {
         let elapsed = now.saturating_duration_since(self.stats_anchor);
         if elapsed < STATS_INTERVAL {
@@ -416,8 +367,6 @@ impl Renderer for VideoRenderer {
         let due = self.pacer.select(
             media_now,
             || self.frames_rx.try_recv().ok(),
-            // Late frames go straight back to the decode thread (dropped,
-            // never presented — SPEC V4 drop policy).
             |late| {
                 let _ = self.recycle_tx.try_send(late.data);
             },
@@ -441,8 +390,6 @@ impl Renderer for VideoRenderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        // Black until the first frame arrives; the quad
-                        // covers everything afterwards.
                         load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Store,
                     },

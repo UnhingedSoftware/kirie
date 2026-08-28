@@ -1,15 +1,3 @@
-//! The CEF [`App`] — process-wide handlers.
-//!
-//! One `App` type serves both processes (docs/subsystems-misc.md §3.1):
-//!
-//! * **Browser process** (`cef::initialize`): `on_before_command_line_processing`
-//!   sets the Chromium flags the reference uses for offscreen Wayland
-//!   rendering plus the `file://` access relaxations this port needs
-//!   (docs/subsystems-misc.md §3.3).
-//! * **Render process** (`cef::execute_process` in the helper): returns a
-//!   [`RenderProcessHandler`] whose `on_context_created` injects the WE JS
-//!   bridge shim before page scripts run (docs/subsystems-misc.md §3.5).
-
 use cef::{
     App, Browser, CefString, CommandLine, Frame, ImplApp, ImplCommandLine, ImplFrame,
     ImplRenderProcessHandler, RenderProcessHandler, V8Context, WrapApp, WrapRenderProcessHandler, rc::Rc,
@@ -18,7 +6,6 @@ use cef::{
 
 use crate::shim::BRIDGE_INIT;
 
-/// Whether the running session is Wayland (adds ozone flags, §3.3).
 fn is_wayland() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
         || std::env::var("XDG_SESSION_TYPE")
@@ -37,9 +24,6 @@ fn switch_val(cmd: &CommandLine, name: &str, value: &str) {
     cmd.append_switch_with_value(Some(&name), Some(&value));
 }
 
-// Injects the WE JS bridge shim into every V8 context as it is created. The
-// `wrap_*` macros do not accept attributes on the generated struct, so this is
-// a plain comment and the struct is private (documented via `make_app`).
 wrap_render_process_handler! {
     struct ShimRenderProcessHandler {}
 
@@ -52,15 +36,12 @@ wrap_render_process_handler! {
         ) {
             if let Some(frame) = frame {
                 let code = CefString::from(BRIDGE_INIT);
-                // start_line 0; no script url (internal).
                 frame.execute_java_script(Some(&code), None, 0);
             }
         }
     }
 }
 
-// The kirie CEF application object (browser + render process). Private for the
-// same macro-attribute reason as above; the public entry point is `make_app`.
 wrap_app! {
     struct KirieApp {}
 
@@ -72,7 +53,6 @@ wrap_app! {
         ) {
             let Some(cmd) = command_line else { return; };
 
-            // --- offscreen / trust / throttling (docs §3.3) ---------------
             switch_val(cmd, "disable-features",
                 "IsolateOrigins,HardwareMediaKeyHandling,WebContentsOcclusion,\
                  RendererCodeIntegrityEnabled,site-per-process");
@@ -89,14 +69,8 @@ wrap_app! {
             switch(cmd, "disable-field-trial-config");
             switch(cmd, "no-experiments");
 
-            // Local `file://` wallpapers: let the entry page fetch/XHR/module
-            // its own sibling assets (WE uses the secure `wp://` scheme; the
-            // port loads `file://`, so it must relax the file-origin rules).
-            // `disable-web-security` is already appended above.
             switch(cmd, "allow-file-access-from-files");
 
-            // Standalone GPU process crashes on Wayland offscreen; keep it
-            // in-process unless the escape hatch is set (docs §3.3).
             if std::env::var_os("WPE_CEF_NO_IPG").is_none() {
                 switch(cmd, "in-process-gpu");
             }
@@ -119,7 +93,6 @@ wrap_app! {
     }
 }
 
-/// Construct a fresh [`App`] for either process.
 #[must_use]
 pub fn make_app() -> App {
     KirieApp::new()

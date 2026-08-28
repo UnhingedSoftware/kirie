@@ -1,15 +1,6 @@
-//! SceneScript host integration (docs/scripting-api.md §3/§5; SPEC.md §V3).
-//!
-//! GPU-free: builds a resolved [`SceneModel`] from an inline scene.json with a
-//! scripted property, drives [`ScriptHost`] over several ticks, and asserts the
-//! property value evolves — the "a scripted scene's property changes over ticks"
-//! gate. Also asserts a script-free scene spawns no engine.
-
 use kirie_render::scene::scripting::{PropTarget, ScriptHost};
 use kirie_scene::{PropertyBag, Scene, SceneModel};
 
-/// Resolve an inline scene.json into a [`SceneModel`] (no assets loaded — the
-/// host only reads property/script bindings).
 fn model(json: &str) -> SceneModel {
     let scene = Scene::from_slice(json.as_bytes()).expect("parse scene.json");
     SceneModel::resolve(scene, &PropertyBag::default())
@@ -17,8 +8,6 @@ fn model(json: &str) -> SceneModel {
 
 #[test]
 fn scripted_alpha_changes_over_ticks() {
-    // An image object whose `alpha` is script-driven: `update` returns the
-    // engine runtime, so the applied value grows every frame (docs §5.1).
     let json = r#"{
         "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
         "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
@@ -59,10 +48,6 @@ fn scripted_alpha_changes_over_ticks() {
 
 #[test]
 fn retained_frame_refreshes_user_props() {
-    // The host recycles one boxed `HostFrame` across ticks and only re-clones
-    // `engine.userProperties` into it when a live `setProperty` marked it dirty
-    // — this asserts a stale retained copy never survives the refresh, and
-    // that the refreshed copy persists on later (clean) ticks.
     let json = r#"{
         "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
         "general": { "orthogonalprojection": { "width": 64, "height": 64 } },
@@ -93,19 +78,12 @@ fn retained_frame_refreshes_user_props() {
             .expect("alpha update present")
     };
 
-    // Initial props ('off') through the fresh frame.
     assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.1).abs() < 1e-6);
-    // Live setProperty flips the combo; the recycled frame must see it.
     host.apply_user_property("mode", &kirie_scene::PropertyValue::Combo("on".to_owned()));
     assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.9).abs() < 1e-6);
-    // And keep seeing it on later clean (non-dirty) ticks.
     assert!((alpha(host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None)) - 0.9).abs() < 1e-6);
 }
 
-/// `thisLayer.text = …` from a property script must surface as a Text
-/// property update (the renderer routes it to the re-rasterize seam) — and
-/// writes to a script-created layer must keep flowing on ticks after the
-/// creation tick (the synthetic record persists in the layer snapshot).
 #[test]
 fn text_writes_and_created_layer_writes_reach_updates() {
     let json = r#"{
@@ -142,8 +120,6 @@ fn text_writes_and_created_layer_writes_reach_updates() {
     }
 }
 
-/// `thisScene.destroyLayer` drains the id (take_destroyed), removes the
-/// record from the next snapshot, and later writes to the dead proxy no-op.
 #[test]
 fn destroy_layer_drains_and_forgets_the_record() {
     let json = r#"{
@@ -164,18 +140,15 @@ fn destroy_layer_drains_and_forgets_the_record() {
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
 
-    // Tick 1: created.
     host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     let created = host.take_created();
     assert_eq!(created.len(), 1, "created: {created:?}");
     let id = created[0].0;
     assert!(host.take_destroyed().is_empty());
 
-    // Tick 2: destroyed — id drained exactly once.
     host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert_eq!(host.take_destroyed(), vec![id]);
 
-    // Tick 3: writing through the dead proxy produces no update for it.
     let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert!(
         updates.iter().all(|u| u.object_id != id),
@@ -183,8 +156,6 @@ fn destroy_layer_drains_and_forgets_the_record() {
     );
 }
 
-/// `thisLayer.parallaxDepth = Vec2` surfaces as a ParallaxDepth update
-/// (d.ts IImageLayer types it Vec2).
 #[test]
 fn parallax_depth_write_reaches_updates() {
     let json = r#"{
@@ -213,8 +184,6 @@ fn parallax_depth_write_reaches_updates() {
     );
 }
 
-/// A script bound to the base `origin` leaf loads and drives Origin updates
-/// (the cursor-follow pattern), even though it is not a kind-level leaf.
 #[test]
 fn base_origin_leaf_script_is_collected() {
     let json = r#"{
@@ -244,8 +213,6 @@ fn base_origin_leaf_script_is_collected() {
     );
 }
 
-/// Particle playback and instance writes drain as typed particle ops
-/// (d.ts: ILayer extends IParticleSystem).
 #[test]
 fn particle_ops_drain_with_payloads() {
     use kirie_render::scene::scripting::ParticleOp;
@@ -296,8 +263,6 @@ fn particle_ops_drain_with_payloads() {
     );
 }
 
-/// `getEffect(...)` resolves by name/index and `setMaterialProperty` drains
-/// as a typed material op with the layer/effect/name/value payload.
 #[test]
 fn effect_material_writes_drain_as_ops() {
     let json = r#"{
@@ -338,7 +303,6 @@ fn effect_material_writes_drain_as_ops() {
     );
 }
 
-/// Video playback calls drain as typed video ops with the layer id.
 #[test]
 fn video_control_calls_drain_as_ops() {
     let json = r#"{
@@ -371,9 +335,6 @@ fn video_control_calls_drain_as_ops() {
     );
 }
 
-/// A camera script echoing `setCameraTransforms(getCameraTransforms())` must
-/// not clobber a live fov change: after `set_scene_fov`, the echoed camera op
-/// carries the CURRENT fov (the reference's getFov semantics).
 #[test]
 fn camera_echo_carries_the_synced_fov() {
     let json = r#"{
@@ -393,18 +354,13 @@ fn camera_echo_carries_the_synced_fov() {
     }"#;
     let model = model(json);
     let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
-    // Baseline echo: authored fov.
     host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert_eq!(host.take_camera().and_then(|c| c.fov), Some(50.0));
-    // Live property change syncs the snapshot; the next echo carries it.
     host.set_scene_fov(36.9);
     host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
     assert_eq!(host.take_camera().and_then(|c| c.fov), Some(36.9));
 }
 
-/// A script bound to an effect override's constantshadervalues entry (the
-/// rainbow-coloring pattern) loads and its per-tick return routes through the
-/// material seam with the right effect index and constant name.
 #[test]
 fn effect_constant_script_routes_to_material_ops() {
     let json = r#"{
@@ -464,8 +420,6 @@ fn scene_without_scripts_spawns_no_host() {
 
 #[test]
 fn throwing_script_does_not_panic_and_leaves_value_alone() {
-    // A script that throws inside update surfaces as a typed error, never a
-    // panic; the tick returns no update for it (SPEC.md §V9).
     let json = r#"{
         "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
         "general": { "orthogonalprojection": { "width": 64, "height": 64 } },
@@ -483,7 +437,6 @@ fn throwing_script_does_not_panic_and_leaves_value_alone() {
     }"#;
     let model = model(json);
     let mut host = ScriptHost::build(&model, (64, 64), &[]).expect("script loads even if it throws at tick");
-    // Several ticks, no panic; a throwing update yields no applied value.
     for _ in 0..3 {
         let updates = host.tick(0.016, None, [0.5, 0.5], [960.0, 540.0], false, None);
         assert!(

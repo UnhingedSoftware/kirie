@@ -1,26 +1,14 @@
-//! Built-in test-pattern renderer proving the full presentation stack:
-//! surface acquire → WGSL pipeline → submit → present.
-
 use crate::renderer::{RenderTarget, Renderer, SurfaceSize};
 
-/// Hue-animated clear color plus a centered gradient quad drawn by a tiny
-/// WGSL pipeline. Exists so `examples/layer_clear.rs` (and later e2e
-/// harnesses) can validate the wayland/wgpu stack without any wallpaper
-/// content.
 pub struct TestPattern {
     device: wgpu::Device,
     queue: wgpu::Queue,
     pipeline: wgpu::RenderPipeline,
     bind_group: wgpu::BindGroup,
     uniforms: wgpu::Buffer,
-    /// Seconds accumulated from per-frame `dt`, mirroring the C++ driver
-    /// clock (seconds since driver start,
-    /// docs/render-architecture.md §2.1 step 3).
     time: f32,
 }
 
-/// Uniform block for the gradient quad. 16 bytes to satisfy uniform buffer
-/// alignment without a layout override.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
@@ -28,8 +16,6 @@ struct Uniforms {
     _pad: [f32; 3],
 }
 
-/// Centered gradient quad: 4-vertex triangle strip generated from
-/// `vertex_index`, no vertex buffers.
 const SHADER: &str = r#"
 struct Uniforms {
     time: f32,
@@ -69,7 +55,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 "#;
 
 impl TestPattern {
-    /// Build the pipeline against the surface `format` of one output.
     #[must_use]
     pub fn new(target: &RenderTarget<'_>) -> Self {
         let device = target.device;
@@ -168,7 +153,6 @@ impl Renderer for TestPattern {
             }),
         );
 
-        // Slow hue sweep for the clear color; one full revolution every 10s.
         let (r, g, b) = hsv_to_rgb(f64::from(self.time) * 0.1 % 1.0, 0.65, 0.35);
 
         let mut encoder = self
@@ -203,10 +187,6 @@ impl Renderer for TestPattern {
     }
 }
 
-/// Convert HSV (`h` in `[0, 1)`, `s`/`v` in `[0, 1]`) to RGB in `[0, 1]`.
-///
-/// Standard sextant formulation; used only for the test-pattern clear
-/// color, not for any wallpaper-format color math.
 pub(crate) fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
     let h = (h.rem_euclid(1.0)) * 6.0;
     let sextant = h.floor().min(5.0);
@@ -214,7 +194,6 @@ pub(crate) fn hsv_to_rgb(h: f64, s: f64, v: f64) -> (f64, f64, f64) {
     let p = v * (1.0 - s);
     let q = v * (1.0 - s * f);
     let t = v * (1.0 - s * (1.0 - f));
-    // `sextant` is clamped to [0, 5]; `as` cast is exact for these values.
     match sextant as u8 {
         0 => (v, t, p),
         1 => (q, v, p),
@@ -244,7 +223,6 @@ mod tests {
 
     #[test]
     fn hsv_primary_hues() {
-        // h=0 → red-dominant, h=1/3 → green-dominant, h=2/3 → blue-dominant.
         let (r, g, b) = hsv_to_rgb(0.0, 1.0, 1.0);
         assert!(r > g && r > b);
         let (r, g, b) = hsv_to_rgb(1.0 / 3.0, 1.0, 1.0);

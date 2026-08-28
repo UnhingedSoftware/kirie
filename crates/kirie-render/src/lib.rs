@@ -1,28 +1,3 @@
-//! kirie-render — wallpaper renderers on wgpu.
-//!
-//! First slice: still-image and animated-gif wallpapers.
-//!
-//! * [`ImageContent`] decodes plain image files (png/jpg/bmp/gif via the
-//!   `image` crate) and Wallpaper Engine `.tex` containers — including
-//!   animated `TEXS` atlases with per-frame rects, frametime pacing and
-//!   fmod looping (docs/format-tex.md §8) — into RGBA pages + frame
-//!   placements.
-//! * [`FrameSchedule`] is the reference's frametime walk
-//!   (docs/format-tex.md §8.1).
-//! * [`ScalingMode`]/[`ClampMode`]/[`UvWindow`] are THE shared
-//!   output-scaling implementation (docs/render-architecture.md §4,
-//!   docs/compat-cli.md §3.1) — kirie-video reuses these.
-//! * [`ImageRenderer`] implements [`kirie_platform::Renderer`]: pages are
-//!   uploaded once, animation switches prebuilt bind groups and rewrites a
-//!   32-byte uniform only on frame change (SPEC §V5); static content
-//!   reports "no further frames" via
-//!   [`ImageRenderer::time_until_frame_change`] (SPEC §V6 hint for the
-//!   presentation layer's redraw scheduling).
-//!
-//! Loading returns typed [`RenderError`]s and never panics on malformed
-//! input (SPEC §V9). No globals; every piece of state is owned and passed
-//! explicitly (SPEC §V1).
-
 #![forbid(unsafe_code)]
 
 mod content;

@@ -1,12 +1,3 @@
-//! Render an image wallpaper (plain file or `.tex`) on every output as a
-//! background layer-shell surface for `--seconds N` (default 3), then exit
-//! cleanly.
-//!
-//! ```sh
-//! cargo run -p kirie-render --example image_wall -- \
-//!     /path/to/preview.jpg --seconds 3 --scaling fill --clamp clamp
-//! ```
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;

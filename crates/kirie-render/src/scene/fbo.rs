@@ -1,43 +1,19 @@
-//! The scene / effect render-target pool (docs/render-architecture.md §6).
-//!
-//! Every `CFBO` is an `RGBA16F` color target so shaders may emit HDR values and
-//! the final 8-bit blit clamps (docs §6). Targets are allocated **once** at
-//! build time — the scene FBO at the projection size, per-image ping-pong FBOs
-//! at the image size — and reused every frame; the projection/image sizes do
-//! not depend on the output surface, so a surface resize recreates nothing
-//! (SPEC.md §V5). Every FBO is cleared to transparent black `(0,0,0,0)` at
-//! creation (docs §5.2, `CFBO.cpp:60-65`), which under wgpu is just the first
-//! render pass's `Clear` load op.
-
-/// The internal format of every scene render target (docs §6: `GL_RGBA16F`).
 pub const FBO_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 
-/// One offscreen color target: a texture, its default view, and its size.
 #[derive(Debug)]
 pub struct Fbo {
-    /// The color texture (`RGBA16F`, docs §6).
     pub texture: wgpu::Texture,
-    /// Its full view, used as both a render attachment and a sampled input.
     pub view: wgpu::TextureView,
-    /// Width in texels.
     pub width: u32,
-    /// Height in texels.
     pub height: u32,
 }
 
 impl Fbo {
-    /// Allocate a fresh `RGBA16F` target of `width`×`height` (both clamped to at
-    /// least 1 so a degenerate size never panics, SPEC.md §V9).
     #[must_use]
     pub fn new(device: &wgpu::Device, label: &str, width: u32, height: u32) -> Self {
         Self::with_format(device, label, width, height, FBO_FORMAT)
     }
 
-    /// [`Fbo::new`] with an explicit texture format. The bloom chain needs
-    /// 8-bit targets: the reference's `_rt_4FrameBuffer`/`_rt_8FrameBuffer`/
-    /// `_rt_Bloom` are `TextureFormat_ARGB8888` (CScene.cpp:118-130), so the
-    /// bright-pass output clamps at 1.0 before the blurs — HDR targets spread
-    /// unclamped energy and roughly double the halo radius.
     pub fn with_format(
         device: &wgpu::Device,
         label: &str,
@@ -58,10 +34,6 @@ impl Fbo {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
-            // COPY_SRC/DST so the scene FBO can be snapshotted into a sibling
-            // target for `_rt_FullFrameBuffer` reads (feedback-safe post-process
-            // layers, docs §6/§11 shadow-copy; the reference blits the scene FBO
-            // before an effect samples it). Cheap on every target, needed on two.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC

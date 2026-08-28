@@ -1,25 +1,3 @@
-//! X11 root-window / desktop presentation backend.
-//!
-//! Ports the C++ GLFW/X11 driver path (docs/render-architecture.md §2.2):
-//! monitors come from XRandR CRTC geometry (one viewport per connected CRTC,
-//! X11Output.cpp:111-159), and the wallpaper is drawn *behind* normal windows.
-//!
-//! The C++ path renders into a hidden full-screen GL surface, reads the pixels
-//! back with `glReadPixels`, `XPutImage`s them into a root-sized pixmap and
-//! points `_XROOTPMAP_ID`/`ESETROOT_PMAP_ID` at it (X11Output.cpp:226-246).
-//! That readback-to-pixmap dance exists because GLFW cannot present GL to the
-//! root window directly. wgpu can present straight to an X drawable via
-//! `VK_KHR_xcb_surface`, so kirie instead creates one real
-//! **override-redirect window per CRTC**, typed `_NET_WM_WINDOW_TYPE_DESKTOP`
-//! and lowered to the bottom of the stack, and presents GPU frames into it.
-//! Net effect matches the C++ intent — a per-monitor background behind every
-//! window — without the CPU readback (docs/render-architecture.md §2.2; this
-//! is the documented translation, SPEC V10). `--window` mode drops the desktop
-//! typing/lowering and maps a single ordinary override-redirect window.
-//!
-//! SPEC V2: the sole `unsafe` here is the raw-handle wgpu surface creation in
-//! [`create_x11_surface`], mirroring the Wayland path in `src/gpu.rs`.
-
 use std::num::NonZeroU32;
 use std::ptr::NonNull;
 use std::time::{Duration, Instant};
@@ -39,65 +17,30 @@ use crate::error::PlatformError;
 use crate::gpu::Gpu;
 use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
 
-/// How the X11 wallpaper window is presented.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum X11Mode {
-    /// One `_NET_WM_WINDOW_TYPE_DESKTOP` override-redirect window per CRTC,
-    /// lowered behind normal windows — the wallpaper mode
-    /// (docs/render-architecture.md §2.2).
     Desktop,
-    /// A single ordinary override-redirect window of the given size, for the
-    /// `--window` preview mode (docs/compat-cli.md `--window`).
-    Window {
-        /// Window width in pixels.
-        width: u32,
-        /// Window height in pixels.
-        height: u32,
-    },
+    Window { width: u32, height: u32 },
 }
 
-/// A monitor rectangle in the X screen's pixel coordinate space
-/// (docs/render-architecture.md §2.2: `GLFWOutputViewport{crtc.x, crtc.y,
-/// crtc.width, crtc.height}`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct MonitorGeometry {
-    /// Left edge in root coordinates.
     pub x: i32,
-    /// Top edge in root coordinates.
     pub y: i32,
-    /// Width in pixels (always ≥ 1).
     pub width: u32,
-    /// Height in pixels (always ≥ 1).
     pub height: u32,
 }
 
-/// Minimal projection of a RANDR `GetCrtcInfo` reply — just the fields that
-/// decide whether a CRTC is an active monitor and where it sits. Kept
-/// separate from x11rb's reply type so [`active_monitors`] is a pure function
-/// unit-testable with synthetic input (no live X server).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RawCrtc {
-    /// CRTC top-left x (root coords).
     pub x: i16,
-    /// CRTC top-left y (root coords).
     pub y: i16,
-    /// CRTC width in pixels.
     pub width: u16,
-    /// CRTC height in pixels.
     pub height: u16,
-    /// Active mode id; `0` means the CRTC is disabled.
     pub mode: u32,
-    /// Number of outputs (monitors) driven by this CRTC; `0` means nothing is
-    /// connected.
     pub connected_outputs: u32,
 }
 
-/// Reduce raw CRTC info to the set of active monitor rectangles
-/// (docs/render-architecture.md §2.2: one viewport per *connected* CRTC).
-///
-/// A CRTC is active iff it has a mode set, at least one connected output, and
-/// non-zero extent. Results are sorted by `(x, y)` so window/output ordering
-/// is deterministic across runs (RANDR returns CRTCs in arbitrary order).
 pub(crate) fn active_monitors(crtcs: &[RawCrtc]) -> Vec<MonitorGeometry> {
     let mut monitors: Vec<MonitorGeometry> = crtcs
         .iter()
@@ -113,51 +56,26 @@ pub(crate) fn active_monitors(crtcs: &[RawCrtc]) -> Vec<MonitorGeometry> {
     monitors
 }
 
-/// Everything owned per X11 monitor: its window, swapchain surface, and lazily
-/// built renderer. Field order is load-bearing — `wgpu_surface` (which borrows
-/// the raw xcb connection + window) is declared before everything so it drops
-/// before the connection closes (see [`X11Platform`] field order).
 struct X11Output {
-    /// wgpu swapchain surface over this window (`None` if creation failed).
     wgpu_surface: Option<wgpu::Surface<'static>>,
-    /// The X11 window id backing the surface.
     window: Window,
-    /// Human-readable name for logs (`X11-0`, …).
     name: String,
-    /// Current swapchain extent in pixels.
     physical_size: SurfaceSize,
-    /// Swapchain configured at least once.
     configured: bool,
-    /// App-supplied frame producer; built lazily once the GPU exists.
     renderer: Option<Box<dyn Renderer>>,
-    /// Timestamp of the previous presented frame, for per-monitor `dt`.
     last_frame: Option<Instant>,
-    /// Whether the first frame was logged.
     first_frame_presented: bool,
 }
 
-/// The X11 presentation layer: owns the xcb connection, one window+surface per
-/// monitor, and the shared GPU context (SPEC V1: owned here, nothing global).
-///
-/// Field order is load-bearing for drop safety: `outputs` (holding
-/// `wgpu::Surface`s over raw xcb pointers) and `gpu` are declared before
-/// `conn`, so every surface is destroyed before the xcb connection closes.
-/// The X server frees the client's windows automatically when `conn` drops, so
-/// no explicit window teardown is needed.
 pub struct X11Platform {
     outputs: Vec<X11Output>,
     gpu: Gpu,
     conn: XCBConnection,
     make_renderer: RendererFactory,
-    /// Target ~60 FPS present cadence, matching the C++ `usleep` FPS cap
-    /// (docs/render-architecture.md §2.2 step 7).
     frame_interval: Duration,
 }
 
 impl X11Platform {
-    /// Connect to `$DISPLAY`, enumerate monitors via RANDR, and bring up a
-    /// window + wgpu surface per monitor (or a single window in
-    /// [`X11Mode::Window`]).
     pub(crate) fn connect(mode: X11Mode, make_renderer: RendererFactory) -> Result<Self, PlatformError> {
         let (conn, screen_num) =
             XCBConnection::connect(None).map_err(|e| PlatformError::X11Connect(e.to_string()))?;
@@ -172,8 +90,6 @@ impl X11Platform {
         let visual = screen.root_visual;
         let black = screen.black_pixel;
 
-        // Monitor geometry: RANDR CRTCs for desktop mode, a single synthetic
-        // rectangle for --window (docs/render-architecture.md §2.2).
         let geometries = match mode {
             X11Mode::Desktop => query_monitors(&conn, root)?,
             X11Mode::Window { width, height } => vec![MonitorGeometry {
@@ -187,8 +103,6 @@ impl X11Platform {
             return Err(PlatformError::NoCrtcs);
         }
 
-        // Create every window up front (windows only need the connection);
-        // the GPU is brought up against the first window's surface.
         let mut windows = Vec::with_capacity(geometries.len());
         for geom in &geometries {
             let wid = create_window(&conn, root, depth, visual, black, *geom, mode)?;
@@ -197,10 +111,6 @@ impl X11Platform {
         conn.flush()
             .map_err(|e| PlatformError::X11Protocol(e.to_string()))?;
 
-        // Bring up wgpu against the first window, then create surfaces for the
-        // rest with the same instance (a surface is only compatible with
-        // adapters from the instance that made it — same rule as Wayland,
-        // src/gpu.rs).
         let (gpu, first_surface) = bring_up_gpu(&conn, screen_num, windows[0].0)?;
         let mut first_surface = Some(first_surface);
 
@@ -252,19 +162,15 @@ impl X11Platform {
         Ok(platform)
     }
 
-    /// Number of monitors that currently have a window.
     #[must_use]
     pub(crate) fn output_count(&self) -> usize {
         self.outputs.len()
     }
 
-    /// Outputs with a live surface. X11 windows are created with their surface
-    /// or not at all, so this is the same number.
     pub(crate) fn surface_count(&self) -> usize {
         self.outputs.len()
     }
 
-    /// (Re)configure the swapchain of `outputs[index]` for its current size.
     fn configure_swapchain(&mut self, index: usize) {
         let Some(ctx) = self.outputs.get_mut(index) else {
             return;
@@ -280,15 +186,11 @@ impl X11Platform {
             tracing::error!(output = %ctx.name, "adapter cannot present to this surface");
             return;
         };
-        // Fifo is universally supported and vsync-paces the present loop,
-        // standing in for the C++ usleep FPS cap
-        // (docs/render-architecture.md §2.2 step 7).
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&self.gpu.device, &config);
         ctx.configured = true;
     }
 
-    /// Render + present one frame for `outputs[index]`.
     fn draw(&mut self, index: usize) {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
 
@@ -364,7 +266,6 @@ impl X11Platform {
         }
     }
 
-    /// Handle one X event: keep window sizes in sync with the server.
     fn handle_event(&mut self, event: Event) {
         if let Event::ConfigureNotify(ev) = event {
             let new = SurfaceSize {
@@ -380,13 +281,6 @@ impl X11Platform {
         }
     }
 
-    /// Drive the present loop until `duration` elapses (`None` = forever).
-    ///
-    /// Unlike Wayland's frame-callback model, X11 has no compositor-driven
-    /// cadence, so this mirrors the C++ GLFW/X11 driver: an unthrottled loop
-    /// with an FPS cap (docs/render-architecture.md §2.2). Fifo present vsync-
-    /// paces each surface; the trailing sleep enforces the cap when present
-    /// returns early (e.g. no monitor attached).
     pub(crate) fn run(&mut self, duration: Option<Duration>) -> Result<(), PlatformError> {
         let deadline = duration.map(|d| Instant::now() + d);
 
@@ -422,8 +316,6 @@ impl X11Platform {
     }
 }
 
-/// Enumerate active monitors from RANDR (docs/render-architecture.md §2.2:
-/// XRandR CRTCs, X11Output.cpp:111-159).
 fn query_monitors(conn: &XCBConnection, root: Window) -> Result<Vec<MonitorGeometry>, PlatformError> {
     let resources = conn
         .randr_get_screen_resources_current(root)
@@ -439,8 +331,6 @@ fn query_monitors(conn: &XCBConnection, root: Window) -> Result<Vec<MonitorGeome
             .reply()
         {
             Ok(info) => info,
-            // A CRTC can vanish between the resource list and the info query;
-            // skip it rather than fail the whole enumeration (SPEC V9).
             Err(err) => {
                 tracing::debug!(crtc, %err, "skipping crtc with no info");
                 continue;
@@ -459,7 +349,6 @@ fn query_monitors(conn: &XCBConnection, root: Window) -> Result<Vec<MonitorGeome
     Ok(active_monitors(&raw))
 }
 
-/// Create one wallpaper window for `geom` (docs/render-architecture.md §2.2).
 fn create_window(
     conn: &XCBConnection,
     root: Window,
@@ -475,9 +364,6 @@ fn create_window(
 
     let aux = CreateWindowAux::new()
         .background_pixel(background)
-        // Override-redirect so no WM decorates or repositions the wallpaper
-        // (both desktop and --window; the C++ GLFW window is likewise
-        // unmanaged, docs/render-architecture.md §2.2).
         .override_redirect(1u32)
         .event_mask(EventMask::EXPOSURE | EventMask::STRUCTURE_NOTIFY);
 
@@ -496,7 +382,6 @@ fn create_window(
     )
     .map_err(|e| PlatformError::X11Protocol(e.to_string()))?;
 
-    // WM_NAME so the window is identifiable in tooling.
     conn.change_property8(
         PropMode::REPLACE,
         wid,
@@ -507,10 +392,6 @@ fn create_window(
     .map_err(|e| PlatformError::X11Protocol(e.to_string()))?;
 
     if matches!(mode, X11Mode::Desktop) {
-        // _NET_WM_WINDOW_TYPE = _NET_WM_WINDOW_TYPE_DESKTOP so EWMH-aware
-        // compositors keep the wallpaper behind everything (the modern
-        // equivalent of the C++ root-pixmap behavior,
-        // docs/render-architecture.md §2.2).
         let type_atom = intern(conn, b"_NET_WM_WINDOW_TYPE")?;
         let desktop_atom = intern(conn, b"_NET_WM_WINDOW_TYPE_DESKTOP")?;
         conn.change_property32(PropMode::REPLACE, wid, type_atom, AtomEnum::ATOM, &[desktop_atom])
@@ -521,8 +402,6 @@ fn create_window(
         .map_err(|e| PlatformError::X11Protocol(e.to_string()))?;
 
     if matches!(mode, X11Mode::Desktop) {
-        // Lower to the bottom of the stack as a belt-and-braces guarantee for
-        // WMs that ignore the DESKTOP type hint.
         conn.configure_window(wid, &ConfigureWindowAux::new().stack_mode(StackMode::BELOW))
             .map_err(|e| PlatformError::X11Protocol(e.to_string()))?;
     }
@@ -530,7 +409,6 @@ fn create_window(
     Ok(wid)
 }
 
-/// Intern an atom, returning it as a plain `u32`.
 fn intern(conn: &XCBConnection, name: &[u8]) -> Result<u32, PlatformError> {
     Ok(conn
         .intern_atom(false, name)
@@ -540,9 +418,6 @@ fn intern(conn: &XCBConnection, name: &[u8]) -> Result<u32, PlatformError> {
         .atom)
 }
 
-/// Bring up wgpu against the first window and return it plus that window's
-/// swapchain surface. Vulkan preferred, falling back to all backends — the
-/// same policy as the Wayland path (src/gpu.rs).
 fn bring_up_gpu(
     conn: &XCBConnection,
     screen_num: usize,
@@ -595,9 +470,6 @@ fn bring_up_gpu(
     Err(last_err.unwrap_or(PlatformError::NoCrtcs))
 }
 
-/// The single `unsafe` of the X11 backend: wrap
-/// [`wgpu::Instance::create_surface_unsafe`] over the libxcb connection
-/// pointer and an X window id (SPEC V2, mirroring `src/gpu.rs`).
 #[allow(unsafe_code)]
 fn create_x11_surface(
     instance: &wgpu::Instance,
@@ -615,19 +487,6 @@ fn create_x11_surface(
     let raw_window_handle = RawWindowHandle::Xcb(XcbWindowHandle::new(window));
 
     // SAFETY: `create_surface_unsafe` requires both raw handles to be valid
-    // and to stay valid until the returned `Surface` is dropped.
-    // - Validity: `connection` is the live `*mut xcb_connection_t` owned by
-    //   `conn` (an `XCBConnection`, libxcb-backed) and was null-checked;
-    //   `window` is a live X11 window id created against that same connection
-    //   earlier in `connect`.
-    // - Lifetime: the returned surface is stored in an `X11Output`, and
-    //   `X11Platform` declares `outputs` before `conn`, so every surface is
-    //   dropped before the xcb connection closes; the X server frees the
-    //   windows when the connection closes, strictly after their surfaces are
-    //   gone. A surface that never reaches an `X11Output` (the backend-
-    //   fallback path in `bring_up_gpu` when no adapter is found) dies inside
-    //   that function, strictly within the caller's borrow of `conn`. The
-    //   `'static` return lifetime is sound under that ownership discipline.
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(raw_display_handle),
@@ -670,26 +529,23 @@ mod tests {
     #[test]
     fn disabled_crtcs_are_dropped() {
         let got = active_monitors(&[
-            crtc(0, 0, 1920, 1080, 1, 1),    // active
-            crtc(0, 0, 0, 0, 0, 0),          // unused (mode 0)
-            crtc(1920, 0, 2560, 1440, 7, 0), // mode set but no output connected
-            crtc(0, 0, 1280, 1024, 3, 1),    // active but zero-origin dup position
+            crtc(0, 0, 1920, 1080, 1, 1),
+            crtc(0, 0, 0, 0, 0, 0),
+            crtc(1920, 0, 2560, 1440, 7, 0),
+            crtc(0, 0, 1280, 1024, 3, 1),
         ]);
-        // Only the two CRTCs with a mode AND a connected output survive.
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|m| m.width > 0 && m.height > 0));
     }
 
     #[test]
     fn zero_extent_crtc_is_dropped() {
-        // Mode + output set but zero pixels: not a real monitor.
         let got = active_monitors(&[crtc(0, 0, 0, 1080, 5, 1)]);
         assert!(got.is_empty());
     }
 
     #[test]
     fn multi_monitor_sorted_left_to_right() {
-        // RANDR order is arbitrary; result must be deterministic by (x, y).
         let got = active_monitors(&[
             crtc(2560, 0, 1920, 1080, 1, 1),
             crtc(0, 0, 2560, 1440, 1, 1),
@@ -703,7 +559,6 @@ mod tests {
 
     #[test]
     fn negative_origin_preserved() {
-        // A monitor left-of-primary has negative x in root coordinates.
         let got = active_monitors(&[crtc(0, 0, 1920, 1080, 1, 1), crtc(-1080, 0, 1080, 1920, 1, 1)]);
         assert_eq!(got[0].x, -1080);
         assert_eq!(got[1].x, 0);

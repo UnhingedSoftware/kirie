@@ -1,7 +1,3 @@
-//! CPU-side image wallpaper content: decoded RGBA pages plus per-frame
-//! atlas placements and timing, independent of any GPU state so the frame
-//! schedule and atlas math are unit-testable.
-
 use std::fs;
 use std::io::BufReader;
 use std::path::Path;
@@ -13,81 +9,37 @@ use kirie_formats::tex::Tex;
 use crate::error::RenderError;
 use crate::schedule::FrameSchedule;
 
-/// One decoded RGBA8 texture page (a whole atlas image for animated
-/// textures, or the single still image).
 #[derive(Debug, Clone)]
 pub struct ImagePage {
-    /// Width in texels.
     pub width: u32,
-    /// Height in texels.
     pub height: u32,
-    /// Tightly packed RGBA8 rows, `4·width·height` bytes.
     pub pixels: Vec<u8>,
 }
 
-/// Where one displayed frame lives: which page, for how long, and the
-/// affine UV placement inside the page.
-///
-/// `translation`/`axes` are exactly the reference's per-frame atlas
-/// uniforms (docs/format-tex.md §8.1 step 5): the quad UV `uv ∈ [0,1]²`
-/// maps to `pageUV = translation + uv.x·(axes.x, axes.z) + uv.y·(axes.y,
-/// axes.w)`, i.e. `g_Texture0Translation` and `g_Texture0Rotation`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FramePlacement {
-    /// Index into [`ImageContent::pages`] (the TEXS `frameNumber`,
-    /// docs/format-tex.md §8, §9).
     pub page: usize,
-    /// Display duration in seconds (TEXS `frametime`, docs/format-tex.md
-    /// §8; 0 for still images).
     pub duration: f32,
-    /// Frame origin over the page, normalized by the page's mip-0 dims —
-    /// `g_Texture0Translation = (x/texW, y/texH)` (docs/format-tex.md §8.1).
     pub translation: [f32; 2],
-    /// Frame axis vectors, normalized — `g_Texture0Rotation = (width1/texW,
-    /// width2/texW, height2/texH, height1/texH)`; nonzero `width2/height2`
-    /// encode 90°-rotated atlas frames (docs/format-tex.md §8, §8.1).
     pub axes: [f32; 4],
 }
 
-/// Sampler state derived from the texture (docs/format-tex.md §6.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SamplerSpec {
-    /// `NoInterpolation` (0x1): nearest filtering instead of linear
-    /// (docs/format-tex.md §6.1, CTexture.cpp:185-191).
     pub nearest: bool,
-    /// `ClampUVs` (0x2): clamp-to-edge wrap instead of repeat
-    /// (docs/format-tex.md §6.1, CTexture.cpp:177-183).
     pub clamp_uvs: bool,
 }
 
-/// Fully decoded image-wallpaper content, ready for GPU upload.
 #[derive(Debug, Clone)]
 pub struct ImageContent {
-    /// Decoded texture pages (one per `.tex` image, docs/format-tex.md §4;
-    /// one per composited gif frame for plain animated gifs).
     pub pages: Vec<ImagePage>,
-    /// Displayed frames in playback order. Always at least one.
     pub frames: Vec<FramePlacement>,
-    /// Sampler behavior for the pages (docs/format-tex.md §6.1).
     pub sampler: SamplerSpec,
-    /// Logical content width used for output scaling: TEXS `gifWidth`, the
-    /// `.tex` real (crop) width, or the plain image width
-    /// (docs/format-tex.md §3, §8; docs/render-architecture.md §4 uses the
-    /// wallpaper's native size as the projection).
     pub content_width: u32,
-    /// Logical content height; see [`ImageContent::content_width`].
     pub content_height: u32,
 }
 
 impl ImageContent {
-    /// Load content from a file: `.tex` goes through the Wallpaper Engine
-    /// container (docs/format-tex.md), anything else through the `image`
-    /// crate (png/jpg/bmp/gif). Animated gifs keep all frames.
-    ///
-    /// Plain image files have no C++ reference behavior — the reference
-    /// rejects image wallpapers outright (docs/render-architecture.md §3)
-    /// — so the plain path defines kirie behavior: frames composited by the
-    /// gif decoder, delays taken verbatim.
     pub fn from_path(path: &Path) -> Result<Self, RenderError> {
         let is_tex = path
             .extension()
@@ -120,23 +72,11 @@ impl ImageContent {
         }
     }
 
-    /// Parse and decode a raw `.tex` byte buffer (e.g. an entry read from
-    /// `scene.pkg`); see [`ImageContent::from_tex`].
     pub fn from_tex_bytes(bytes: &[u8]) -> Result<Self, RenderError> {
         let tex = Tex::parse(bytes)?;
         Self::from_tex(&tex)
     }
 
-    /// Decode a parsed `.tex` into displayable content.
-    ///
-    /// * Video textures are refused (kirie-video owns them,
-    ///   docs/format-tex.md §7.3).
-    /// * Every image's mip 0 becomes a page (multi-image gifs bind
-    ///   `textureID[frameNumber]` per frame, docs/format-tex.md §9).
-    /// * With a TEXS block, frames carry the §8.1 atlas placement; without
-    ///   one, a single still frame crops the NPOT padding via `realSize /
-    ///   textureSize` exactly like the reference's `texcoordCopy` buffer
-    ///   (docs/render-architecture.md §7.1).
     pub fn from_tex(tex: &Tex<'_>) -> Result<Self, RenderError> {
         if tex.is_video() || tex.fif.is_mp4() {
             return Err(RenderError::VideoTex);
@@ -164,8 +104,6 @@ impl ImageContent {
             });
         }
 
-        // docs/format-tex.md §6.1: NoInterpolation → nearest, ClampUVs →
-        // clamp-to-edge; other flag bits don't affect sampling.
         let sampler = SamplerSpec {
             nearest: tex.flags.no_interpolation(),
             clamp_uvs: tex.flags.clamp_uvs(),
@@ -186,8 +124,6 @@ impl ImageContent {
                             pages: pages.len(),
                         });
                     };
-                    // §8.1 step 5: normalize by the mip-0 dims of the
-                    // *selected image*.
                     let w = atlas.width as f32;
                     let h = atlas.height as f32;
                     frames.push(FramePlacement {
@@ -202,8 +138,6 @@ impl ImageContent {
                         ],
                     });
                 }
-                // §8: gifWidth/gifHeight is the logical frame size (stored
-                // for TEXS0003, back-filled from frame 0 otherwise).
                 if animation.gif_width == 0 || animation.gif_height == 0 {
                     return Err(RenderError::InvalidDimensions {
                         width: animation.gif_width,
@@ -219,11 +153,6 @@ impl ImageContent {
                 })
             }
             None => {
-                // Still image: one frame over page 0. The header's real
-                // (crop) dims trim NPOT padding — `texcoordCopy = realSize /
-                // textureSize` (docs/render-architecture.md §7.1; header
-                // fields per docs/format-tex.md §3). FreeImage-path decodes
-                // already come out at real size, making the ratio 1.
                 let page = &pages[0];
                 if tex.width == 0 || tex.height == 0 {
                     return Err(RenderError::InvalidDimensions {
@@ -249,7 +178,6 @@ impl ImageContent {
         }
     }
 
-    /// Wrap an already-decoded still RGBA8 buffer as single-frame content.
     pub fn from_single_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Result<Self, RenderError> {
         if width == 0 || height == 0 {
             return Err(RenderError::InvalidDimensions { width, height });
@@ -266,9 +194,6 @@ impl ImageContent {
                 translation: [0.0, 0.0],
                 axes: [1.0, 0.0, 0.0, 1.0],
             }],
-            // Plain files carry no .tex flags; linear filtering and edge
-            // clamping are the safe defaults for a single full page (no
-            // reference behavior exists, docs/render-architecture.md §3).
             sampler: SamplerSpec {
                 nearest: false,
                 clamp_uvs: true,
@@ -278,10 +203,6 @@ impl ImageContent {
         })
     }
 
-    /// Decode a plain animated gif: the `image` crate composites each frame
-    /// onto the logical canvas (disposal handled by its gif frame
-    /// iterator), so every frame becomes one full page with an identity
-    /// placement and its own delay.
     fn from_gif<R: std::io::BufRead + std::io::Seek>(reader: R) -> Result<Self, RenderError> {
         let decoder = GifDecoder::new(reader)?;
         let frames = decoder.into_frames().collect_frames()?;
@@ -342,15 +263,11 @@ impl ImageContent {
         })
     }
 
-    /// Playback schedule over [`ImageContent::frames`]
-    /// (docs/format-tex.md §8.1).
     #[must_use]
     pub fn schedule(&self) -> FrameSchedule {
         FrameSchedule::new(self.frames.iter().map(|f| f.duration).collect())
     }
 
-    /// Logical content size, the scaling-math projection
-    /// (docs/render-architecture.md §4).
     #[must_use]
     pub fn content_size(&self) -> (u32, u32) {
         (self.content_width, self.content_height)
@@ -366,8 +283,6 @@ mod tests {
 
     use super::*;
 
-    /// A synthetic in-memory `.tex` model (fields are all public, so no
-    /// byte-level round trip is needed to exercise `from_tex`).
     fn synthetic_tex<'a>(
         payload: &'a [u8],
         width: u32,
@@ -407,8 +322,6 @@ mod tests {
 
     #[test]
     fn static_tex_crops_npot_padding() {
-        // 8x8 stored payload, 6x5 real size → texcoordCopy = real/texture
-        // (docs/render-architecture.md §7.1).
         let payload = rgba_page(8, 8);
         let tex = synthetic_tex(&payload, 8, 8, 6, 5, 0, None);
         let content = ImageContent::from_tex(&tex).unwrap();
@@ -421,7 +334,6 @@ mod tests {
         assert_eq!(frame.axes, [0.75, 0.0, 0.0, 0.625]);
         assert_eq!(content.content_size(), (6, 5));
         assert!(!content.schedule().is_animated());
-        // No flags → linear + repeat (docs/format-tex.md §6.1).
         assert_eq!(
             content.sampler,
             SamplerSpec {
@@ -434,7 +346,6 @@ mod tests {
     #[test]
     fn tex_flags_drive_the_sampler_spec() {
         let payload = rgba_page(4, 4);
-        // NoInterpolation | ClampUVs = 0x3 (docs/format-tex.md §6.1).
         let tex = synthetic_tex(&payload, 4, 4, 4, 4, 0x3, None);
         let content = ImageContent::from_tex(&tex).unwrap();
         assert_eq!(
@@ -448,8 +359,6 @@ mod tests {
 
     #[test]
     fn animated_tex_builds_atlas_placements() {
-        // 8x4 atlas holding two 4x4 frames side by side; TEXS0003-style
-        // float frame records (docs/format-tex.md §8).
         let payload = rgba_page(8, 4);
         let animation = Animation {
             version: AnimationVersion::Texs0003,
@@ -482,8 +391,6 @@ mod tests {
         let content = ImageContent::from_tex(&tex).unwrap();
         assert_eq!(content.content_size(), (4, 4));
         assert_eq!(content.frames.len(), 2);
-        // §8.1 step 5: translation = origin/texDims, axes normalized the
-        // same way.
         assert_eq!(content.frames[0].translation, [0.0, 0.0]);
         assert_eq!(content.frames[0].axes, [0.5, 0.0, 0.0, 1.0]);
         assert_eq!(content.frames[1].translation, [0.5, 0.0]);
@@ -494,14 +401,11 @@ mod tests {
         assert_eq!(schedule.durations(), &[0.25, 0.5]);
         assert_eq!(schedule.frame_at(0.1), 0);
         assert_eq!(schedule.frame_at(0.3), 1);
-        assert_eq!(schedule.frame_at(0.8), 0); // wraps at 0.75
+        assert_eq!(schedule.frame_at(0.8), 0);
     }
 
     #[test]
     fn rotated_frames_keep_cross_axes() {
-        // Nonzero width2/height2 = 90°-rotated atlas frame
-        // (docs/format-tex.md §8: interleaved width1, width2, height2,
-        // height1 order).
         let payload = rgba_page(8, 8);
         let animation = Animation {
             version: AnimationVersion::Texs0002,
@@ -526,7 +430,6 @@ mod tests {
 
     #[test]
     fn malformed_tex_content_yields_typed_errors() {
-        // frameNumber past imageCount (docs/format-tex.md §8) — SPEC §V9.
         let payload = rgba_page(4, 4);
         let animation = Animation {
             version: AnimationVersion::Texs0003,
@@ -553,7 +456,6 @@ mod tests {
             })
         ));
 
-        // Empty frame table.
         let empty = Animation {
             version: AnimationVersion::Texs0003,
             gif_width: 4,
@@ -566,7 +468,6 @@ mod tests {
             Err(RenderError::EmptyAnimation)
         ));
 
-        // No images at all.
         let mut no_images = synthetic_tex(&payload, 4, 4, 4, 4, 0, None);
         no_images.images.clear();
         assert!(matches!(
@@ -574,7 +475,6 @@ mod tests {
             Err(RenderError::NoImages)
         ));
 
-        // Video flag (0x20) → kirie-video's job (docs/format-tex.md §7.3).
         let video = synthetic_tex(&payload, 4, 4, 4, 4, TextureFlags::VIDEO, None);
         assert!(matches!(
             ImageContent::from_tex(&video),
@@ -584,9 +484,6 @@ mod tests {
 
     #[test]
     fn plain_animated_gif_keeps_frames_and_delays() {
-        // Encode a 2-frame 4x4 gif in memory, then decode through the
-        // public path (no reference behavior exists for plain files;
-        // docs/render-architecture.md §3).
         let dir = std::env::temp_dir().join("kirie-render-gif-test");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("two-frame.gif");
@@ -617,7 +514,6 @@ mod tests {
             assert_eq!(frame.axes, [1.0, 0.0, 0.0, 1.0]);
             assert!((frame.duration - 0.1).abs() < 1e-6, "delay {}", frame.duration);
         }
-        // First frame stays red after gif palette quantization.
         assert_eq!(&content.pages[0].pixels[0..4], &[255, 0, 0, 255]);
         assert!(content.schedule().is_animated());
     }

@@ -1,25 +1,3 @@
-//! P1 corpus e2e gate — THE definition of P1-done (SPEC.md §T7, §V11).
-//!
-//! Every assertion pins an exact literal number taken from the docs/ specs:
-//! docs/corpus.md (item inventory, per-pkg composition) and docs/format-tex.md
-//! (tex census). One `#[test]` per numbered gate for clear failure
-//! attribution:
-//!
-//! 1. all 24 `project.json` parse; type split matches the inventory
-//!    (docs/corpus.md §1, §3)
-//! 2. all 19 `scene.pkg` parse; per-item entry counts match; every entry
-//!    reads; every `scene.json` entry is valid JSON (docs/corpus.md §2–§4, §9)
-//! 3. all 190 embedded `.tex` parse; every non-mp4 top mip decodes to RGBA8
-//!    with `len == 4·w·h`; animated frame tables parse
-//!    (docs/corpus.md §4; docs/format-tex.md §6.1, §7.3, §8.1)
-//! 4. Asset item 3347128360 is identified as non-renderable
-//!    (docs/corpus.md §1, §6.3, §8)
-//! 5. read-everything smoke pass: every pkg extracts > 0 bytes
-//!
-//! Corpus-gated: when the corpus directory is absent, each test skips
-//! (eprintln + return) so CI without the Steam corpus stays green. Override
-//! the corpus location with the `KIRIE_CORPUS` environment variable.
-
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, ensure};
@@ -27,14 +5,8 @@ use kirie_formats::pkg::OwnedPkg;
 use kirie_formats::project::{Project, WallpaperType};
 use kirie_formats::tex::{AnimationVersion, Tex, TexError};
 
-// ---- corpus location (skip-gating) ----------------------------------------
-
-/// Default corpus location (docs/corpus.md: corpus root); override with
-/// `KIRIE_CORPUS`.
 const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
 
-/// Resolve the corpus directory, or `None` (with an eprintln) to skip the
-/// calling test when the corpus is not installed.
 fn corpus_dir() -> Option<PathBuf> {
     let dir = std::env::var_os("KIRIE_CORPUS")
         .map(PathBuf::from)
@@ -50,60 +22,30 @@ fn corpus_dir() -> Option<PathBuf> {
     }
 }
 
-// ---- expected inventory (exact literals from docs/corpus.md) ---------------
-
-/// docs/corpus.md §1: 24 items total.
 const ITEM_COUNT: usize = 24;
-/// docs/corpus.md §1 class counts: 19 scene.pkg, 3 web, 1 video, 1 asset.
 const SCENE_COUNT: usize = 19;
-/// docs/corpus.md §1.
 const WEB_COUNT: usize = 3;
-/// docs/corpus.md §1.
 const VIDEO_COUNT: usize = 1;
-/// docs/corpus.md §1.
 const ASSET_COUNT: usize = 1;
 
-/// docs/format-tex.md (header): 190 real `.tex` files embedded in the 19
-/// scene.pkg archives.
 const TEX_TOTAL: usize = 190;
-/// docs/format-tex.md §6.1: corpus flag value 34 (Video|ClampUVs) ×3 — the
-/// three mp4-payload textures (§7.3).
 const TEX_VIDEO_COUNT: usize = 3;
-/// docs/format-tex.md §6.1: corpus flag value 6 (IsGif|ClampUVs) ×1 — exactly
-/// one animated texture (§8: TEXS0003, item 3585875739).
 const TEX_ANIMATED_COUNT: usize = 1;
 
-/// docs/format-tex.md §7.3: all corpus video payloads start with the 12-byte
-/// MP4 signature `00 00 00 20 66 74 79 70 69 73 6F 6D` (`ftyp isom`).
 const MP4_FTYP_ISOM: &[u8] = &[
     0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d,
 ];
 
-/// Per-item expectations from the docs/corpus.md §3 inventory table.
 struct ItemExpect {
-    /// Workshop id == corpus directory name (docs/corpus.md §3 notes: the
-    /// directory name is the authoritative id).
     id: &'static str,
-    /// Declared `"type"` string, case-preserved; `None` = key absent
-    /// (docs/corpus.md §1, §3 "type (declared)" column).
     declared: Option<&'static str>,
-    /// Type resolved by the main-file extension/URL rule
-    /// (docs/corpus.md §1 resolution table).
     resolved: WallpaperType,
-    /// `project.json:file` (docs/corpus.md §3 "main file" column; for scenes
-    /// the value is `scene.json`, which the loader maps to the pkg entry).
     file: &'static str,
-    /// Size in bytes of the on-disk file backing `file` (docs/corpus.md §3
-    /// "main size" column; for scenes that is `scene.pkg`).
     main_size: u64,
-    /// Whether `project.json` carries a `workshopid` key (docs/corpus.md §3
-    /// notes list the 7 items lacking it).
     has_workshopid: bool,
-    /// `category == "Asset"` non-renderable item (docs/corpus.md §1, §6.3).
     asset: bool,
 }
 
-/// The full docs/corpus.md §3 inventory (24 rows, id-ascending).
 const ITEMS: &[ItemExpect] = &[
     ItemExpect {
         id: "1388331347",
@@ -196,16 +138,6 @@ const ITEMS: &[ItemExpect] = &[
         asset: false,
     },
     ItemExpect {
-        // docs/corpus.md §1 edge case: no `type` key, category=Asset; by the
-        // extension rule `effect.json` resolves to Scene, but the item is an
-        // effect preset, not a wallpaper (§6.3).
-        //
-        // DOC ERRATUM: the §3 row prints `main size` 4741, but effect.json is
-        // 876 bytes on disk — and the same row's `item size` 111637 sums
-        // exactly from the live files (876 + 195 + 7822 + 11375 + 90082 +
-        // 1287), so the corpus matches the documented snapshot and the 4741
-        // cell is internally inconsistent. Asserting the real byte count;
-        // flagged for spec backprop into docs/corpus.md.
         id: "3347128360",
         declared: None,
         resolved: WallpaperType::Scene,
@@ -333,23 +265,14 @@ const ITEMS: &[ItemExpect] = &[
     },
 ];
 
-/// Per-pkg expectations from the docs/corpus.md §4 composition table
-/// ("pkg ver", "entries", "tex" columns) plus the §3 "main size" column
-/// (for scenes = the scene.pkg byte size).
 struct PkgExpect {
-    /// Workshop id / directory name (docs/corpus.md §4).
     id: &'static str,
-    /// Full pkg magic incl. version suffix (docs/corpus.md §4 "pkg ver").
     magic: &'static [u8],
-    /// Entry-table row count (docs/corpus.md §4 "entries").
     entries: usize,
-    /// Number of `.tex` entries (docs/corpus.md §4 "tex").
     tex: usize,
-    /// scene.pkg file size in bytes (docs/corpus.md §3 "main size").
     pkg_size: u64,
 }
 
-/// The full docs/corpus.md §4 table (19 rows, id-ascending).
 const PKGS: &[PkgExpect] = &[
     PkgExpect {
         id: "1388331347",
@@ -486,16 +409,10 @@ const PKGS: &[PkgExpect] = &[
     },
 ];
 
-// ---- shared helpers ---------------------------------------------------------
-
-/// docs/corpus.md §9: pkg-embedded JSON files carry UTF-8 BOMs — strip a
-/// leading `EF BB BF` before JSON parsing (`utf-8-sig` semantics).
 fn strip_bom(bytes: &[u8]) -> &[u8] {
     bytes.strip_prefix(b"\xef\xbb\xbf").unwrap_or(bytes)
 }
 
-/// Load and parse one item's scene.pkg, checking its on-disk size against the
-/// docs/corpus.md §3 "main size" column first.
 fn load_pkg(dir: &Path, exp: &PkgExpect) -> Result<OwnedPkg> {
     let path = dir.join(exp.id).join("scene.pkg");
     let meta =
@@ -510,12 +427,6 @@ fn load_pkg(dir: &Path, exp: &PkgExpect) -> Result<OwnedPkg> {
     OwnedPkg::from_path(&path).with_context(|| format!("{}: scene.pkg failed to parse", exp.id))
 }
 
-// ---- gate 1: project.json ---------------------------------------------------
-
-/// P1 gate 1: all 24 `project.json` parse and the type split matches the
-/// docs/corpus.md §1/§3 inventory exactly (19 scene + 3 web + 1 video +
-/// 1 asset; per-item declared string, resolved type, main file, workshopid
-/// presence).
 #[test]
 fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<()> {
     let Some(dir) = corpus_dir() else {
@@ -524,12 +435,6 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
 
     ensure!(ITEMS.len() == ITEM_COUNT, "inventory table must hold 24 rows");
 
-    // The corpus is a LIVE Steam directory: the user can subscribe to new
-    // wallpapers at any time, so the inventory table is a documented *subset*,
-    // not an exact snapshot. Invariant (SPEC §V11): every documented item is
-    // still installed, AND every extra installed item also parses — corpus
-    // growth must never regress "∀ installed wallpaper works", only the
-    // documented rows below carry exact per-item assertions.
     let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
         .with_context(|| format!("cannot list corpus dir {}", dir.display()))?
         .filter_map(std::result::Result::ok)
@@ -546,14 +451,10 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
         missing.is_empty(),
         "documented corpus items no longer installed: {missing:?} (docs/corpus.md §3 needs a re-scan)",
     );
-    // Extra (newly subscribed) items must still parse — the real §V11 gate.
     for id in &on_disk {
         if expected_ids.iter().any(|e| e == id) {
             continue;
         }
-        // A directory with no project.json is not an item: unsubscribing
-        // leaves one behind, because Steam removes only the files it owns and
-        // kirie's own `.kirie-cache` keeps the directory alive.
         let manifest = dir.join(id).join("project.json");
         if !manifest.is_file() {
             continue;
@@ -603,9 +504,6 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
             item.asset,
         );
 
-        // For non-scene classes the main file is a loose file on disk whose
-        // exact size the §3 inventory records (scene sizes are checked in
-        // gate 2 against scene.pkg, which backs `file: "scene.json"`).
         if item.file != "scene.json" {
             let main = dir.join(item.id).join(item.file);
             let meta = std::fs::metadata(&main)
@@ -619,8 +517,6 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
             );
         }
 
-        // Class split (docs/corpus.md §1): the Asset item counts as its own
-        // class, not as one of the 19 renderable scenes.
         if item.asset {
             asset += 1;
         } else {
@@ -641,12 +537,6 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
     Ok(())
 }
 
-// ---- gate 2: scene.pkg ------------------------------------------------------
-
-/// P1 gate 2: all 19 `scene.pkg` parse, per-item entry counts and pkg
-/// versions match the docs/corpus.md §4 table, every entry payload reads
-/// fully, and every embedded `scene.json` is valid JSON (BOM-tolerant per
-/// docs/corpus.md §9).
 #[test]
 fn gate2_all_19_scene_pkg_parse_counts_match_and_scene_json_is_valid() -> Result<()> {
     let Some(dir) = corpus_dir() else {
@@ -672,8 +562,6 @@ fn gate2_all_19_scene_pkg_parse_counts_match_and_scene_json_is_valid() -> Result
             exp.entries,
         );
 
-        // Every entry readable: proves every payload range is in-bounds
-        // (docs/format-pkg.md §3 payload addressing).
         for entry in pkg.entries() {
             let payload = pkg.read(&entry).with_context(|| {
                 format!(
@@ -692,9 +580,6 @@ fn gate2_all_19_scene_pkg_parse_counts_match_and_scene_json_is_valid() -> Result
             );
         }
 
-        // Every scene.pkg carries a scene.json entry (docs/corpus.md §3: the
-        // loader maps `file: "scene.json"` to the pkg entry), and it is
-        // valid JSON after BOM stripping (§9).
         let scene = pkg
             .read_name(b"scene.json")
             .with_context(|| format!("{}: no readable scene.json entry", exp.id))?;
@@ -709,13 +594,6 @@ fn gate2_all_19_scene_pkg_parse_counts_match_and_scene_json_is_valid() -> Result
     Ok(())
 }
 
-// ---- gate 3: .tex -----------------------------------------------------------
-
-/// P1 gate 3: all 190 embedded `.tex` parse (per-item counts per
-/// docs/corpus.md §4); every non-mp4 texture's top mip decodes to RGBA8 with
-/// `pixels.len() == 4·w·h`; the 3 video textures expose their verbatim mp4
-/// payload (docs/format-tex.md §7.3); the single animated texture's frame
-/// table parses to the exact §8.1 sample values.
 #[test]
 fn gate3_all_190_tex_parse_and_non_mp4_top_mips_decode_rgba8() -> Result<()> {
     let Some(dir) = corpus_dir() else {
@@ -739,8 +617,6 @@ fn gate3_all_190_tex_parse_and_non_mp4_top_mips_decode_rgba8() -> Result<()> {
                 Tex::parse(bytes).with_context(|| format!("{}: {name}: .tex failed to parse", exp.id))?;
 
             if tex.is_video() {
-                // docs/format-tex.md §7.3: single image/mip, payload is the
-                // whole mp4 file verbatim, starting `ftyp isom`.
                 videos += 1;
                 let payload = tex
                     .video_payload()
@@ -751,16 +627,12 @@ fn gate3_all_190_tex_parse_and_non_mp4_top_mips_decode_rgba8() -> Result<()> {
                      `ftyp isom` signature",
                     exp.id,
                 );
-                // Pixel decoding of an mp4 payload must refuse with the typed
-                // error, not panic (docs/format-tex.md §7.3; SPEC.md §V9).
                 ensure!(
                     matches!(tex.decode_rgba8(0, 0), Err(TexError::IsVideo)),
                     "{}: {name}: decode_rgba8 on a video must return TexError::IsVideo",
                     exp.id,
                 );
             } else {
-                // Top mip (image 0, mip 0) decodes to tightly packed RGBA8
-                // (docs/format-tex.md §5, §7.1/§7.2).
                 let img = tex
                     .decode_rgba8(0, 0)
                     .with_context(|| format!("{}: {name}: top mip failed to decode", exp.id))?;
@@ -784,10 +656,6 @@ fn gate3_all_190_tex_parse_and_non_mp4_top_mips_decode_rgba8() -> Result<()> {
 
             if let Some(anim) = &tex.animation {
                 animated += 1;
-                // docs/format-tex.md §8.1 real TEXS0003 sample: workshop item
-                // 3585875739, 39 frames, every frametime = 1/39 s (total
-                // exactly 1.0 s), every frameNumber = 0, gifWidth =
-                // gifHeight = 201.
                 ensure!(
                     exp.id == "3585875739",
                     "{}: {name}: unexpected animated texture (docs/format-tex.md §8.1 \
@@ -860,13 +728,6 @@ fn gate3_all_190_tex_parse_and_non_mp4_top_mips_decode_rgba8() -> Result<()> {
     Ok(())
 }
 
-// ---- gate 4: the Asset item ---------------------------------------------------
-
-/// P1 gate 4: the Asset item 3347128360 parses without panic and is
-/// identified as non-renderable exactly as docs/corpus.md §1/§6.3/§8
-/// prescribe: no `type` key, `category == "Asset"`, extension-resolved Scene,
-/// rendering not attempted; its loose `effect.json` parses as JSON
-/// (editor-only `gizmos` tolerated).
 #[test]
 fn gate4_asset_item_3347128360_identified_non_renderable() -> Result<()> {
     let Some(dir) = corpus_dir() else {
@@ -877,24 +738,17 @@ fn gate4_asset_item_3347128360_identified_non_renderable() -> Result<()> {
     let project =
         Project::from_path(item.join("project.json")).context("3347128360: project.json failed to parse")?;
 
-    // docs/corpus.md §1: item 3347128360 has no `type` key...
     ensure!(
         project.declared_type.is_none(),
         "3347128360: expected no declared type, got {:?}",
         project.declared_type,
     );
-    // ... and `"category": "Asset"`, which is what marks it non-renderable
-    // (docs/corpus.md §8: "classified as non-renderable via category ==
-    // Asset"; docs/format-project-json.md §3.3).
     ensure!(
         project.category() == Some("Asset"),
         "3347128360: category {:?} != Some(\"Asset\")",
         project.category(),
     );
     ensure!(project.is_asset(), "3347128360: is_asset() must be true");
-    // docs/corpus.md §1: by the extension rule its effect.json main file
-    // resolves to Scene — the Asset category, not the resolved type, is the
-    // non-renderable signal.
     ensure!(
         project.resolved_type == WallpaperType::Scene,
         "3347128360: resolved type {:?} != Scene (docs/corpus.md §1)",
@@ -905,18 +759,11 @@ fn gate4_asset_item_3347128360_identified_non_renderable() -> Result<()> {
         "3347128360: main file {:?} != inventory (docs/corpus.md §3)",
         project.file,
     );
-    // docs/format-project-json.md §2.1: WE's playlist preflight rejects
-    // manifests lacking a `type` key, so this item never reaches rendering.
     ensure!(
         !project.passes_preflight(),
         "3347128360: an item without a `type` key must fail preflight",
     );
 
-    // docs/corpus.md §6.3/§8: the effect manifest itself parses, tolerating
-    // editor-only keys such as the `gizmos` array. Size asserted against the
-    // real bytes (876): the §3 "main size" cell prints 4741, but the same
-    // row's item size 111637 only sums from the live files with effect.json
-    // = 876 — doc erratum, see the ITEMS entry for this id.
     let effect_path = item.join(&project.file);
     let bytes = std::fs::read(&effect_path)
         .with_context(|| format!("3347128360: cannot read {}", effect_path.display()))?;
@@ -935,10 +782,6 @@ fn gate4_asset_item_3347128360_identified_non_renderable() -> Result<()> {
     Ok(())
 }
 
-// ---- gate 5: read-everything smoke pass ---------------------------------------
-
-/// P1 gate 5: smoke read-everything pass — extracting every entry of every
-/// scene.pkg yields a strictly positive byte total per pkg (SPEC.md §T7).
 #[test]
 fn gate5_every_pkg_extracts_more_than_zero_bytes() -> Result<()> {
     let Some(dir) = corpus_dir() else {

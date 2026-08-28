@@ -1,14 +1,3 @@
-//! Particle operators — run every frame after aging, in declaration order
-//! (docs/render-architecture.md §7.3 operator table; behavior
-//! `CParticle.cpp:1024-1697`). Parameter names and per-name defaults match the
-//! spec table exactly (SPEC §V10).
-//!
-//! "Randomized once per operator" state (turbulence phase / speed) is drawn at
-//! compile time from the system RNG. "Randomized once per particle" state
-//! (oscillator frequency / phase / scale) is derived on the fly from the
-//! particle's seed and the operator's salt, so it is stable for the particle's
-//! whole life without per-particle storage (SPEC §V5).
-
 use kirie_scene::particle::NamedStage;
 use kirie_scene::value::Vec3;
 
@@ -18,20 +7,13 @@ use super::param::Params;
 use super::rng::{self, Rng};
 use super::state::{Overrides, Particle};
 
-/// Context threaded into every operator each step.
 pub struct StepCtx<'a> {
-    /// Step delta (seconds, already capped).
     pub dt: f32,
-    /// Absolute simulated time (seconds).
     pub time: f32,
-    /// The scene-object instance overrides (supplies `speed`).
     pub overrides: &'a Overrides,
-    /// Control-point positions in system-local space.
     pub control_points: &'a [Vec3],
 }
 
-/// Linear ramp of a normalized life position through `[start, end]` returning a
-/// multiplier lerped `startvalue → endvalue` (clamped outside the window).
 #[inline]
 fn ramp(lp: f32, start: f32, end: f32, sv: f32, ev: f32) -> f32 {
     if end <= start {
@@ -41,8 +23,6 @@ fn ramp(lp: f32, start: f32, end: f32, sv: f32, ev: f32) -> f32 {
     sv + (ev - sv) * t
 }
 
-/// A compiled operator with resolved parameters. Variant field names mirror the
-/// JSON parameter names in the docs §7.3 operator table.
 #[derive(Clone, Debug)]
 #[allow(missing_docs)]
 pub enum Operator {
@@ -78,7 +58,6 @@ pub enum Operator {
         scale: f32,
         timescale: f32,
         mask: Vec3,
-        /// Randomized once per operator (docs §7.3).
         phase: Vec3,
         turb_speed: f32,
     },
@@ -121,13 +100,10 @@ pub enum Operator {
         mask: Vec3,
         salt: u32,
     },
-    /// An unimplemented operator name — preserved but a no-op (docs §7.3).
     Unknown(String),
 }
 
 impl Operator {
-    /// Compile one scene [`NamedStage`] into a typed operator. `salt` seeds the
-    /// per-operator randomization; `rng` supplies "once per operator" values.
     #[must_use]
     pub fn compile(stage: &NamedStage, salt: u32, rng: &mut Rng) -> Self {
         let p = Params::new(stage);
@@ -220,7 +196,6 @@ impl Operator {
         }
     }
 
-    /// Apply this operator to one live particle for a step of `ctx.dt`.
     pub fn apply(&self, pt: &mut Particle, ctx: &StepCtx<'_>) {
         let dt = ctx.dt;
         let speed = ctx.overrides.speed;
@@ -314,8 +289,6 @@ impl Operator {
                 };
                 let spd = speedinner + (speedouter - speedinner) * t;
                 pt.velocity = math::mul_add(pt.velocity, tangent, spd * dt * speed);
-                // Radial pull toward the axis center (centerforce, UNVERIFIED
-                // exact scaling; docs §7.3 "maintain distance"/"centerforce").
                 if *centerforce != 0.0 {
                     let inward = math::normalize_or(math::mul(radial, -1.0), [0.0; 3]);
                     pt.velocity = math::mul_add(pt.velocity, inward, centerforce * dt * speed);
@@ -398,9 +371,6 @@ impl Operator {
     }
 }
 
-/// The shared randomized-cosine multiplier for `oscillatealpha`/`oscillatesize`
-/// (docs/render-architecture.md §7.3): a per-particle frequency / phase / scale
-/// window driving a cosine that oscillates the current (base) value.
 #[allow(clippy::too_many_arguments)]
 #[inline]
 fn oscillate(

@@ -1,13 +1,3 @@
-//! Live demo of the compat control socket with a fake single-screen app.
-//!
-//! ```sh
-//! cargo run -p kirie-ipc --example compat_server -- /tmp/kirie-ipc-demo.sock
-//! printf 'status\n' | socat - UNIX-CONNECT:/tmp/kirie-ipc-demo.sock
-//! ```
-//!
-//! The fake state mirrors the live capture in
-//! `fixtures/socket-live-capture.txt` so responses can be diffed 1:1.
-
 use std::path::PathBuf;
 
 use kirie_ipc::{Command, CommandOutcome, ControlSocket, IpcEvent, ScreenStatus, StatusSnapshot};
@@ -22,13 +12,9 @@ fn main() {
     let mut speed = 1.0f32;
     for event in rx {
         match event {
-            // The demo server has no workshop discovery of its own; the real
-            // app answers this from `kirie list`.
             IpcEvent::List { reply } => {
                 let _ = reply.send("[]".to_owned());
             }
-            // Browsing needs a Steam client; the demo server says so rather
-            // than pretending the Workshop is empty.
             IpcEvent::Workshop { request, reply } => {
                 let _ = reply.send(format!(
                     r#"{{"error":"the demo server has no Steam surface ({request:?})"}}"#
@@ -46,8 +32,6 @@ fn main() {
                 });
             }
             IpcEvent::GetProperties { screen, reply } => {
-                // kirie extension (docs/compat-socket.md §11): a real app returns
-                // the loaded scene's property schema; the demo has none.
                 println!("getproperties: {screen:?}");
                 let _ = reply.send("[]".to_string());
             }

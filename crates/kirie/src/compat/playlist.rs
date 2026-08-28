@@ -1,24 +1,3 @@
-//! Wallpaper Engine playlist resolution + rotation (doc §3.5), ported from the
-//! reference engine.
-//!
-//! `--playlist <name>` names a playlist stored in Wallpaper Engine's own
-//! `config.json` (the Windows app's config synced into the Steam install dir),
-//! under `steamuser.general.playlists[]` and
-//! `steamuser.wallpaperconfig.selectedwallpapers.<monitor>.playlist`
-//! (ApplicationContext.cpp:161-216). Each playlist carries a `settings` block
-//! (`delay` minutes, `mode`, `order`, ...) and Windows-style `items` paths that
-//! are munged onto the local filesystem (strip `\\?\`, backslashes → slashes,
-//! drop the drive letter — which maps Proton's `Z:\home\...` onto `/home/...` —
-//! ApplicationContext.cpp:25-55).
-//!
-//! Resolution happens at *parse* time (the C++ argparse action calls
-//! `getPlaylistFromConfig`, ApplicationContext.cpp:378-403), so a bad playlist
-//! name is fatal before anything runs. At run time only `mode == "timer"`
-//! playlists with more than one item rotate, sequentially or shuffled, every
-//! `delay` minutes (min 1) — `WallpaperApplication::updatePlaylists`
-//! (WallpaperApplication.cpp:451-475); [`ActivePlaylist`] is the faithful port
-//! of its per-playlist state machine.
-
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -27,21 +6,12 @@ use serde_json::Value;
 
 use crate::compat::args::ParseError;
 
-/// One playlist's `settings` block (ApplicationContext.h:55-61), with the
-/// reference defaults (ApplicationContext.cpp:110-119).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistSettings {
-    /// Minutes between switches (`delay`, default 60; clamped to ≥ 1 at use).
     pub delay_minutes: u32,
-    /// Switch trigger (`mode`, default `"timer"`). Only `"timer"` rotates —
-    /// the reference ignores every other mode (WallpaperApplication.cpp:459).
     pub mode: String,
-    /// Item order (`order`, default `"sequential"`; `"random"` shuffles and
-    /// reshuffles on every wrap, WallpaperApplication.cpp:253-262/404-407).
     pub order: String,
-    /// `updateonpause` (parsed for fidelity; unused by the reference too).
     pub update_on_pause: bool,
-    /// `videosequence` (parsed for fidelity; unused by the reference too).
     pub video_sequence: bool,
 }
 
@@ -57,29 +27,15 @@ impl Default for PlaylistSettings {
     }
 }
 
-/// A named playlist resolved from `config.json`: its (existing, munged) item
-/// directories and settings (ApplicationContext.h:63-67).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlaylistDefinition {
-    /// Playlist name (the `--playlist` lookup key).
     pub name: String,
-    /// Existing local paths, one per usable item (missing items are skipped at
-    /// load, ApplicationContext.cpp:141-145). Never empty for a registered
-    /// playlist (empty playlists are dropped, ApplicationContext.cpp:94-96).
     pub items: Vec<PathBuf>,
-    /// The playlist's settings block.
     pub settings: PlaylistSettings,
 }
 
-/// Where the `wallpaper_engine` install holding `config.json` sits inside a
-/// Steam library. The reference probes `$HOME` only
-/// (Steam/FileSystem/FileSystem.cpp:9-14 `appDirectoryPaths`); we search every
-/// library, so an install on another disk is found too.
 const APP_DIRECTORY_RELATIVE: &str = "common/wallpaper_engine";
 
-/// A doubled fatal (doc §4.7) — playlist config errors are `sLog.exception`s
-/// thrown inside the argparse action, printed once bare and once with the
-/// `--help` suffix (ApplicationContext.cpp:736-738).
 fn fatal(message: impl Into<String>) -> ParseError {
     ParseError {
         message: message.into(),
@@ -87,10 +43,6 @@ fn fatal(message: impl Into<String>) -> ParseError {
     }
 }
 
-/// Locate Wallpaper Engine's `config.json`
-/// (`ApplicationContext::configFilePath`, ApplicationContext.cpp:57-63): the
-/// first existing `<steam root>/wallpaper_engine` directory wins. No install →
-/// fatal, same text as the reference.
 fn config_file_path() -> Result<PathBuf, ParseError> {
     crate::compat::steam::steamapps_dirs(APP_DIRECTORY_RELATIVE)
         .into_iter()
@@ -99,23 +51,10 @@ fn config_file_path() -> Result<PathBuf, ParseError> {
         .ok_or_else(|| fatal("Cannot locate wallpaper engine installation to read config.json"))
 }
 
-/// Load every playlist from the installed Wallpaper Engine's `config.json`
-/// (`ApplicationContext::loadPlaylistsFromConfig`). Called lazily on the first
-/// `--playlist` (ApplicationContext.cpp:161-165).
 pub fn load_config_playlists() -> Result<BTreeMap<String, PlaylistDefinition>, ParseError> {
     load_playlists_from(&config_file_path()?)
 }
 
-/// Load playlists from a specific `config.json` path (the testable core of
-/// [`load_config_playlists`], ApplicationContext.cpp:161-216).
-///
-/// * unreadable file → fatal `Cannot open wallpaper engine config file at ...`
-///   (ApplicationContext.cpp:71-75);
-/// * unparsable JSON → non-fatal `Failed parsing wallpaper engine config.json`
-///   on stderr and an empty map (ApplicationContext.cpp:78-82);
-/// * missing `steamuser` → fatal (ApplicationContext.cpp:174-177);
-/// * per-playlist problems (missing/empty/nonexistent items, no name) skip that
-///   playlist with the reference's stderr messages.
 pub fn load_playlists_from(path: &Path) -> Result<BTreeMap<String, PlaylistDefinition>, ParseError> {
     let text = std::fs::read_to_string(path).map_err(|_| {
         fatal(format!(
@@ -136,7 +75,6 @@ pub fn load_playlists_from(path: &Path) -> Result<BTreeMap<String, PlaylistDefin
 
     let mut map = BTreeMap::new();
 
-    // steamuser.general.playlists[] (ApplicationContext.cpp:188-198).
     if let Some(playlists) = steam_user
         .get("general")
         .and_then(|g| g.get("playlists"))
@@ -150,9 +88,6 @@ pub fn load_playlists_from(path: &Path) -> Result<BTreeMap<String, PlaylistDefin
         }
     }
 
-    // steamuser.wallpaperconfig.selectedwallpapers.<monitor>.playlist, keyed by
-    // the monitor id as the fallback name; later entries override same-named
-    // playlists (`insert_or_assign`, ApplicationContext.cpp:200-215/157-159).
     if let Some(selected) = steam_user
         .get("wallpaperconfig")
         .and_then(|w| w.get("selectedwallpapers"))
@@ -171,10 +106,6 @@ pub fn load_playlists_from(path: &Path) -> Result<BTreeMap<String, PlaylistDefin
     Ok(map)
 }
 
-/// Look up `name` in the loaded playlist map
-/// (`ApplicationContext::getPlaylistFromConfig`, ApplicationContext.cpp:219-243):
-/// not found is fatal, listing the available names (sorted — the reference's
-/// `std::map` iteration order, matched by `BTreeMap`).
 pub fn get<'m>(
     map: &'m BTreeMap<String, PlaylistDefinition>,
     name: &str,
@@ -193,9 +124,6 @@ pub fn get<'m>(
     )))
 }
 
-/// `ApplicationContext::buildPlaylistDefinition` (ApplicationContext.cpp:86-108):
-/// name from `name` (else `fallback`), settings, items; drop the playlist when
-/// no usable items remain or it ends up nameless.
 fn build_definition(json: &Value, fallback: &str) -> Option<PlaylistDefinition> {
     let mut name = coerce_string(json.get("name"), fallback);
     let settings = parse_settings(json);
@@ -217,8 +145,6 @@ fn build_definition(json: &Value, fallback: &str) -> Option<PlaylistDefinition> 
     })
 }
 
-/// `ApplicationContext::parsePlaylistSettings` (ApplicationContext.cpp:110-119),
-/// with the reference's lenient JSON coercions (Data/JSON.h `coerce<T>`).
 fn parse_settings(json: &Value) -> PlaylistSettings {
     let s = json.get("settings").filter(|v| !v.is_null());
     let field = |key: &str| s.and_then(|s| s.get(key)).filter(|v| !v.is_null());
@@ -231,9 +157,6 @@ fn parse_settings(json: &Value) -> PlaylistSettings {
     }
 }
 
-/// `ApplicationContext::collectPlaylistItems` (ApplicationContext.cpp:121-155):
-/// string items only, munged via [`resolve_item_path`], existing paths only,
-/// with the reference's skip messages.
 fn collect_items(json: &Value, name: &str) -> Vec<PathBuf> {
     let Some(items) = json.get("items").and_then(Value::as_array) else {
         eprintln!("Skipping playlist {name}: missing items");
@@ -257,19 +180,11 @@ fn collect_items(json: &Value, name: &str) -> Vec<PathBuf> {
     out
 }
 
-/// `ApplicationContext::resolvePlaylistItemPath` (ApplicationContext.cpp:25-55):
-/// strip the `\\?\` long-path prefix, backslashes → slashes, drop a drive
-/// letter (`Z:\home\...` → `/home/...` for Proton prefixes), force absolute,
-/// normalize, and — because items usually point at `project.json` — a regular
-/// file resolves to its parent directory. `None` for the empty result (the
-/// reference `continue`s on an empty path, ApplicationContext.cpp:138-140).
 fn resolve_item_path(raw: &str) -> Option<PathBuf> {
     if raw.is_empty() {
         return None;
     }
     let mut cleaned = raw.strip_prefix("\\\\?\\").unwrap_or(raw).replace('\\', "/");
-    // `cleaned[1] == ':'` can only hold when byte 0 is a lone ASCII char, so
-    // the slice at 2 is always a char boundary.
     if cleaned.len() > 1 && cleaned.as_bytes()[1] == b':' {
         cleaned = cleaned[2..].to_owned();
     }
@@ -288,9 +203,6 @@ fn resolve_item_path(raw: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// `std::filesystem::path::lexically_normal` for the absolute paths this module
-/// produces (every non-empty input starts with `/`): drop `.`, resolve `..`
-/// (the parent of the root is the root), collapse separators.
 fn lexically_normal(path: &Path) -> PathBuf {
     use std::path::Component;
     let mut out = PathBuf::new();
@@ -299,7 +211,6 @@ fn lexically_normal(path: &Path) -> PathBuf {
             Component::RootDir => out.push("/"),
             Component::CurDir | Component::Prefix(_) => {}
             Component::ParentDir => {
-                // Absolute inputs only: popping "/" is a no-op (stays root).
                 out.pop();
             }
             Component::Normal(seg) => out.push(seg),
@@ -308,9 +219,6 @@ fn lexically_normal(path: &Path) -> PathBuf {
     out
 }
 
-/// Lenient JSON → u32 (Data/JSON.h `coerce<T>` arithmetic branch): numbers
-/// cast, bools become 0/1, strings parse a leading integer (parse failure → 0,
-/// `std::stoll`'s `T {}` fallback), anything else is the default.
 fn coerce_u32(v: Option<&Value>, default: u32) -> u32 {
     match v {
         Some(Value::Number(n)) => n
@@ -324,9 +232,6 @@ fn coerce_u32(v: Option<&Value>, default: u32) -> u32 {
     }
 }
 
-/// `std::stoll` prefix semantics for a string-typed number: optional sign +
-/// longest decimal prefix; no digits → 0 (the reference maps the `stoll`
-/// exception to `T {}`).
 fn leading_u32(s: &str) -> u32 {
     let t = s.trim_start();
     let (neg, digits) = match t.as_bytes().first() {
@@ -341,14 +246,12 @@ fn leading_u32(s: &str) -> u32 {
         .unwrap_or(digits.len());
     let v = digits[..end].parse::<u64>().unwrap_or(0);
     if neg {
-        0 // negative delays cast to uint32 would wrap in C++; clamp to 0 (both are then floored to 1 minute at use)
+        0
     } else {
         u32::try_from(v).unwrap_or(u32::MAX)
     }
 }
 
-/// Lenient JSON → String (Data/JSON.h `coerce<T>` fall-through: non-strings
-/// throw and become the default).
 fn coerce_string(v: Option<&Value>, default: &str) -> String {
     match v {
         Some(Value::String(s)) => s.clone(),
@@ -356,8 +259,6 @@ fn coerce_string(v: Option<&Value>, default: &str) -> String {
     }
 }
 
-/// Lenient JSON → bool (Data/JSON.h `coerce<T>` bool branch): numbers are
-/// `!= 0`, strings accept `1`/`true`/`True`/`TRUE`.
 fn coerce_bool(v: Option<&Value>, default: bool) -> bool {
     match v {
         Some(Value::Bool(b)) => *b,
@@ -367,18 +268,9 @@ fn coerce_bool(v: Option<&Value>, default: bool) -> bool {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Runtime rotation (WallpaperApplication.cpp:253-475).
-// ---------------------------------------------------------------------------
-
-/// A tiny SplitMix64 shuffle source standing in for the reference's
-/// `std::mt19937 m_playlistRng { std::random_device {}() }`
-/// (WallpaperApplication.h:232) — playlist shuffling needs no crypto quality,
-/// just a fresh seed per run.
 pub(crate) struct Rng(u64);
 
 impl Rng {
-    /// Seed from the wall clock + pid (the `random_device` stand-in).
     pub(crate) fn seeded() -> Self {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -387,7 +279,6 @@ impl Rng {
         Self(nanos ^ (u64::from(std::process::id()) << 32))
     }
 
-    /// Next SplitMix64 output.
     fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.0;
@@ -397,7 +288,6 @@ impl Rng {
     }
 }
 
-/// Fisher-Yates (the `std::shuffle` stand-in).
 fn shuffle(order: &mut [usize], rng: &mut Rng) {
     for i in (1..order.len()).rev() {
         let j = (rng.next() % (i as u64 + 1)) as usize;
@@ -405,8 +295,6 @@ fn shuffle(order: &mut [usize], rng: &mut Rng) {
     }
 }
 
-/// `WallpaperApplication::buildPlaylistOrder` (WallpaperApplication.cpp:253-262):
-/// identity order, shuffled for `order == "random"`.
 fn build_order(definition: &PlaylistDefinition, rng: &mut Rng) -> Vec<usize> {
     let mut order: Vec<usize> = (0..definition.items.len()).collect();
     if definition.settings.order == "random" {
@@ -415,34 +303,19 @@ fn build_order(definition: &PlaylistDefinition, rng: &mut Rng) -> Vec<usize> {
     order
 }
 
-/// The clamped switch interval: `delay` minutes, floored to 1
-/// (WallpaperApplication.cpp:301-302).
 fn delay_of(definition: &PlaylistDefinition) -> Duration {
     Duration::from_secs(60 * u64::from(definition.settings.delay_minutes.max(1)))
 }
 
-/// One rotating playlist's live state — the port of the reference
-/// `ActivePlaylist` (WallpaperApplication.h:172-179) plus its advance logic.
 pub(crate) struct ActivePlaylist {
-    /// The resolved playlist definition.
     definition: PlaylistDefinition,
-    /// Playback order: indices into `definition.items`.
     order: Vec<usize>,
-    /// Current position in `order`.
     order_index: usize,
-    /// Item indices that failed preflight/load and are skipped until the
-    /// process restarts (the reference never clears this set either).
     failed: HashSet<usize>,
-    /// When the next switch is due.
     next_switch: Instant,
 }
 
 impl ActivePlaylist {
-    /// Register a playlist for rotation
-    /// (`WallpaperApplication::initializePlaylists`,
-    /// WallpaperApplication.cpp:275-307): build the order, start on the item
-    /// currently shown (`current`), first switch after one full delay. `None`
-    /// for an empty playlist.
     pub(crate) fn start(
         definition: PlaylistDefinition,
         current: Option<&Path>,
@@ -475,34 +348,23 @@ impl ActivePlaylist {
         })
     }
 
-    /// The playlist's name (for logs).
     pub(crate) fn name(&self) -> &str {
         &self.definition.name
     }
 
-    /// Number of usable items (for logs).
     pub(crate) fn item_count(&self) -> usize {
         self.definition.items.len()
     }
 
-    /// Whether a switch is due (`WallpaperApplication::updatePlaylists`,
-    /// WallpaperApplication.cpp:451-475): timer mode only, more than one item,
-    /// interval elapsed.
     pub(crate) fn due(&self, now: Instant) -> bool {
         self.definition.settings.mode == "timer" && self.definition.items.len() > 1 && now >= self.next_switch
     }
 
-    /// The next rotation deadline, or `None` for playlists that never rotate
-    /// on a timer (the rotator sleeps to the earliest deadline instead of
-    /// waking four times a second).
     pub(crate) fn next_due(&self) -> Option<Instant> {
         (self.definition.settings.mode == "timer" && self.definition.items.len() > 1)
             .then_some(self.next_switch)
     }
 
-    /// `WallpaperApplication::selectNextCandidate`
-    /// (WallpaperApplication.cpp:391-411): the first non-failed order position
-    /// at or after `candidate` (wrapping), or `None` when every item failed.
     fn select_next_candidate(&self, candidate: usize) -> Option<usize> {
         if self.order.is_empty() {
             return None;
@@ -517,13 +379,6 @@ impl ActivePlaylist {
         None
     }
 
-    /// `WallpaperApplication::advancePlaylist`
-    /// (WallpaperApplication.cpp:413-449): step to the next candidate
-    /// (reshuffling a random order on wrap), `preflight` it (a preflight
-    /// failure marks it failed and moves on — the replacement candidate is
-    /// shown *without* another preflight, matching the reference), then `show`
-    /// it. A `show` failure marks the item failed for retry next cycle. The
-    /// next switch is always rescheduled one delay out.
     pub(crate) fn advance<P, S>(
         &mut self,
         screen: &str,
@@ -575,7 +430,6 @@ impl ActivePlaylist {
 mod tests {
     use super::*;
 
-    /// A unique temp dir for one test (created; caller removes).
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("kirie-playlist-test-{tag}-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -584,22 +438,18 @@ mod tests {
 
     #[test]
     fn item_path_munging_matches_reference() {
-        // Windows long-path prefix + drive letter + backslashes.
         assert_eq!(
             resolve_item_path("\\\\?\\C:\\Users\\me\\proj\\123"),
             Some(PathBuf::from("/Users/me/proj/123"))
         );
-        // Proton-style Z: drive maps onto the Linux root.
         assert_eq!(
             resolve_item_path("Z:\\home\\me\\wp\\42"),
             Some(PathBuf::from("/home/me/wp/42"))
         );
-        // Relative values are forced absolute; `..` normalizes.
         assert_eq!(
             resolve_item_path("foo/./bar/../baz"),
             Some(PathBuf::from("/foo/baz"))
         );
-        // Empty inputs (raw, or a lone drive letter) are skipped.
         assert_eq!(resolve_item_path(""), None);
         assert_eq!(resolve_item_path("C:"), None);
     }
@@ -628,7 +478,6 @@ mod tests {
                     "playlists": [
                         {
                             "name": "day",
-                            // delay as a string exercises the lenient coercion.
                             "settings": { "delay": "30", "order": "random" },
                             "items": [
                                 item_a.to_string_lossy(),
@@ -636,7 +485,6 @@ mod tests {
                             ]
                         },
                         {
-                            // No usable items -> skipped entirely.
                             "name": "broken",
                             "items": ["/nonexistent/kirie-test-item"]
                         }
@@ -663,13 +511,12 @@ mod tests {
         assert_eq!(day.items, vec![item_a.clone()]);
         assert_eq!(day.settings.delay_minutes, 30);
         assert_eq!(day.settings.order, "random");
-        assert_eq!(day.settings.mode, "timer"); // default
+        assert_eq!(day.settings.mode, "timer");
 
         let night = &map["night"];
         assert_eq!(night.items, vec![item_b.clone()]);
-        assert_eq!(night.settings.delay_minutes, 60); // all defaults
+        assert_eq!(night.settings.delay_minutes, 60);
 
-        // Lookup errors list the available names (sorted).
         let err = get(&map, "nope").unwrap_err();
         assert_eq!(
             err.message,
@@ -689,11 +536,9 @@ mod tests {
         let err = load_playlists_from(&config).unwrap_err();
         assert_eq!(err.message, "Cannot find steamuser section in config.json");
 
-        // Unparsable JSON: non-fatal, empty map (ApplicationContext.cpp:78-82).
         std::fs::write(&config, "not json").unwrap();
         assert!(load_playlists_from(&config).unwrap().is_empty());
 
-        // Unreadable file: fatal with the reference text.
         let missing = root.join("missing.json");
         let err = load_playlists_from(&missing).unwrap_err();
         assert!(
@@ -704,7 +549,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// A three-item timer playlist for the rotation tests.
     fn test_definition(order: &str, delay: u32) -> PlaylistDefinition {
         PlaylistDefinition {
             name: "t".to_owned(),
@@ -729,7 +573,6 @@ mod tests {
         )
         .unwrap();
 
-        // Not due before one full delay; due at/after it.
         assert!(!pl.due(now));
         let t1 = now + Duration::from_secs(60 * 60);
         assert!(pl.due(t1));
@@ -748,7 +591,6 @@ mod tests {
                 },
             );
         }
-        // a -> b, c, a, b (wraps).
         assert_eq!(
             shown,
             vec![
@@ -772,8 +614,6 @@ mod tests {
         )
         .unwrap();
 
-        // /b fails preflight -> /c is shown instead; /b stays failed, so the
-        // next advance shows /a (wrap), then /c again.
         let mut shown = Vec::new();
         for _ in 0..3 {
             pl.advance(
@@ -805,8 +645,6 @@ mod tests {
         )
         .unwrap();
 
-        // Every show fails -> after enough cycles all items are failed and
-        // show is never called again; the timer still reschedules.
         let mut calls = 0;
         for _ in 0..6 {
             pl.advance(
@@ -849,7 +687,6 @@ mod tests {
         let mut sorted = pl.order.clone();
         sorted.sort_unstable();
         assert_eq!(sorted, vec![0, 1, 2]);
-        // The start position points at the currently shown item (/a = index 0).
         assert_eq!(pl.order[pl.order_index], 0);
     }
 }

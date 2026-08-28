@@ -1,23 +1,3 @@
-//! [`SceneRenderer`] — the per-frame scene compositor
-//! (docs/render-architecture.md §2.5, §5.1, §7.1).
-//!
-//! Build phase (`new`): resolve the projection size and camera matrices; then,
-//! in render order (§5.7), build one [`SceneItem`] per drawable object —
-//! image layers plan their pass chain (§7.1), allocate ping-pong FBOs, upload
-//! textures and prebuild static bind groups; particle and text objects wire in
-//! through [`super::extras`] (§7.3-§7.4), 3D models through [`super::model`]
-//! (§7.2). The only per-frame GPU writes are the packed `_WEGlobals` UBO, the
-//! particle instance/VP buffers and the model MVP UBOs (SPEC.md §V5). Light /
-//! shape / sound / group objects are not composited — they are transform groups
-//! the reference does not draw (§5.6, §7.2).
-//!
-//! Frame phase (`render`): clear the scene FBO to the scene clear color
-//! (§5.1); for each item in render order composite into the scene FBO — image
-//! passes ping-pong through image FBOs then draw the final pass, particles
-//! advance their sim and draw instanced sprites, text draws its placeholder
-//! quad; then blit the scene FBO to the output surface through the
-//! output-scaling UV window (§2.5, §4). Item order is the cross-kind z-order.
-
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
@@ -45,37 +25,12 @@ use super::text::TextFonts;
 use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
 
-/// Presentation options for a scene wallpaper (same surface as image/video).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SceneOptions {
-    /// Output scaling mode (docs/render-architecture.md §4).
     pub scaling: ScalingMode,
-    /// Out-of-window UV behavior (docs/render-architecture.md §4).
     pub clamp: ClampMode,
-    /// `--render-scale`: every render target allocates at `logical × scale`
-    /// and the final blit downsamples — the reference's FBOProvider
-    /// supersampling (its AA; FBOProvider.h:25-29). Scene coordinates stay
-    /// logical. Clamped to [0.25, 4]; 1.0 = native.
     pub render_scale: f32,
-    /// `--disable-parallax`: gates the camera-parallax displacement update
-    /// (CScene.cpp:329) and the per-layer parallax translation
-    /// (CImage.cpp:1168), matching the reference's mouse.disableparallax.
     pub disable_parallax: bool,
-    /// `--fit-render-to-output`: never allocate render targets larger than the
-    /// output can display.
-    ///
-    /// A scene renders at its authored `orthogonalprojection` and the final
-    /// blit scales that to the surface. When the projection is *bigger* than
-    /// the output — 2912x1632 authored versus a 2560x1440 monitor, 29% more
-    /// fragments — every extra pixel is shaded and then thrown away. What is
-    /// lost by clamping is the reference's implicit supersampling AA, which is
-    /// why this is opt-in rather than the default: fidelity first, and
-    /// `--render-scale` still layers on top for anyone who wants more.
-    ///
-    /// Measured on that scene at 2560x1440 on a Raphael iGPU: 12.30ms/frame
-    /// authored versus 9.89ms clamped, a 20% saving for pixels the display
-    /// cannot show. Never upscales: a projection smaller than the output is
-    /// left alone.
     pub fit_render_to_output: bool,
 }
 
@@ -91,8 +46,6 @@ impl Default for SceneOptions {
     }
 }
 
-/// An include resolver backed by an [`AssetSource`]: `#include "x.h"` →
-/// `shaders/x.h` in the scene container (docs/shader-pipeline.md §1.1).
 struct SourceIncludes<'a>(&'a dyn AssetSource);
 
 impl IncludeResolver for SourceIncludes<'_> {
@@ -102,7 +55,6 @@ impl IncludeResolver for SourceIncludes<'_> {
     }
 }
 
-/// One built pass: pipeline, static bind groups, per-frame UBOs, geometry.
 struct PassGpu {
     pipeline: wgpu::RenderPipeline,
     g0_bind: wgpu::BindGroup,
@@ -114,126 +66,56 @@ struct PassGpu {
     vs_params: BTreeMap<String, Vec<f32>>,
     fs_params: BTreeMap<String, Vec<f32>>,
     vertex_buffer: wgpu::Buffer,
-    /// The UV crop baked into this pass's quad (atlas sub-rect), reapplied
-    /// when a script transform rewrites the vertices.
     uv_crop: [f32; 2],
-    /// Authored effect index this pass belongs to (`None` = base material) —
-    /// the script `getEffect(i).setMaterialProperty` addressing space.
     effect_index: Option<usize>,
-    /// Puppet-warp index buffer (`u16` triangle list). `Some` only for a puppet
-    /// base pass, whose draw is `draw_indexed` over the mesh instead of the
-    /// 4-vertex quad strip.
     puppet_indices: Option<wgpu::Buffer>,
-    /// Index count for [`Self::puppet_indices`] (0 when absent).
     puppet_index_count: u32,
     output: PassOutput,
     geometry: Geometry,
     model_matrix: Mat4,
     blending: Blending,
-    /// `g_TextureNResolution` per slot: `(texW, texH, realW, realH)` of the
-    /// texture bound at slot N (docs §8.3). Shaders crop NPOT padding with
-    /// `realSize / texSize = (z/x, w/y)` — masks live in oversized POT pages,
-    /// so a flat projection-size resolution leaks their padding as a solid
-    /// block (docs/format-tex.md §8.1; docs/render-architecture.md §7.1).
     tex_resolution: [[f32; 4]; 8],
-    /// Re-resolution inputs for a live `setProperty` (docs §4.9): the material
-    /// pass (its `constantshadervalues` keep their property bindings) plus the
-    /// vs/fs shader-parameter reflection. On a property change the pass's
-    /// constants are re-resolved and `{vs,fs}_params` recomputed, so the next
-    /// frame's `_WEGlobals` pack (which reads `{vs,fs}_params`) shows the new
-    /// value — no rebuild.
-    ///
-    /// `material_pass` stays per-pass (it is mutated in place by
-    /// [`SceneRenderer::set_property`]), trimmed to the `constantshadervalues`
-    /// entries some reflection parameter actually reads. The reflection itself
-    /// is immutable after build, so it is `Arc`-shared across every pass built
-    /// from the same shader (shaders are heavily reused across objects) instead
-    /// of retaining one deep copy per pass.
     material_pass: kirie_scene::material::Pass,
     params_vs: Arc<Vec<Parameter>>,
     params_fs: Arc<Vec<Parameter>>,
 }
 
-/// One renderable image object with its FBOs and passes.
 struct ObjectGpu {
-    /// Scene-object id — the target key for script property updates (docs §8).
     id: i64,
-    /// Parent object id (docs §7.1) — for walking the ancestor chain to gate
-    /// this layer off when an ancestor group/image is hidden.
     parent: Option<i64>,
     passes: Vec<PassGpu>,
     fbos: [Option<Fbo>; 2],
-    /// Per-effect scratch FBOs (§11.2 `fbos`), keyed by declared name and
-    /// referenced by a pass's [`PassOutput::Named`] target.
     named_fbos: std::collections::HashMap<String, Fbo>,
     alpha: f32,
     brightness: f32,
     color: [f32; 4],
-    /// Live visibility; a script may toggle it per frame (V6: false ⇒ no draw).
     visible: bool,
-    /// True when this layer samples `_rt_FullFrameBuffer` (post-process layers).
-    /// The scene FBO is copied into the snapshot before this object draws so the
-    /// sample reads the composite-so-far without aliasing the write (docs §11).
     reads_scene: bool,
-    /// Dependency donor (docs §5.6): draws its image-space composite into the
-    /// ping-pong FIRST each frame — even when invisible — and never to the
-    /// scene; dependents bind `_rt_imageLayerComposite_<id>_a/b` from it.
     offscreen_donor: bool,
-    /// Per-layer parallax depth (`parallaxdepth`, docs §7.1): the layer's mvp
-    /// shifts by `(depth + amount) · displacement · scene_w` (CImage.cpp:1173).
     parallax_depth: [f32; 2],
-    /// Quad center in centered scene space + Z angle, for the scene-pass
-    /// pointer-unprojection inverse (the reference's `rotModel` about
-    /// `m_sceneCenter`, CImage.cpp:1156-1165).
     scene_center: [f32; 2],
     angle_z: f32,
-    // (video-backed textures live on SceneRenderer, not per object — one .tex
-    // may be shared by several layers.)
-    /// Ping-pong index holding the final composite after the full chain (the
-    /// view dependents bind). `None` when the object has no composite FBOs.
     final_front: Option<usize>,
-    /// The layer texture's animated atlas, when the base material's slot-0
-    /// `.tex` is multi-frame. The first (layer-sampling) pass drives its
-    /// `g_Texture0Translation`/`g_Texture0Rotation` builtins from this per
-    /// frame — the reference's per-pass texture-animation state
-    /// (`CPass.cpp:287-306`). Page streaming lives on [`SceneRenderer`].
     atlas: Option<Arc<super::texture::AtlasTexture>>,
-    /// The layer image's pixel size, for rebuilding the scene quad when a
-    /// script writes origin/scale/angles.
     image_size: (u32, u32),
 }
 
-/// One animated atlas plus the page currently uploaded into its bound texture
-/// (see [`SceneRenderer::atlas_textures`]).
 struct AtlasSlot {
     atlas: Arc<super::texture::AtlasTexture>,
     uploaded_page: usize,
 }
 
-/// A script-created runtime layer (`thisScene.createLayer`, docs §6.2) — the
-/// audio-visualizer bar pattern: solid quads whose transform/color the script
-/// drives every frame. Rendered as flat translucent rects on top of the scene
-/// composite (model files are solid-pixel quads for this pattern; textured
-/// runtime layers are a tracked extension).
 struct RuntimeLayer {
     origin: [f32; 3],
     scale: [f32; 3],
     angles: [f32; 3],
     color: [f32; 3],
     alpha: f32,
-    /// Material appearance from the created model (see `RuntimeTemplate`):
-    /// sprite texture, user-resolved tint and alpha, and the sprite's natural
-    /// size the script's scale multiplies. Defaults reproduce the old solid
-    /// quad for layers whose model was not found.
     texture: Option<std::sync::Arc<super::texture::GpuTexture>>,
     tint: [f32; 3],
     tint_alpha: f32,
     base_size: [f32; 2],
     visible: bool,
-    /// Draw order among runtime layers (Stage 1b2): creation sequence by
-    /// default (the reference appends created layers to its render order),
-    /// overwritten from the script host's layer order when `sortLayer` moves
-    /// one (`CScene::moveLayerToScriptableIndex`, CScene.cpp:538-562).
     order: i64,
 }
 
@@ -255,23 +137,13 @@ impl Default for RuntimeLayer {
     }
 }
 
-/// One renderable scene object, in render order. Kinds composite into the same
-/// scene FBO so cross-kind z-ordering is just this vector's order (docs §5.7,
-/// §7.1-§7.4). Non-drawn kinds (light / shape / sound / group) never
-/// produce an item — see [`super::extras`] for the rationale.
 enum SceneItem {
-    /// A 2D image layer with its effect-pass chain (docs §7.1).
     Image(Box<ObjectGpu>),
-    /// A particle system: CPU sim + instanced sprites (docs §7.3).
     Particle(Box<ParticleGpu>),
-    /// A real-glyph text quad + its coverage texture (docs §7.4).
     Text(Box<TextGpu>),
-    /// A 3D model: `.mdl` sub-meshes drawn under the perspective camera with a
-    /// private depth buffer (docs §7.2).
     Model(Box<super::model::ModelGpu>),
 }
 
-/// The scene wallpaper renderer.
 pub struct SceneRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -280,72 +152,25 @@ pub struct SceneRenderer {
     clear_color: wgpu::Color,
     screen_mvp: Mat4,
     items: Vec<SceneItem>,
-    /// Reused per-frame particle sprite scratch — cleared and refilled in place
-    /// so steady-state stepping never reallocates (SPEC.md §V5).
     sprite_scratch: Vec<SpriteInstance>,
-    /// Reused byte buffer for packing each pass's `_WEGlobals` block per frame
-    /// (SPEC §V5: no per-frame allocation — capacity is retained across frames).
     pack_scratch: Vec<u8>,
-    /// Live video-backed `.tex` textures (docs §10): each keeps its decoder
-    /// playing; the newest ready frame streams into the bound GPU texture every
-    /// render tick (the reference plays these — a frozen first frame was the
-    /// 3445942378 divergence).
     video_textures: Vec<super::texture::VideoTexture>,
-    /// For each entry of `video_textures`, the indices of `items` whose passes
-    /// bind that texture by name. Static per build (texture names never change
-    /// live); item visibility is the part that flips, so the render tick pauses
-    /// any video only invisible items display (see the streaming loop).
     video_users: Vec<Vec<usize>>,
-    /// Animated `.tex` atlases (docs/format-tex.md §8-§9): per render tick the
-    /// current frame is selected by the reference's frametime walk
-    /// (`CPass.cpp:348-378`) and, for multi-page (gif-style) textures, the
-    /// frame's page streams into the one texture every pass bound — the wgpu
-    /// equivalent of the reference's `textureID[frameNumber]` bind
-    /// (`CPass.cpp:380-387`). `uploaded_page` tracks the page currently in the
-    /// texture so unchanged frames upload nothing (SPEC.md §V5).
     atlas_textures: Vec<AtlasSlot>,
-    /// Surface-normalized pointer, top-left origin (T26; platform-fed). Centered
-    /// until the platform knows the cursor — the old hardcoded default.
     pointer: [f32; 2],
-    /// Previous frame's pointer (`g_PointerPositionLast`).
     pointer_last: [f32; 2],
-    /// Left button held (platform-fed; drives SceneScript
-    /// `input.cursorLeftDown` and the P1 cursor event edges).
     pointer_left: bool,
-    /// Script-created runtime layers keyed by their synthetic (negative) id.
     runtime_layers: std::collections::HashMap<i64, RuntimeLayer>,
-    /// Materials pre-built for the model paths scene scripts `createLayer`,
-    /// keyed by the path literal (see `collect_runtime_templates`). Built at
-    /// scene build because the asset source does not outlive it.
     runtime_templates: std::collections::HashMap<String, RuntimeTemplate>,
-    /// 1×1 white — the sampler-slot filler for solid runtime layers.
     runtime_white: std::sync::Arc<super::texture::GpuTexture>,
-    /// Next creation-order value for a runtime layer (monotonic; reset above
-    /// the script host's layer count whenever a `sortLayer` renumber lands so
-    /// later creations still draw on top).
     runtime_seq: i64,
-    /// Lazily built solid-quad pipeline + growable vertex buffer for them.
     runtime_pipeline: Option<(wgpu::RenderPipeline, wgpu::Buffer, usize)>,
-    /// Eased camera-parallax displacement (`CScene::m_parallaxDisplacement`):
-    /// `mix(disp, (pointer-0.5)·amount·influence, clamp(delay·dt, 0, 1))`.
     parallax_disp: [f32; 2],
-    /// The shared text pipeline, built only when the scene has drawable text.
     text_pipeline: Option<TextPipeline>,
-    /// Retained font system for script-driven text re-rasterization (`None`
-    /// when the scene has no text objects).
     text_fonts: Option<TextFonts>,
     scene_fbo: Fbo,
-    /// Persistent snapshot of `scene_fbo` bound wherever a layer samples
-    /// `_rt_FullFrameBuffer` (docs §6/§11). Refreshed by a GPU copy immediately
-    /// before each post-process layer draws, so the read never aliases the
-    /// write. Same size as `scene_fbo`. `None` when no object samples the scene
-    /// FBO and bloom is off — a proj-size `RGBA16F` target (16–66 MB) not worth
-    /// keeping for a scene that never reads it back.
     scene_snapshot: Option<Fbo>,
-    /// Camera bloom post-process, present when `general.bloom` is enabled
-    /// (docs §5). Runs on the composited scene FBO just before the blit.
     bloom: Option<super::bloom::Bloom>,
-    // Final blit stage-2.
     blit_pipeline: wgpu::RenderPipeline,
     blit_bind: wgpu::BindGroup,
     blit_window: wgpu::Buffer,
@@ -354,82 +179,35 @@ pub struct SceneRenderer {
     window_for: Option<SurfaceSize>,
     ambient: [f32; 3],
     skylight: [f32; 3],
-    /// Whether the output surface is sRGB (drives the blit's encode-cancel).
     blit_srgb: bool,
-    /// Shared system-audio capture; its latest spectrum feeds the
-    /// `g_AudioSpectrum*` uniforms each frame (docs §8.3). `None` ⇒ silent.
     audio: Option<Arc<AudioCapture>>,
-    /// Per-scene SceneScript host, if the scene has driveable property scripts
-    /// (docs/scripting-api.md §3; SPEC.md §V3). Ticked once per frame.
     script: Option<ScriptHost>,
-    /// The scene camera (eye/center/up/fov/near/far) — the 3D MODEL objects
-    /// build their perspective from it each frame (docs §7.2). `fov` is a
-    /// property-bound `UserSetting`, re-resolved on a live `setProperty`.
     camera: kirie_scene::scene::Camera,
-    /// The property bag (declared user props + `--set-property` overrides),
-    /// retained so a live `setProperty` (docs §4.9) can update a value and
-    /// re-resolve the affected shader params / camera / general in place.
     bag: kirie_scene::PropertyBag,
-    /// The resolved `general` block, re-resolved on `setProperty` to update
-    /// bloom / ambient / skylight / clearcolor live.
     general: kirie_scene::scene::General,
-    /// The 3D models' shared private depth buffer, allocated once at the scene
-    /// size when the scene has any model object (SPEC.md §V5). `None` ⇒ no model.
     model_depth: Option<wgpu::TextureView>,
-    /// `object id → parent id` over every object (docs §7.1). Used to gate a
-    /// layer off when any ancestor group/image is hidden.
     parent_by_id: HashMap<i64, Option<i64>>,
-    /// Per-object local transforms (the same map the build composed quads
-    /// from), retained so script origin/scale/angles writes can recompose
-    /// `world_xf` and rewrite the affected quads in place.
     locals: HashMap<i64, LocalXf>,
-    /// MPRIS now-playing source, started only when a scene script exports a
-    /// media event handler (docs: media*Changed).
     media: Option<Arc<crate::media::MediaSource>>,
-    /// Script 2D zoom multiplier (CameraTransforms.zoom), applied at the
-    /// final blit window. 1.0 = identity.
     zoom: f32,
-    /// `object id → live visibility` over every object (incl. non-drawn groups),
-    /// kept current by script visibility updates (docs §7.1 ancestor gating).
     visible_by_id: HashMap<i64, bool>,
-    /// Retained property-bound `visible` settings per object (base + image
-    /// level). Every object is BUILT regardless of visibility (like the
-    /// reference's CScene ctor), so a live `setProperty` on an x-ray combo /
-    /// layer toggle just re-resolves these and flips the chains — no rebuild.
     visibility_bindings: Vec<VisBinding>,
-    /// Retained property-bound effect `visible` settings with their planned
-    /// state (see [`EffectVisBinding`]).
     effect_vis_bindings: Vec<EffectVisBinding>,
-    /// Property names bound to genuinely structural positions (effect
-    /// visibility, object transforms, particle/text/animation-layer settings)
-    /// — the only properties whose change still needs the debounced
-    /// rebuild-swap. Everything else applies fully live.
     structural_props: std::collections::HashSet<String>,
 }
 
-/// One object's retained `visible` bindings (see
-/// [`SceneRenderer::visibility_bindings`]).
 struct VisBinding {
     id: i64,
     base: kirie_scene::user::UserSetting<bool>,
     image: Option<kirie_scene::user::UserSetting<bool>>,
 }
 
-/// One effect's retained `visible` binding plus the visibility the pass chain
-/// was PLANNED with. An effect toggle only forces a rebuild when the resolved
-/// value diverges from the planned one (the chain physically lacks/contains
-/// the passes); toggling a hidden object's effect back and forth while the
-/// object-level flip already applied live stays a background alignment.
 struct EffectVisBinding {
     us: kirie_scene::user::UserSetting<bool>,
     planned: bool,
 }
 
 impl SceneRenderer {
-    /// Build the renderer from a resolved [`SceneModel`]. `source` supplies
-    /// shader sources, `#include` headers and `.tex` bytes (the same asset
-    /// source used to resolve the model). Returns an error only when the scene
-    /// yields no drawable object or a degenerate projection (SPEC.md §V9).
     pub fn new(
         target: &RenderTarget<'_>,
         model: &SceneModel,
@@ -442,10 +220,6 @@ impl SceneRenderer {
         let queue = target.queue;
         let scene = &model.scene;
 
-        // Retain the property bag (the resolved user-property snapshot) + the
-        // general block so a live `setProperty` can re-resolve in place. The
-        // snapshot carries every declared property's current value, which is what
-        // a re-resolution reads.
         let mut bag = kirie_scene::PropertyBag::new();
         for (name, value) in user_props {
             bag.insert(name.clone(), value.clone());
@@ -460,8 +234,6 @@ impl SceneRenderer {
             });
         }
 
-        // Camera: screen MVP = translate(ortho, eye) * lookAt, conjugated by
-        // the Y-mirror (see `screen_camera_mvp` — the X/Y camera tilt port).
         let cam = &scene.camera;
         let screen_mvp = screen_camera_mvp((proj_w, proj_h), cam.eye, cam.center, cam.up, cam.farz);
 
@@ -483,21 +255,8 @@ impl SceneRenderer {
             ..wgpu::SamplerDescriptor::default()
         });
 
-        // Parent/visibility maps over *every* object (drawn or not, incl. the
-        // transform groups that never become a `SceneItem`). A layer is hidden
-        // when any ancestor group/image is hidden (docs §7.1 `CImage::render`
-        // "walk parents and skip if any ancestor is hidden") — but the ancestors
-        // are often `Group`/solid objects that aren't items, so their visibility
-        // must be tracked separately. `visible_by_id` seeds from each object's
-        // resolved `visible` (property/TOG-conditional bindings already collapsed,
-        // docs §3.3) and is kept live by script visibility updates.
         let parent_by_id: HashMap<i64, Option<i64>> =
             scene.objects.iter().map(|o| (o.base.id, o.base.parent)).collect();
-        // Per-object local 2D transform, for parent-chain composition (docs
-        // §7.3 transform inheritance): a child's origin/scale/angle are given in
-        // its parent group's frame, so a group at the canvas centre spreads its
-        // children across the scene. Without this, parented character layers
-        // (the layer-switcher groups) all collapse onto one oversized sprite.
         let local_xf: HashMap<i64, LocalXf> = scene
             .objects
             .iter()
@@ -518,8 +277,6 @@ impl SceneRenderer {
             .iter()
             .map(|o| (o.base.id, o.base.visible.value))
             .collect();
-        // Fold the image-level `visible` into the object entry so an ancestor
-        // image hidden via its own image field also gates descendants.
         for o in &scene.objects {
             if let ObjectKind::Image(img) = &o.kind
                 && !img.visible.value
@@ -528,32 +285,12 @@ impl SceneRenderer {
             }
         }
 
-        // Render order across ALL object kinds (docs §5.7): declaration order,
-        // stable-sorted by `sortorder` when `general.customsortorder` is set.
-        // (Dependency hoisting, docs §5.6, is a documented gap.) Every kind
-        // composites into the one scene FBO, so this order *is* the z-order.
         let mut order: Vec<usize> = (0..scene.objects.len()).collect();
         if scene.general.customsortorder {
             order.sort_by_key(|&i| scene.objects[i].base.sortorder);
         }
 
-        // Scene FBO + its snapshot are built up front: a post-process layer
-        // whose base texture is `_rt_FullFrameBuffer` (compose/project/fullscreen
-        // util layers) samples the scene composited so far. We bind a persistent
-        // snapshot texture (allocated once, refreshed by a GPU copy before each
-        // such layer draws) so sampling never reads the target being written —
-        // the reference's shadow-copy trick, docs §6/§11 (SPEC.md §V5: no
-        // per-frame alloc). Both share the projection size.
-        // Supersampling (`--render-scale`, reference FBOProvider.h:25-29): all
-        // render targets allocate at logical × scale; coordinates stay logical
-        // (the ortho is unchanged — a bigger target just rasterizes finer) and
-        // the final blit's linear sample downsamples. This is the reference's AA.
         let mut rs = options.render_scale.clamp(0.25, 4.0);
-        // Clamp to what the output can actually show (see `fit_render_to_output`).
-        // Uses the long edges so the projection's aspect is preserved, and only
-        // ever shrinks — a projection already smaller than the output keeps its
-        // authored size. `target.size` is (0, 0) before the surface is known, in
-        // which case there is nothing to fit to.
         if options.fit_render_to_output {
             let (out_w, out_h) = target.size;
             let (proj_long, out_long) = (proj_w.max(proj_h), out_w.max(out_h));
@@ -576,13 +313,7 @@ impl SceneRenderer {
         let scene_fbo = Fbo::new(device, "kirie-scene-fbo", fbo_w, fbo_h);
         let scene_snapshot = Fbo::new(device, "kirie-scene-snapshot", fbo_w, fbo_h);
 
-        // Camera bloom (docs §5): when enabled, glow the composited scene with
-        // the reproduced WE `camerabloom` effect just before the blit. Strength +
-        // threshold come from the resolved `general.bloomstrength`/`bloomthreshold`
-        // (matching WE `CScene.cpp:160`). The combine reuses `scene_snapshot`.
         let bloom = scene.general.bloom.value.then(|| {
-            // `KIRIE_BLOOM_STRENGTH`/`KIRIE_BLOOM_THRESHOLD` override the scene
-            // values (diagnostics / tuning against the reference).
             let env_f = |k: &str| std::env::var(k).ok().and_then(|s| s.parse::<f32>().ok());
             super::bloom::Bloom::new(
                 device,
@@ -599,20 +330,8 @@ impl SceneRenderer {
         let resolver = SourceIncludes(source);
         let mut items = Vec::new();
         let mut text_pipeline: Option<TextPipeline> = None;
-        // The font stack is scanned once, the first time a drawable text object
-        // is seen, and reused for the rest (system-font discovery is costly).
         let mut text_fonts: Option<TextFonts> = None;
 
-        // Dependency hoisting (docs §5.6): objects listed in another object's
-        // `dependencies` render their IMAGE-SPACE composite into their ping-pong
-        // FBOs even when invisible, and dependents bind it cross-object as
-        // `_rt_imageLayerComposite_<id>_a/b` (2155933185's hidden "planet N
-        // texture" donors). Donors build FIRST so dependents' bind groups can
-        // reference their composite views; they draw first each frame too.
-        // A donor is an image object referenced by a DIFFERENT object's
-        // `dependencies` — self-references are legal render-order no-ops
-        // (object.rs: "may self-reference") and must NOT strip a visible
-        // layer's scene draw (1388331347/1627026721 regressed exactly so).
         let donor_ids: std::collections::HashSet<i64> = scene
             .objects
             .iter()
@@ -633,8 +352,6 @@ impl SceneRenderer {
         let mut donor_built: std::collections::HashMap<usize, ObjectGpu> = std::collections::HashMap::new();
         let mut cross: std::collections::HashMap<String, wgpu::TextureView> =
             std::collections::HashMap::new();
-        // Build-scoped reflection interning (dropped with `new`; the shared
-        // tables live on inside the passes that reference them).
         let param_cache = std::sync::Mutex::new(ParamCache::new());
         for &oi in &order {
             let object = &scene.objects[oi];
@@ -672,13 +389,6 @@ impl SceneRenderer {
             }
         }
 
-        // Non-donor image objects build in PARALLEL: every input is shared-`&`
-        // (the texture registry dedupes per-name via once-cells, the param
-        // cache is a mutex, wgpu resource creation is internally synced, the
-        // shader unit/module caches are on-disk atomic). Donors already built
-        // above, so `cross` is read-only here. Text/particle/model builds stay
-        // sequential in the assembly loop below (cosmic-text and the sims are
-        // cheap and not thread-safe). Ordering is preserved by indexing.
         let shader_cache_dir = kirie_shader::translate::cache_dir();
         let parallel_built: HashMap<usize, ObjectGpu> = {
             use rayon::prelude::*;
@@ -692,8 +402,6 @@ impl SceneRenderer {
             image_indices
                 .into_par_iter()
                 .filter_map(|oi| {
-                    // Per-worker shader-cache dir (thread-local; load.rs set it
-                    // on the loading thread only).
                     kirie_shader::translate::set_cache_dir(shader_cache_dir.clone());
                     let object = &scene.objects[oi];
                     let ObjectKind::Image(image) = &object.kind else {
@@ -781,9 +489,6 @@ impl SceneRenderer {
                         items.push(SceneItem::Model(Box::new(mg)));
                     }
                 }
-                // Light / shape / sound / group are transform groups the
-                // reference does not composite (docs §5.6, §7.2) — drawing a
-                // stand-in would diverge from the C++ oracle.
                 other => {
                     tracing::debug!(id = object.base.id, kind = ?std::mem::discriminant(other), "non-drawn object skipped (docs §5.6, §7.2)");
                 }
@@ -794,10 +499,6 @@ impl SceneRenderer {
             return Err(super::SceneError::NoRenderableObjects);
         }
 
-        // Keep the scene snapshot only if a post-process layer / reflection model
-        // samples `_rt_FullFrameBuffer`, or bloom is enabled; otherwise it is dead
-        // VRAM. The build above already bound it wherever needed, so dropping it
-        // when nothing references it is safe (frees 16–66 MB per plain scene).
         let scene_snapshot = (bloom.is_some()
             || items.iter().any(|it| match it {
                 SceneItem::Image(o) => o.reads_scene,
@@ -809,13 +510,8 @@ impl SceneRenderer {
         let (blit_pipeline, blit_bind, blit_window) =
             build_blit(device, target.format, &scene_fbo, &fbo_sampler);
 
-        // Build the SceneScript host from the resolved model (docs §3). `None`
-        // when the scene has no driveable property script (the common case).
         let mut script = ScriptHost::build(model, (proj_w, proj_h), user_props);
 
-        // Wire text-layer scripts (WE clock/date drivers): create each text
-        // object's layer script in the host; render() ticks them and
-        // re-rasterizes on string change (`CText::initScriptLayer` parity).
         if let Some(host) = script.as_mut() {
             for item in &mut items {
                 if let SceneItem::Text(tg) = item {
@@ -827,24 +523,17 @@ impl SceneRenderer {
             }
         }
 
-        // MPRIS media integration: started only when a script listens for the
-        // media*Changed events — no D-Bus worker for the common scene.
         let media = script.as_ref().filter(|h| h.wants_media()).map(|_| {
             Arc::new(crate::media::MediaSource::start(
                 crate::media::MediaConfig::default(),
             ))
         });
 
-        // Allocate the models' shared depth buffer once, only when the scene has
-        // a model object (SPEC.md §V5: no per-frame alloc; §7.2).
         let model_depth = items
             .iter()
             .any(|it| matches!(it, SceneItem::Model(_)))
             .then(|| super::model::create_depth_texture(device, fbo_w, fbo_h));
 
-        // Pre-build the materials scene scripts `createLayer` at runtime: the
-        // literal model paths are visible in the script sources, and the asset
-        // source + resolved user properties only exist here at build.
         let runtime_templates = collect_runtime_templates(model, source, user_props, &registry);
         let runtime_white = registry.white();
 
@@ -870,9 +559,6 @@ impl SceneRenderer {
                                         .iter()
                                         .any(|t| t.as_deref() == Some(name.as_str()))
                                 }),
-                                // Non-image items never bind video `.tex`
-                                // materials today; leaving them unmapped keeps
-                                // such a video playing (the safe default).
                                 _ => false,
                             })
                             .map(|(i, _)| i)
@@ -889,7 +575,6 @@ impl SceneRenderer {
                 .into_iter()
                 .map(|atlas| AtlasSlot {
                     atlas,
-                    // `load` uploaded page 0 (the first page) at build time.
                     uploaded_page: 0,
                 })
                 .collect(),
@@ -941,14 +626,11 @@ impl SceneRenderer {
         })
     }
 
-    /// The scene's projection (native content) size — the output-scaling
-    /// "projection" the blit window is computed against (docs §4).
     #[must_use]
     pub fn projection_size(&self) -> (u32, u32) {
         (self.proj_w, self.proj_h)
     }
 
-    /// Total built draw passes across all image objects (diagnostics only).
     #[doc(hidden)]
     #[must_use]
     pub fn debug_pass_count(&self) -> usize {
@@ -961,7 +643,6 @@ impl SceneRenderer {
             .sum()
     }
 
-    /// Number of wired-in particle objects (diagnostics only).
     #[doc(hidden)]
     #[must_use]
     pub fn debug_particle_count(&self) -> usize {
@@ -971,7 +652,6 @@ impl SceneRenderer {
             .count()
     }
 
-    /// Number of text placeholder objects (diagnostics only).
     #[doc(hidden)]
     #[must_use]
     pub fn debug_text_count(&self) -> usize {
@@ -981,8 +661,6 @@ impl SceneRenderer {
             .count()
     }
 
-    /// Total live particles across every particle sim right now (diagnostics —
-    /// proves systems spawned after warm-up frames).
     #[doc(hidden)]
     #[must_use]
     pub fn debug_live_particles(&self) -> usize {
@@ -995,14 +673,6 @@ impl SceneRenderer {
             .sum()
     }
 
-    /// Drain and apply the script host's non-property scene ops: runtime-layer
-    /// creation (`thisScene.createLayer`) and the runtime camera override
-    /// (`thisScene.setCameraTransforms`). Shared by the per-frame tick and the
-    /// live `setProperty` dispatch (both can run scripts that issue these).
-    /// Live script transforms for 2D image layers: update the retained local
-    /// transform, recompose `world_xf` for the object and every descendant
-    /// (their baked quads embed the parent chain), and rewrite each affected
-    /// scene-geometry quad in place (an 80-byte buffer write — no rebuild).
     fn apply_image_transforms(&mut self, updates: &[PropUpdate]) {
         let mut dirty: Vec<i64> = Vec::new();
         for u in updates {
@@ -1019,15 +689,11 @@ impl SceneRenderer {
             match u.target {
                 PropTarget::Origin => l.origin = [v[0], v[1]],
                 PropTarget::Scale => l.scale = [v[0], v[1]],
-                // Only the in-plane Z angle exists in the 2D composition.
                 PropTarget::Angles => l.angle_z = v[2],
                 _ => unreachable!(),
             }
             dirty.push(u.object_id);
         }
-        // Text quads bake no parent chain (build_text uses the authored
-        // origin directly), so origin/scale writes apply to the item
-        // directly; angle writes are ignored (the quad is built unrotated).
         for u in updates {
             let (origin, scale) = match u.target {
                 PropTarget::Origin => (as_vec3(&u.value).map(|v| [v[0], v[1]]), None),
@@ -1051,7 +717,6 @@ impl SceneRenderer {
         let (sw, sh) = (self.proj_w, self.proj_h);
         for item in &mut self.items {
             let SceneItem::Image(o) = item else { continue };
-            // Affected = the written object or any descendant of one.
             let mut affected = dirty.contains(&o.id);
             let mut cur = self.locals.get(&o.id).and_then(|l| l.parent);
             for _ in 0..64 {
@@ -1078,7 +743,6 @@ impl SceneRenderer {
                 self.queue
                     .write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
             }
-            // Keep the pointer-unprojection anchor in step with the quad.
             o.scene_center = [origin[0] - sw as f32 / 2.0, origin[1] - sh as f32 / 2.0];
             o.angle_z = angle_z;
         }
@@ -1090,13 +754,8 @@ impl SceneRenderer {
         };
         for (id, path) in script.take_created() {
             tracing::debug!(id, %path, "runtime layer created by script");
-            // Creation order doubles as the default draw order — the reference
-            // appends created layers to its render order (top).
             let order = self.runtime_seq;
             let template = self.runtime_templates.get(&path).or_else(|| {
-                // Scripts write `models/bar.json`; the template may have been
-                // collected under a workshop-prefixed spelling (or vice
-                // versa) — match on the trailing file name as a fallback.
                 let tail = path.rsplit('/').next().unwrap_or(path.as_str());
                 self.runtime_templates
                     .iter()
@@ -1118,9 +777,6 @@ impl SceneRenderer {
             self.runtime_seq += 1;
         }
         for (layer_id, cmd, value) in script.take_video_ops() {
-            // `getVideoTexture()` ops: route to every video texture the layer's
-            // passes bind (via the static name→users map). `stop` maps to
-            // pause — the decode pipeline has no seek (documented deviation).
             let Some(item_idx) = self.items.iter().position(|it| match it {
                 SceneItem::Image(o) => o.id == layer_id,
                 _ => false,
@@ -1141,9 +797,6 @@ impl SceneRenderer {
             }
         }
         for (layer_id, effect_idx, name, value) in script.take_material_ops() {
-            // `getEffect(i).setMaterialProperty`: write the constant into the
-            // effect's passes and re-resolve their shader params — the same
-            // live path a `setProperty` material tweak takes.
             let dynv = match &value {
                 kirie_script::ScriptValue::Float(f) => kirie_scene::value::DynamicValue::Float(*f),
                 kirie_script::ScriptValue::Int(i) => kirie_scene::value::DynamicValue::Int(*i),
@@ -1196,9 +849,6 @@ impl SceneRenderer {
                     ParticleOp::Instance { name, value, .. } => {
                         if let Some(rest) = name.strip_prefix("controlpoint") {
                             if let (Ok(idx), Some(v)) = (rest.parse::<usize>(), as_vec3(value)) {
-                                // Script CPs arrive in the authored JSON space
-                                // (y-down); the sim runs local y-up, the same
-                                // flip the authored offsets get at build.
                                 pg.sim.set_control_point(idx, [v[0], -v[1], v[2]]);
                             }
                         } else if name == "colorn" {
@@ -1213,11 +863,6 @@ impl SceneRenderer {
             }
         }
         for id in script.take_destroyed() {
-            // `thisScene.destroyLayer`: a script-created layer is really
-            // removed (the runtime map is ours); a scene-built item is
-            // tombstoned — hidden and gated off for its descendants — because
-            // actually deleting it would invalidate the video/donor indices
-            // built at scene build (documented deviation, same net pixels).
             if self.runtime_layers.remove(&id).is_none() {
                 self.visible_by_id.insert(id, false);
                 for item in &mut self.items {
@@ -1232,15 +877,6 @@ impl SceneRenderer {
             }
         }
         if let Some(cam) = script.take_camera() {
-            // Runtime camera override (`scene_set_camera_transforms`,
-            // `Scripting/SceneObject.cpp:261-286`): only the perspective camera
-            // the 3D MODEL objects re-read every draw follows it. The 2D
-            // orthographic screen MVP is deliberately NOT rebuilt — reference
-            // `Camera.h:24-26`: "CModel re-reads getEye/getCenter/getUp/getFov
-            // every frame so it follows these; 2D layers use the orthographic
-            // getLookAt()/getProjection(), which these do NOT touch" (the ortho
-            // lookAt is computed once at construction, `Camera.cpp:14`, and the
-            // setters only store overrides, `Camera.cpp:35-53`).
             if let Some(e) = cam.eye {
                 self.camera.eye = e;
             }
@@ -1253,27 +889,15 @@ impl SceneRenderer {
             if let Some(f) = cam.fov {
                 self.camera.fov.value = f;
             }
-            // 2D zoom (CameraTransforms.zoom): applied at the final blit by
-            // shrinking the sampled UV window about its center — uniform over
-            // the whole composite, exactly a camera zoom-in.
             if let Some(z) = cam.zoom
                 && z > 0.0
                 && (z - self.zoom).abs() > f32::EPSILON
             {
                 self.zoom = z;
-                self.window_for = None; // force the blit window recompute
+                self.window_for = None;
             }
         }
         for (id, parent) in script.take_parent_updates() {
-            // Live reparent (`thisLayer.setParent` → `layer_set_parent`,
-            // `ScriptableObjectAdapter.cpp:193-230`): the reference just
-            // rewrites the data object's `parent` field; kirie's functional
-            // equivalent is the ancestor-visibility gate (docs §7.1), fed by
-            // `parent_by_id` + each image's stored parent. Transform
-            // inheritance stays build-baked (`world_xf` composes the parent
-            // chain into the object's quad at build) — a reparent does NOT
-            // re-anchor a baked transform; visibility gating is the part
-            // scripts use (documented limit).
             self.parent_by_id.insert(id, Some(parent));
             for item in &mut self.items {
                 if let SceneItem::Image(o) = item
@@ -1284,16 +908,6 @@ impl SceneRenderer {
             }
         }
         if let Some(order) = script.take_layer_order() {
-            // Live z-order (`thisScene.sortLayer` →
-            // `CScene::moveLayerToScriptableIndex`, CScene.cpp:538-562): the
-            // script host maintains the one authoritative layer order; mirror
-            // it here. Drawable items stable-sort to the order's relative
-            // positions (the reference's single reordered render list,
-            // restricted to what this compositor draws) and runtime layers
-            // renumber so Stage 1b2 keeps the same relative order among
-            // themselves. Runtime layers always composite *above* the scene
-            // items regardless (their stage draws after 1b — a tracked
-            // difference from the reference's fully interleaved list).
             let pos: HashMap<i64, usize> = order.iter().enumerate().map(|(i, &id)| (id, i)).collect();
             for (id, layer) in &mut self.runtime_layers {
                 if let Some(&p) = pos.get(id) {
@@ -1301,16 +915,12 @@ impl SceneRenderer {
                 }
             }
             self.runtime_seq = order.len() as i64;
-            // Stable: items absent from the order (impossible for built scene
-            // objects — every object has a script layer) keep relative order.
             self.items
                 .sort_by_key(|it| pos.get(&item_id(it)).copied().unwrap_or(usize::MAX));
         }
     }
 }
 
-/// The scene-object id an item was built from — the handle script ops
-/// (`sortLayer`) target.
 fn item_id(item: &SceneItem) -> i64 {
     match item {
         SceneItem::Image(o) => o.id,
@@ -1320,19 +930,8 @@ fn item_id(item: &SceneItem) -> i64 {
     }
 }
 
-/// Scene-build interning table for shader-parameter reflection: shader name →
-/// the distinct `(vs, fs)` parameter tables seen under that name. Shaders are
-/// heavily reused across objects (every image base pass is `genericimage2`,
-/// effect shaders repeat per instance), so interning collapses the per-pass
-/// retained reflection ([`PassGpu::params_vs`]/`params_fs`) to one allocation
-/// per distinct table. Keyed by name only as an index — reuse is decided by
-/// comparing the tables themselves, so combo-divergent variants of one shader
-/// never alias and correctness never rests on the key.
 type ParamCache = HashMap<String, Vec<(Arc<Vec<Parameter>>, Arc<Vec<Parameter>>)>>;
 
-/// Intern one pass's reflection tables through the [`ParamCache`]: return the
-/// shared copy when an identical `(vs, fs)` pair was already seen for this
-/// shader, else store and share this one.
 fn intern_params(
     cache: &mut ParamCache,
     shader: &str,
@@ -1348,8 +947,6 @@ fn intern_params(
     entry
 }
 
-/// Build one image object's GPU resources, or `None` if it plans nothing / has
-/// no buildable pass (SPEC.md §V9 skip-and-continue).
 #[allow(clippy::too_many_arguments)]
 fn build_object(
     device: &wgpu::Device,
@@ -1368,19 +965,7 @@ fn build_object(
     param_cache: &std::sync::Mutex<ParamCache>,
     fbo_scale: f32,
 ) -> Option<ObjectGpu> {
-    // Every object plans + builds its full chain regardless of visibility —
-    // the reference's CScene ctor `createObject`s every object and CImage
-    // checks visibility per frame at render. Building hidden objects too is
-    // what lets a property-bound visibility (x-ray combos, layer-switcher
-    // toggles) flip live with NO rebuild: `set_property` re-resolves the
-    // retained bindings and the draw loop just skips hidden chains (V6).
-    // `visible` seeds the runtime flag; donors additionally never emit a
-    // Scene pass (docs §5.6).
     let visible = offscreen_donor || (image.visible.value && object.base.visible.value);
-    // The `colorBlendMode` compatibility material, loaded at setup like the
-    // reference's `MaterialParser::load(project, "materials/util/
-    // effectpassthrough.json")` (`CImage.cpp:770-788`). A missing builtin
-    // degrades to no extra pass (SPEC.md §V9 skip-and-continue).
     let color_blend = (image.color_blend_mode.value > 0)
         .then(|| source.load(plan::COLOR_BLEND_MATERIAL))
         .flatten()
@@ -1391,19 +976,8 @@ fn build_object(
         return None;
     }
 
-    // Fullscreen post-process layers (compose/project/fullscreen util layers)
-    // composite their final pass with the NDC quad + identity MVP, bypassing the
-    // scene camera — otherwise a 3D/off-center camera skews a full-frame overlay
-    // (docs §7.1 corner depth-clip fix, `CImage.cpp:847-853`).
     let fullscreen = image.model.as_ref().is_some_and(|m| m.fullscreen);
 
-    // Puppet-warp mesh: an image whose model declares a `puppet` `.mdl` is a
-    // deformable character (girl/guy/cat in scene 3428443753), not a flat quad.
-    // Load + parse the mesh here; its first pass then draws the mesh instead of
-    // the copy/scene quad (`CImage::loadPuppetMesh` + `setupPasses`
-    // `m_hasPuppetMesh`, `CImage.cpp:426-528, 823-834`). A malformed/absent
-    // puppet falls back to the flat quad (SPEC.md §V9). Fullscreen post-process
-    // layers never carry a puppet, so they are excluded.
     let puppet = if fullscreen {
         None
     } else {
@@ -1433,72 +1007,39 @@ fn build_object(
             })
     };
 
-    // Image size: explicit size, else scene size (fullscreen/solid, docs §7.1).
     let (mut iw, mut ih) = (image.size[0] as u32, image.size[1] as u32);
-    // World-space transform: local origin/scale/angle already composed through
-    // the parent chain (docs §7.3), so a group's translation/scale reaches its
-    // children.
     let (world_origin, world_scale, world_angle_z) = world;
     let mut origin = world_origin;
     if iw == 0 || ih == 0 {
         iw = scene_size.0;
         ih = scene_size.1;
-        // Fullscreen fallback centers the layer (docs §7.1).
         origin = [scene_size.0 as f32 / 2.0, scene_size.1 as f32 / 2.0];
     }
 
-    // The layer texture: the base material's texture slot 0 (docs §7.1). Falls
-    // back to white if absent. When slot 0 is `_rt_FullFrameBuffer` (post-process
-    // compose/project/fullscreen layers) the first pass samples the scene
-    // composited so far — bound from the snapshot, not the white fallback.
     let layer_tex = base_layer_texture(image, source, registry);
     let layer_reads_scene = base_layer_name(image).as_deref().is_some_and(is_scene_rt);
     let mut reads_scene = layer_reads_scene;
-    // The layer texture's animated atlas, if `load` registered one for its
-    // name (multi-frame `.tex`). Drives the first pass's `g_Texture0*` frame
-    // placement builtins per frame (`CPass.cpp:287-306`, docs §8.3).
     let layer_atlas = base_layer_name(image)
         .filter(|n| !n.starts_with("_rt_") && !n.starts_with("_alias_"))
         .and_then(|n| registry.atlas_for(&n));
 
-    // The layer's own transform (docs §7.1: the `sceneSpacePosition` quad is
-    // built at the *scaled* size, rotated about its center by the negated Z
-    // angle, then translated to origin). Parent-chain resolution and parallax
-    // are documented gaps; X/Y tilt is near-zero in the corpus.
     let scale = world_scale;
     let angle_z = world_angle_z;
     let scene_quad = scene_space_quad(origin, (iw, ih), [scale[0], scale[1]], angle_z, scene_size);
     let model_matrix = matrix::ortho(0.0, iw as f32, 0.0, ih as f32, 0.0, 1.0);
 
-    // Phase A: translate + build every pass pipeline, dropping the ones whose
-    // shaders are missing or untranslatable (SPEC.md §V9). Wiring is deferred to
-    // Phase B so a dropped effect pass never leaves a broken FBO chain — the
-    // surviving passes are re-wired into a valid ping-pong ending at the scene.
-    // Each survivor carries its material pass plus its effect FBO routing
-    // (`target`/`binds`) so Phase B can render effect scratch passes into their
-    // own named FBOs and keep the composite intact for a combine pass (§11.2).
     struct Survivor {
         built: BuiltPass,
         raw: kirie_scene::material::Pass,
-        /// The pass's shader-parameter reflection, taken out of [`BuiltPass`]
-        /// and interned through the scene-build [`ParamCache`] so identical
-        /// tables (same shader, same combos) are one shared allocation.
         params_vs: Arc<Vec<Parameter>>,
         params_fs: Arc<Vec<Parameter>>,
         target: Option<String>,
         binds: Vec<(u32, String)>,
-        /// True for the base (first) material pass of a puppet object — the pass
-        /// whose geometry the puppet mesh replaces (`CImage.cpp:823-834`, the mesh
-        /// always lives on the first pass). Its pipeline is a triangle *list*.
         is_puppet_base: bool,
-        /// Authored effect index (script `getEffect(i)` addressing).
         effect_index: Option<usize>,
     }
     let mut built: Vec<Survivor> = Vec::new();
     for (ci, plan_pass) in chain.passes.iter().enumerate() {
-        // `commands/copy` is the reference's VFS-registered blit for effect
-        // `command:"copy"` passes (`WallpaperApplication.cpp:165-182`) — it
-        // exists in no asset container, so bind the embedded sources instead.
         let (vs_src, fs_src) = if plan_pass.shader == plan::COPY_COMMAND_SHADER {
             (COPY_COMMAND_VERT.to_owned(), COPY_COMMAND_FRAG.to_owned())
         } else {
@@ -1513,15 +1054,12 @@ fn build_object(
             };
             (vs_src, fs_src)
         };
-        // The base pass of a puppet draws the deformable mesh (indexed triangle
-        // list); every other pass keeps the 4-vertex triangle strip.
         let is_puppet_base = puppet.is_some() && ci == 0;
         let topology = if is_puppet_base {
             wgpu::PrimitiveTopology::TriangleList
         } else {
             wgpu::PrimitiveTopology::TriangleStrip
         };
-        // Force depthless: the 2D scene renderer allocates no depth attachment.
         match pipeline::build_pass(
             device,
             FBO_FORMAT,
@@ -1544,13 +1082,6 @@ fn build_object(
                     std::mem::take(&mut b.vs_params),
                     std::mem::take(&mut b.fs_params),
                 );
-                // Retain only the constants some reflection parameter reads:
-                // the retained copy exists solely for `set_property`'s
-                // `resolve_constants` + `resolve_params` re-resolution, and
-                // `resolve_params` looks up `constantshadervalues` by each
-                // parameter's `material` key — entries no parameter names are
-                // never read again (the full authored pass already resolved
-                // the initial `{vs,fs}_params` below and stays in the model).
                 let mut raw = plan_pass.pass.clone();
                 raw.constantshadervalues
                     .retain(|k, _| params_vs.iter().chain(params_fs.iter()).any(|p| p.material == *k));
@@ -1574,14 +1105,7 @@ fn build_object(
         return None;
     }
 
-    // Ping-pong composite FBOs only when more than one pass survived (docs §7.1;
-    // V5: allocated once here, reused every frame). These are the image
-    // composite `_rt_imageLayerComposite_<id>_a/_b`; effect scratch passes render
-    // elsewhere so the composite keeps the pre-effect image (§11.2).
     let n = built.len();
-    // A dependency donor keeps its FULL chain in the ping-pong (its last pass
-    // composites instead of drawing to scene), so it always needs the pair.
-    // FBO dims scale with `--render-scale` (coordinates stay logical).
     let sdim = |d: u32| ((d as f32 * fbo_scale).round() as u32).max(1);
     let fbos = if n > 1 || offscreen_donor {
         [
@@ -1592,9 +1116,6 @@ fn build_object(
         [None, None]
     };
 
-    // Per-effect scratch FBOs (§11.2 `fbos`): a pass with a named `target`
-    // renders here instead of the composite, and later `bind`s sample them by
-    // name. `scale` is a divisor vs the image size (2 = half-res godrays blur).
     let mut named_fbos: std::collections::HashMap<String, Fbo> = std::collections::HashMap::new();
     for decl in &chain.named_fbos {
         let s = if decl.scale > 0.0 { decl.scale } else { 1.0 };
@@ -1605,13 +1126,9 @@ fn build_object(
             Fbo::new(device, "kirie-effect-fbo", sdim(w), sdim(h)),
         );
     }
-    // The two composite reference names for this object's id (both resolve to the
-    // current composite front — the reference's `_a`/`_b` ping-pong pair).
     let comp_a = format!("_rt_imageLayerComposite_{}_a", object.base.id);
     let comp_b = format!("_rt_imageLayerComposite_{}_b", object.base.id);
 
-    // A pass "composites" (advances/ends the ping-pong) when it has no named
-    // target FBO; a target that names a declared scratch FBO renders aside.
     let is_composite = |target: &Option<String>| match target {
         None => true,
         Some(t) => !named_fbos.contains_key(t),
@@ -1621,13 +1138,7 @@ fn build_object(
         .rposition(|s| is_composite(&s.target))
         .unwrap_or(n - 1);
 
-    // Phase B: render the base/composite passes through the ping-pong (last →
-    // scene), effect scratch passes into their named FBOs, threading the
-    // composite front so `previous`/`_rt_imageLayerComposite` binds sample the
-    // real prior output instead of the 1×1 white default (§11.2).
     let mut passes = Vec::with_capacity(n);
-    // `comp_front`: the composite buffer holding the latest composite (None until
-    // the first composite pass writes; before that the layer texture is "it").
     let mut comp_front: Option<usize> = None;
     for (i, sv) in built.into_iter().enumerate() {
         let Survivor {
@@ -1640,14 +1151,9 @@ fn build_object(
             is_puppet_base,
             effect_index,
         } = sv;
-        // A donor never draws to the scene: its final composite stays in the
-        // ping-pong (image space) for dependents to sample (docs §5.6).
         let is_scene = i == last_comp && !offscreen_donor;
         let composite = is_composite(&target);
 
-        // Effective texture slots: overlay the effect `bind`s onto the material's
-        // slots without clobbering an authored (scene-json) override (§11.2 — the
-        // bind fills only empty slots; the position override wins where present).
         let mut raw_pass = raw_pass;
         for (slot, name) in &binds {
             let idx = *slot as usize;
@@ -1660,20 +1166,12 @@ fn build_object(
         }
 
         let geometry = if is_puppet_base {
-            // The puppet mesh replaces this pass's quad. Single-pass puppets draw
-            // the mesh straight into the scene FBO (scene space, screen MVP);
-            // multi-pass puppets draw it into the copy FBO (local space, ortho
-            // MVP) so the effect chain then processes the deformed character
-            // (`CImage.cpp:823-834`).
             if is_scene {
                 Geometry::Puppet
             } else {
                 Geometry::PuppetCopy
             }
         } else if is_scene {
-            // Fullscreen post-process layers composite full-frame in NDC with an
-            // identity MVP (bypass the camera); ordinary layers use the scene
-            // quad + screen MVP (docs §7.1).
             if fullscreen {
                 Geometry::Pass
             } else {
@@ -1685,18 +1183,12 @@ fn build_object(
             Geometry::Pass
         };
 
-        // The first pass samples the base layer texture and must crop NPOT
-        // padding exactly like the reference's `texcoordCopy = realSize /
-        // textureSize` (docs §7.1). Later passes read real-sized FBOs (0..1). The
-        // scene snapshot is already real-sized, so it is never UV-cropped.
         let reads_layer = i == 0;
         let uv_crop = if reads_layer && !layer_reads_scene {
             layer_tex.uv_crop
         } else {
             [1.0, 1.0]
         };
-        // Build the geometry: a puppet base uploads the deformable mesh (indexed
-        // triangle list); everything else uploads the 4-vertex quad strip.
         let (vertex_buffer, puppet_indices) = match geometry {
             Geometry::Puppet | Geometry::PuppetCopy => {
                 let verts = puppet_copy_vertices(
@@ -1736,9 +1228,6 @@ fn build_object(
         let vs_params = resolve_params(&params_vs, &raw_pass);
         let fs_params = resolve_params(&params_fs, &raw_pass);
 
-        // The pass input (slot-0 default and `previous`): the scene snapshot when
-        // the first pass samples `_rt_FullFrameBuffer`, else the layer texture
-        // (first pass) or the current composite front (later passes).
         let (input_view, input_sampler): (&wgpu::TextureView, &wgpu::Sampler) = if reads_layer {
             if layer_reads_scene {
                 (&scene_snapshot.view, fbo_sampler)
@@ -1752,17 +1241,12 @@ fn build_object(
             }
         };
 
-        // Name→FBO resolution for this pass's `_rt_` binds: `previous` and the
-        // composite references resolve to the composite front; declared scratch
-        // FBOs resolve to their target (§11.2).
         let comp_view: &wgpu::TextureView = match comp_front {
             Some(k) => fbos[k].as_ref().map_or(input_view, |f| &f.view),
             None => input_view,
         };
         let mut named: std::collections::HashMap<&str, (&wgpu::TextureView, &wgpu::Sampler)> =
             std::collections::HashMap::new();
-        // Cross-object donor composites first (docs §5.6) — own names below win
-        // on any collision (a donor id can never equal this object's id).
         for (name, view) in cross {
             named.insert(name.as_str(), (view, fbo_sampler));
         }
@@ -1773,7 +1257,6 @@ fn build_object(
             named.insert(name.as_str(), (&fbo.view, fbo_sampler));
         }
 
-        // Any `_rt_FullFrameBuffer` slot needs a per-frame scene snapshot copy.
         if raw_pass.textures.iter().flatten().any(|n| is_scene_rt(n)) {
             reads_scene = true;
         }
@@ -1812,10 +1295,6 @@ fn build_object(
             &named,
         );
 
-        // `g_TextureNResolution` per slot. Slot 0 is the pass input; slots 1.. are
-        // the pass's named textures/binds. FBO/composite refs are clean render
-        // targets (realSize == texSize ⇒ img_res); real `.tex` assets carry NPOT
-        // padding, so shaders read `realSize/texSize` to crop it (docs §7.1).
         let img_res = [iw as f32, ih as f32, iw as f32, ih as f32];
         let mut tex_resolution = [img_res; 8];
         tex_resolution[0] = if reads_layer && !layer_reads_scene {
@@ -1832,9 +1311,6 @@ fn build_object(
             };
         }
 
-        // Output routing: a named-target scratch pass renders into its FBO (the
-        // composite front is untouched); a composite pass writes the other
-        // ping-pong buffer (or the scene FBO if it is the final composite).
         let output = if is_scene {
             PassOutput::Scene
         } else if composite {
@@ -1845,7 +1321,6 @@ fn build_object(
             comp_front = Some(dst);
             PassOutput::Fbo(dst)
         } else {
-            // Safe: `composite == false` ⇒ the target names a declared FBO.
             PassOutput::Named(target.clone().unwrap_or_default())
         };
 
@@ -1881,7 +1356,7 @@ fn build_object(
             material_pass: raw_pass,
         });
     }
-    let _ = screen_mvp; // screen MVP applied per-frame via builtins.
+    let _ = screen_mvp;
     tracing::trace!(target: "kirie_render::ptrdbg",
         id = object.base.id,
         n_passes = passes.len(),
@@ -1911,9 +1386,6 @@ fn build_object(
     })
 }
 
-/// Collect every object's property-bound `visible` settings (base + image
-/// level) for live re-resolution. Objects without any binding are skipped —
-/// only scripts can change those, via the existing script path.
 fn collect_visibility_bindings(scene: &kirie_scene::Scene) -> Vec<VisBinding> {
     scene
         .objects
@@ -1933,8 +1405,6 @@ fn collect_visibility_bindings(scene: &kirie_scene::Scene) -> Vec<VisBinding> {
         .collect()
 }
 
-/// Collect every property-bound effect `visible` with the visibility the pass
-/// chain was planned with (its current resolved value at build).
 fn collect_effect_vis_bindings(scene: &kirie_scene::Scene) -> Vec<EffectVisBinding> {
     let mut out = Vec::new();
     for o in &scene.objects {
@@ -1952,9 +1422,6 @@ fn collect_effect_vis_bindings(scene: &kirie_scene::Scene) -> Vec<EffectVisBindi
     out
 }
 
-/// Property names bound to structural positions — values baked into vertices,
-/// pass chains, or simulations at build time. A `setProperty` on one of these
-/// still needs the debounced rebuild-swap; anything else applies fully live.
 fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::HashSet<String> {
     use kirie_scene::user::UserSetting;
     let mut out = std::collections::HashSet::new();
@@ -1964,7 +1431,6 @@ fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::Has
         }
     }
     for o in &scene.objects {
-        // Transforms are baked into the scene-space quad vertices.
         add(&mut out, &o.base.origin);
         add(&mut out, &o.base.scale);
         add(&mut out, &o.base.angles);
@@ -1972,10 +1438,7 @@ fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::Has
             ObjectKind::Image(img) => {
                 add(&mut out, &img.scale);
                 add(&mut out, &img.angles);
-                // colorBlendMode appends a pass (combo baked into a pipeline).
                 add(&mut out, &img.color_blend_mode);
-                // Effect visibility is handled dynamically (EffectVisBinding:
-                // rebuild only on planned-state divergence), not here.
                 for layer in &img.animationlayers {
                     add(&mut out, &layer.rate);
                     add(&mut out, &layer.visible);
@@ -1984,7 +1447,6 @@ fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::Has
                 }
             }
             ObjectKind::Particle(p) => {
-                // Emitter params are baked into the running simulation.
                 add(&mut out, &p.scale);
                 add(&mut out, &p.angles);
                 add(&mut out, &p.visible);
@@ -2013,10 +1475,6 @@ fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::Has
     out
 }
 
-/// Whether every ancestor of a layer (walking `parent` up the chain) is visible
-/// (docs §7.1 `CImage::render`: a layer is skipped if any ancestor group/image
-/// is hidden). An unknown parent id (dangling reference) is treated as visible.
-/// A cycle guard caps the walk (SPEC.md §V9 — malformed graphs never hang).
 fn ancestors_visible(
     parent_by_id: &HashMap<i64, Option<i64>>,
     visible_by_id: &HashMap<i64, bool>,
@@ -2034,11 +1492,6 @@ fn ancestors_visible(
 }
 
 impl Renderer for SceneRenderer {
-    /// SPEC §V6: report Static only when provably nothing animates — no
-    /// scripts, no audio reactivity, no video/atlas textures, no runtime
-    /// layers, no particles, no model animation tracks, and no pointer
-    /// parallax. Everything else keeps continuous pacing (Unknown), so a
-    /// false negative costs frames, never correctness.
     fn redraw_hint(&self) -> kirie_platform::RedrawHint {
         let animated = self.script.is_some()
             || self.audio.is_some()
@@ -2063,18 +1516,8 @@ impl Renderer for SceneRenderer {
         let time = self.elapsed as f32;
         let texel = [1.0 / self.proj_w as f32, 1.0 / self.proj_h as f32];
 
-        // Audio: lock-free snapshot of the latest published spectrum (V4 — never
-        // blocks the render thread). `None`/silent capture ⇒ all-zero bands, the
-        // exact state an AUDIOPROCESSING shader sees with audio off (docs §8.3).
         let spectrum = self.audio.as_ref().map(|a| a.latest_spectrum());
 
-        // SceneScript: tick once per frame and apply the typed property updates
-        // to the live objects *before* drawing (SPEC.md §V3 — typed ops only,
-        // JS never touches these buffers). Frame-callback driven, so an occluded
-        // output that gets no callbacks never ticks (V6 groundwork).
-        // Scene-space pointer (top-left px), shared by the script tick's
-        // `input.cursorWorldPosition` and the pointer-locked particle mapping
-        // in the item loop below — computed once, before either consumer.
         let pointer_scene = {
             let (pw, ph) = self.projection_size();
             [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
@@ -2091,12 +1534,8 @@ impl Renderer for SceneRenderer {
             ),
             None => Vec::new(),
         };
-        // Scene ops (createLayer/camera/…) first: a layer created this tick must
-        // exist before its first-frame property updates route to it.
         self.apply_script_scene_ops();
         if !updates.is_empty() {
-            // Keep the ancestor-visibility map live so a script hiding/showing
-            // a group also gates/ungates its descendants (docs §7.1).
             for u in &updates {
                 if matches!(u.target, PropTarget::Visible)
                     && let kirie_script::ScriptValue::Bool(v) = &u.value
@@ -2109,9 +1548,6 @@ impl Renderer for SceneRenderer {
             self.apply_image_transforms(&updates);
         }
 
-        // Script-driven text layers (clock/date drivers): tick each and
-        // re-rasterize only when the rendered string changed (`CText`'s
-        // rebuildTextureFrom-on-change).
         if let (Some(host), Some(tp), Some(fonts)) = (
             self.script.as_mut(),
             self.text_pipeline.as_ref(),
@@ -2126,8 +1562,6 @@ impl Renderer for SceneRenderer {
                     tg.retext(&self.device, &self.queue, tp, fonts, &new_text);
                 }
             }
-            // `thisLayer.text = …` from property scripts (module ops), applied
-            // at the same seam so both write paths share the change-dedupe.
             for u in &updates {
                 if u.target != PropTarget::Text {
                     continue;
@@ -2146,15 +1580,12 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        // Recompute the blit UV window on resize (docs §4; cached like the
-        // reference WallpaperState).
         if self.window_for != Some(size) {
             let mut window = self
                 .options
                 .scaling
                 .uv_window((self.proj_w, self.proj_h), (size.width, size.height));
             if self.zoom != 1.0 {
-                // Script 2D zoom: shrink the window about its center.
                 let (cx, cy) = ((window.u0 + window.u1) * 0.5, (window.v0 + window.v1) * 0.5);
                 let (hw, hh) = (
                     (window.u1 - window.u0) * 0.5 / self.zoom,
@@ -2189,7 +1620,6 @@ impl Renderer for SceneRenderer {
                 label: Some("kirie-scene-encoder"),
             });
 
-        // Stage 1a: clear the scene FBO to the scene clear color (docs §5.1).
         {
             let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kirie-scene-clear"),
@@ -2209,13 +1639,8 @@ impl Renderer for SceneRenderer {
             });
         }
 
-        // Stage 1b: every object in render order, dispatched by kind. All kinds
-        // composite into the same scene FBO with `LoadOp::Load`, so the item
-        // order set at build time *is* the cross-kind z-order (docs §5.7, §7).
         let scene_view = &self.scene_fbo.view;
         let scene_tex = &self.scene_fbo.texture;
-        // Present only when a layer reads the scene FBO / bloom is on; a
-        // `reads_scene` object always implies `Some` here (both set at build).
         let snap_tex = self.scene_snapshot.as_ref().map(|s| &s.texture);
         let copy_extent = wgpu::Extent3d {
             width: self.scene_fbo.width,
@@ -2223,19 +1648,11 @@ impl Renderer for SceneRenderer {
             depth_or_array_layers: 1,
         };
         let audio = spectrum.as_deref();
-        // Ancestor-visibility maps (disjoint from the mut items borrow below):
-        // a layer is skipped when any ancestor group/image is hidden (docs §7.1).
         let parent_by_id = &self.parent_by_id;
         let visible_by_id = &self.visible_by_id;
-        // Reused UBO-pack buffer (disjoint field from `items` below), so no pass
-        // allocates its `_WEGlobals` bytes each frame (SPEC §V5).
         let pack_scratch = &mut self.pack_scratch;
-        // Pointer + parallax snapshots for the draw loops (disjoint fields).
         let pointer = self.pointer;
         let pointer_last = self.pointer_last;
-        // `--disable-parallax` zeroes the per-layer translation outright
-        // (CImage.cpp:1168 checks the flag every frame, so any residual
-        // displacement stops applying immediately).
         let parallax = if self.options.disable_parallax {
             ([0.0, 0.0], 0.0, self.proj_w as f32)
         } else {
@@ -2246,10 +1663,6 @@ impl Renderer for SceneRenderer {
             )
         };
 
-        // Pointer rollover (`g_PointerPositionLast`) + camera parallax easing
-        // (CScene::renderFrame): `disp = mix(disp, (mouse-0.5)·amount·influence,
-        // clamp(delay·dt, 0, 1))` — gated on `--disable-parallax` exactly like
-        // the reference (CScene.cpp:329). `delay` is a rate despite the name.
         self.pointer_last = self.pointer;
         if self.general.cameraparallax.value && !self.options.disable_parallax {
             let amount = self.general.cameraparallaxamount.value;
@@ -2261,15 +1674,7 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        // Stream video-backed `.tex` frames (docs §10): drain what the decoder
-        // has ready and upload only the NEWEST (no backlog), into the same
-        // texture object every pass bound. The decoder paces itself to the
-        // video clock and loops seamlessly; nothing ready ⇒ keep last frame.
         for (vi, vt) in self.video_textures.iter().enumerate() {
-            // Pause a video no visible object displays (an X-ray variant or
-            // layer-switcher alternative sits invisible by default): decoding
-            // a hidden 4K stream costs a full core for pixels nobody sees.
-            // An empty users list means the mapping failed — err on playing.
             let users = self.video_users.get(vi);
             let displayed = users.is_none_or(|u| u.is_empty())
                 || users.is_some_and(|u| {
@@ -2278,8 +1683,6 @@ impl Renderer for SceneRenderer {
                         _ => true,
                     })
                 });
-            // Scripted pause (`getVideoTexture().pause()`) composes with the
-            // visibility gate: both must allow playback.
             let play = displayed && !vt.script_paused.get();
             if !play {
                 if !vt.paused.get() {
@@ -2299,8 +1702,6 @@ impl Renderer for SceneRenderer {
             if let Some(f) = newest
                 && (f.width, f.height) == vt.size
             {
-                // NV12 frames convert on the GPU (see texture::Nv12Rig); RGBA
-                // frames (non-NV12 streams) upload directly as before.
                 if f.pixels == kirie_video::FramePixels::Nv12 {
                     if let Some(rig) = &vt.nv12 {
                         rig.convert(&self.device, &self.queue, f.width, f.height, &f.data);
@@ -2329,24 +1730,15 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        // Advance animated `.tex` atlases (docs/format-tex.md §8-§9): select
-        // the frame with the reference's `fmod(renderTime, Σ frametime)` walk
-        // (`CPass.cpp:348-378`) and, when the frame lives on another page
-        // (gif-style multi-image .tex), stream that page into the one texture
-        // every pass bound — the wgpu stand-in for the reference's
-        // `glBindTexture(textureID[frameNumber])` (`CPass.cpp:380-387`).
-        // Single-page spritesheets upload nothing here; their placement rides
-        // the `g_Texture0Translation`/`g_Texture0Rotation` builtins instead.
         for slot in &mut self.atlas_textures {
             let frame = slot.atlas.placement_at(self.elapsed);
             if frame.page == slot.uploaded_page {
                 continue;
             }
             let Some(page) = slot.atlas.pages.get(frame.page) else {
-                continue; // single-page atlas (no CPU pages retained)
+                continue;
             };
             let gpu = &slot.atlas.gpu;
-            // Registration guarantees uniform page dims; guard anyway (V9).
             if (page.width, page.height) != (gpu.width, gpu.height) {
                 continue;
             }
@@ -2372,10 +1764,6 @@ impl Renderer for SceneRenderer {
             slot.uploaded_page = frame.page;
         }
 
-        // Sweep 0 — dependency donors (docs §5.6): render their image-space
-        // composites FIRST, unconditionally (they are invisible by design), so
-        // dependents sample this frame's content. Their passes only write their
-        // own ping-pong/scratch FBOs, never the scene.
         for item in &mut self.items {
             if let SceneItem::Image(object) = item
                 && object.offscreen_donor
@@ -2402,18 +1790,11 @@ impl Renderer for SceneRenderer {
 
         for item in &mut self.items {
             match item {
-                // Donors drew in sweep 0; a script may have hidden this object
-                // this frame (V6: skip its whole pass chain — zero GPU work).
-                // Also skip when any ancestor group/image is hidden (§7.1).
                 SceneItem::Image(object)
                     if object.offscreen_donor
                         || !object.visible
                         || !ancestors_visible(parent_by_id, visible_by_id, object.parent) => {}
                 SceneItem::Image(object) => {
-                    // Post-process layers sample `_rt_FullFrameBuffer`: snapshot
-                    // the composite-so-far so the read never aliases the write
-                    // (docs §11 shadow-copy; the copy sees every earlier object
-                    // because encoder passes run in order).
                     if object.reads_scene
                         && let Some(snap_tex) = snap_tex
                     {
@@ -2441,8 +1822,6 @@ impl Renderer for SceneRenderer {
                         parallax,
                     );
                 }
-                // A script hid the system (or an ancestor group): no sim, no
-                // draw — matching the reference's invisible-object skip.
                 SceneItem::Particle(pg)
                     if !pg.visible
                         || !ancestors_visible(
@@ -2451,11 +1830,6 @@ impl Renderer for SceneRenderer {
                             parent_by_id.get(&pg.id).copied().flatten(),
                         ) => {}
                 SceneItem::Particle(pg) => {
-                    // Advance the CPU sim, refill the shared scratch (no realloc
-                    // once warm — SPEC.md §V5), upload + draw instanced sprites.
-                    // Cursor-bound control points (`locktopointer`): surface
-                    // pointer [0,1] → scene pixels → this system's local
-                    // y-up space (same convention as its model matrix).
                     if pg.sim.follows_pointer() {
                         pg.sim.set_pointer_local([
                             pointer_scene[0] - pg.origin[0],
@@ -2482,8 +1856,6 @@ impl Renderer for SceneRenderer {
                         extras::draw_text(&mut encoder, tp, tg, scene_view);
                     }
                 }
-                // A script may hide the model this frame (V6: skip entirely) —
-                // directly, or by hiding an ancestor group.
                 SceneItem::Model(mg)
                     if !mg.visible
                         || !ancestors_visible(
@@ -2492,9 +1864,6 @@ impl Renderer for SceneRenderer {
                             parent_by_id.get(&mg.id).copied().flatten(),
                         ) => {}
                 SceneItem::Model(mg) => {
-                    // REFLECTION meshes sample `_rt_FullFrameBuffer`: snapshot the
-                    // composite-so-far first so the read never aliases the write
-                    // (docs §6/§11 shadow-copy; `CModel::render` blits the scene).
                     if mg.reads_scene
                         && let Some(snap_tex) = snap_tex
                     {
@@ -2504,8 +1873,6 @@ impl Renderer for SceneRenderer {
                             copy_extent,
                         );
                     }
-                    // The model needs a depth buffer; it is always allocated when
-                    // the scene has a model item (built above). Skip defensively.
                     if let Some(depth_view) = self.model_depth.as_ref() {
                         let aspect = if self.proj_h > 0 {
                             self.proj_w as f32 / self.proj_h as f32
@@ -2534,26 +1901,15 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        // Stage 1b2: script-created runtime layers (visualizer bars) — solid
-        // translucent quads on top of the composite, transforms in the same
-        // JSON→scene→NDC space as scene_quad_verts.
         if self.runtime_layers.values().any(|l| l.visible && l.alpha > 0.0) {
             let (sw, sh) = (self.proj_w as f32, self.proj_h as f32);
             let mut verts: Vec<f32> = Vec::with_capacity(self.runtime_layers.len() * 48);
-            // Batches: consecutive z-order runs sharing one texture, so bars
-            // (all one sprite) stay a single draw and ordering is preserved.
             let mut batches: Vec<(std::sync::Arc<super::texture::GpuTexture>, u32, u32)> = Vec::new();
-            // Draw in z-order, not HashMap order: creation sequence by default,
-            // `sortLayer` overrides (the vertex append order *is* the composite
-            // order — later quads alpha-blend over earlier ones).
             for id in runtime_draw_order(&self.runtime_layers) {
                 let l = &self.runtime_layers[&id];
                 if !l.visible || l.alpha <= 0.0 {
                     continue;
                 }
-                // A script may parent a runtime layer under a scene group
-                // (`setParent`); the reference gates every object by its
-                // ancestors' visibility (docs §7.1), so gate the bars too.
                 if !ancestors_visible(
                     &self.parent_by_id,
                     &self.visible_by_id,
@@ -2563,8 +1919,6 @@ impl Renderer for SceneRenderer {
                 }
                 let cx = l.origin[0] - sw / 2.0;
                 let cy = l.origin[1] - sh / 2.0;
-                // The script's scale multiplies the sprite's natural size,
-                // exactly as the reference scales the created image object.
                 let (hw, hh) = (
                     l.scale[0] * l.base_size[0] / 2.0,
                     l.scale[1] * l.base_size[1] / 2.0,
@@ -2672,14 +2026,10 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        // Stage 1c: camera bloom — glow the composited scene in place (docs §5),
-        // so the blit below picks up the bloomed result unchanged. Bloom always
-        // keeps the snapshot alive (the gate at build includes `bloom.is_some()`).
         if let (Some(bloom), Some(snap)) = (&self.bloom, &self.scene_snapshot) {
             bloom.run(&mut encoder, &self.scene_fbo, snap);
         }
 
-        // Stage 2: blit the scene FBO to the surface (docs §2.5).
         {
             let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("kirie-scene-blit"),
@@ -2705,20 +2055,10 @@ impl Renderer for SceneRenderer {
         self.queue.submit(Some(encoder.finish()));
     }
 
-    /// Live `setProperty` (doc §4.9): parse `value` to the property's declared
-    /// type, update the bag, then re-resolve the affected shader parameters,
-    /// camera fov and general (bloom/ambient/skylight/clearcolor) in place — all
-    /// read per-frame, so the next frame shows the change with no rebuild.
-    ///
-    /// Object visibility/transform bindings are not yet re-resolved live (they
-    /// still apply on the next scene load); the render-uniform properties users
-    /// tweak (colors, shader constants, fov, bloom) are covered.
     fn set_property(&mut self, key: &str, value: &str) -> kirie_platform::PropertyImpact {
         if !self.bag.set_from_str(key, value) {
-            // unknown key or unparseable — nothing changed
             return kirie_platform::PropertyImpact::Live;
         }
-        // Material constants → shader params (the bulk: colors, hue, coloring…).
         for item in &mut self.items {
             if let SceneItem::Image(o) = item {
                 for pass in &mut o.passes {
@@ -2731,15 +2071,10 @@ impl Renderer for SceneRenderer {
                 }
             }
         }
-        // Camera fov (model perspective, rebuilt each frame from camera.fov).
         self.camera.reresolve(&self.bag);
-        // Keep the script snapshot's fov current: camera scripts echo
-        // `getCameraTransforms().fov` back every tick, and a stale snapshot
-        // would overwrite this property change on the next frame.
         if let Some(host) = self.script.as_mut() {
             host.set_scene_fov(self.camera.fov.value);
         }
-        // General: ambient / skylight / clearcolor + bloom, all read per-frame.
         self.general.resolve(&self.bag);
         self.ambient = [
             self.general.ambientcolor.value[0],
@@ -2765,11 +2100,6 @@ impl Renderer for SceneRenderer {
                 self.general.bloomthreshold.value,
             );
         }
-        // Object/image visibility bindings (x-ray combos, layer toggles):
-        // every chain is built regardless of visibility, so re-resolving the
-        // retained bindings and flipping the runtime flags IS the whole
-        // change — the draw loop skips hidden chains per frame like the
-        // reference's CImage::render visibility check. No rebuild.
         for vb in &mut self.visibility_bindings {
             kirie_scene::resolve::resolve_us(&mut vb.base, &self.bag);
             let mut vis = vb.base.value;
@@ -2786,9 +2116,6 @@ impl Renderer for SceneRenderer {
                 }
             }
         }
-        // Script-driven properties (a SceneScript's `applyUserProperties` — e.g. a
-        // `coloring` combo that recolors the scene, or a layer-switcher combo):
-        // fire the change handler and apply its typed updates live (docs §5.3).
         let value = self.bag.get(key).cloned();
         let updates = match (self.script.as_mut(), value.as_ref()) {
             (Some(script), Some(v)) => script.apply_user_property(key, v),
@@ -2801,18 +2128,12 @@ impl Renderer for SceneRenderer {
                 self.visible_by_id.insert(u.object_id, *v);
             }
         }
-        // A change handler may also create layers / drive the camera / reorder
-        // — the same scene-op drain as the per-frame tick.
         self.apply_script_scene_ops();
         if !updates.is_empty() {
             apply_runtime_updates(&mut self.runtime_layers, &updates);
             apply_script_updates(&mut self.items, &updates);
             self.apply_image_transforms(&updates);
         }
-        // Effect-visibility divergence: the chain physically lacks (or still
-        // contains) passes the new value wants. The object-level flip above
-        // already applied live, so the rebuild is a quiet background
-        // alignment, not the visible switch.
         let mut effect_diverged = false;
         for eb in &mut self.effect_vis_bindings {
             kirie_scene::resolve::resolve_us(&mut eb.us, &self.bag);
@@ -2827,8 +2148,6 @@ impl Renderer for SceneRenderer {
         }
     }
 
-    /// Platform-fed pointer (T26): drives `g_PointerPosition*`, camera parallax
-    /// and SceneScript `pointer_screen` on the following frames.
     fn set_pointer(&mut self, x: f32, y: f32) {
         self.pointer = [x, y];
     }
@@ -2838,13 +2157,6 @@ impl Renderer for SceneRenderer {
     }
 }
 
-// ---- helpers ---------------------------------------------------------------
-
-/// Solid translucent pipeline for runtime layers: NDC position + straight RGBA
-/// per vertex, standard alpha blend into the RGBA16F scene FBO.
-/// The material appearance a script-created layer draws with, pre-built from
-/// the model path its `createLayer` call names (see
-/// [`collect_runtime_templates`]).
 struct RuntimeTemplate {
     texture: Option<std::sync::Arc<super::texture::GpuTexture>>,
     tint: [f32; 3],
@@ -2852,14 +2164,6 @@ struct RuntimeTemplate {
     size: [f32; 2],
 }
 
-/// Scan every script source in the scene for `createLayer('path')` literals
-/// and pre-build each named model's material: sprite texture, and the
-/// material's `color`/`Alpha` constants resolved through the user's project
-/// properties. The reference builds these layers as full image objects at
-/// runtime; kirie draws them as textured tinted quads, which covers the
-/// visualizer-bar pattern these scripts exist for — but only if the material
-/// is resolved, otherwise every bar renders as a default white block no
-/// matter what the user configured.
 fn collect_runtime_templates(
     model: &SceneModel,
     source: &dyn AssetSource,
@@ -2868,10 +2172,6 @@ fn collect_runtime_templates(
 ) -> std::collections::HashMap<String, RuntimeTemplate> {
     use kirie_scene::user::UserSetting;
 
-    // Each entry: the literal path plus the script's workshop id, because the
-    // reference resolves a script's relative asset paths under
-    // `<kind>/workshop/<__workshopId>/…` — the literal alone often names a
-    // file that only exists in that remapped location.
     let mut paths: std::collections::HashSet<(String, Option<String>)> = std::collections::HashSet::new();
     let mut scan = |script: &Option<kirie_scene::user::ScriptBinding>| {
         let Some(b) = script else { return };
@@ -2957,8 +2257,6 @@ fn collect_runtime_templates(
 
     let mut out = std::collections::HashMap::new();
     for (path, wid) in paths {
-        // Literal first, then the workshop-remapped spelling
-        // (`models/X` → `models/workshop/<id>/X`).
         let remapped = wid.as_ref().and_then(|w| {
             path.split_once('/')
                 .map(|(kind, rest)| format!("{kind}/workshop/{w}/{rest}"))
@@ -3059,7 +2357,6 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     });
     device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
         label: Some("kirie-runtime-layer-pipeline"),
-        // Auto layout: one texture+sampler group, derived from the shader.
         layout: None,
         vertex: wgpu::VertexState {
             module: &module,
@@ -3105,16 +2402,9 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
     })
 }
 
-/// Apply a frame's SceneScript property updates to the live image objects
-/// (docs/scripting-api.md §5.1/§8). Only the fields flowing into per-object
-/// builtin uniforms (`alpha`/`brightness`/`color`) and visibility are driven;
-/// text/transform targets are tracked in the script layer snapshot but not
-/// composited here (see [`super::scripting`] module docs).
 fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
     for u in updates {
         for item in items.iter_mut() {
-            // Rate lands on particle items; visibility on every kind; the
-            // rest on image objects.
             if let SceneItem::Particle(pg) = item {
                 if pg.id == u.object_id {
                     match u.target {
@@ -3150,8 +2440,6 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                                 mg.visible = *v;
                             }
                         }
-                        // The model matrix is rebuilt from these fields every
-                        // draw, so writes are live next frame.
                         PropTarget::Origin => {
                             if let Some(v) = as_vec3(&u.value) {
                                 mg.set_origin(v);
@@ -3202,8 +2490,6 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                         object.parallax_depth = [v[0], v[1]];
                     }
                 }
-                // Text handled by the text pipeline; transforms handled by
-                // `apply_image_transforms` and `apply_runtime_updates`.
                 PropTarget::Text
                 | PropTarget::Origin
                 | PropTarget::Scale
@@ -3214,20 +2500,12 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
     }
 }
 
-/// Runtime-layer draw order for Stage 1b2, bottom → top: the `order` value
-/// (creation sequence, or the script-host layer-order position after a
-/// `sortLayer`), tie-broken toward creation order — synthetic ids descend from
-/// -1000 as layers are created (host.js `__nextSyntheticId--`), so the larger
-/// id was created earlier and draws first.
 fn runtime_draw_order(layers: &std::collections::HashMap<i64, RuntimeLayer>) -> Vec<i64> {
     let mut ids: Vec<i64> = layers.keys().copied().collect();
     ids.sort_by_key(|id| (layers[id].order, std::cmp::Reverse(*id)));
     ids
 }
 
-/// Apply script updates addressed to runtime layers (synthetic ids from
-/// `createLayer`): transform, color, alpha and visibility all drive the solid
-/// quad drawn for the layer each frame.
 fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLayer>, updates: &[PropUpdate]) {
     use super::scripting::as_vec3;
     for u in updates {
@@ -3273,11 +2551,6 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
     }
 }
 
-/// Draw one image object's pass chain into the scene FBO (docs §7.1): effect
-/// passes ping-pong through the object's image FBOs (clearing each to
-/// transparent), the final pass composites into `scene_view` (`LoadOp::Load`).
-/// Factored out of [`SceneRenderer::render`] so the item loop can borrow the
-/// object mutably while reading the renderer's other fields.
 #[allow(clippy::too_many_arguments)]
 fn draw_image_object(
     encoder: &mut wgpu::CommandEncoder,
@@ -3296,9 +2569,6 @@ fn draw_image_object(
     pointer_last: [f32; 2],
     parallax: ([f32; 2], f32, f32),
 ) {
-    // Camera parallax (CImage.cpp:1173): this layer's scene-space shift is
-    // `(depth + amount) · displacement · scene_width` per axis. Zero whenever
-    // parallax is off (displacement stays zero).
     let (disp, amount, ref_size) = parallax;
     let px = (object.parallax_depth[0] + amount) * disp[0] * ref_size;
     let py = (object.parallax_depth[1] + amount) * disp[1] * ref_size;
@@ -3307,13 +2577,6 @@ fn draw_image_object(
     } else {
         screen_mvp
     };
-    // Animated-atlas frame placement for the layer texture (the reference's
-    // per-pass `resolveTextureAnimationState`, `CPass.cpp:287-306, 348-378`):
-    // `g_Texture0Translation = frame origin / page dims`, `g_Texture0Rotation =
-    // frame axes / page dims`. Only the pass that samples the layer texture
-    // (the first pass — every later pass's texture0 is a composite FBO, which
-    // the reference reports as not-animated) receives the state; SPRITESHEET
-    // shaders remap `v_TexCoord` from it (`genericimage2.vert:99-101`).
     let atlas_anim = object.atlas.as_ref().map(|a| {
         let f = a.placement_at(elapsed);
         (f.translation, f.axes)
@@ -3323,33 +2586,11 @@ fn draw_image_object(
             (0, Some((t, r))) => (*t, *r),
             _ => ([0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
         };
-        // Per-frame builtins for this pass.
         let mvp = match pass.geometry {
-            // Scene-space geometry (flat quad or scene-space puppet mesh) maps
-            // through the screen MVP; a copy-space puppet mesh maps through the
-            // image's own ortho model matrix into its copy FBO; copy/pass quads
-            // are already in NDC.
             Geometry::Scene | Geometry::Puppet => parallax_mvp,
             Geometry::PuppetCopy => pass.model_matrix,
             Geometry::Copy | Geometry::Pass => matrix::IDENTITY,
         };
-        // Shaders unprojecting the pointer (xray: `mul(ndc, MVPInverse)` then
-        // `× 1/g_Texture0Resolution`) need the REFERENCE's inverse per pass
-        // kind (CImage.cpp:826-830, 848-859, 1163-1180):
-        // - Scene/Puppet (final pass drawn to scene): the reference's
-        //   `m_modelViewProjectionScreenInverse = inverse(proj·lookAt·rotModel)`
-        //   where rotModel only rotates about the quad's scene center — size
-        //   and origin live in the vertices there just like kirie's baked
-        //   scene quad. So: `inverse(parallax_mvp × rot_about_center)`.
-        //   (The old `× pass.model_matrix` multiplied in the COPY ortho, which
-        //   is not a local→scene transform — it broke every pointer
-        //   unprojection, e.g. the xray reveal never appearing.)
-        // - Copy (first pass into the image FBO): `inverse(ortho(0,w,0,h))` =
-        //   the NDC → image-pixel map (CImage.cpp:388-390).
-        // - Pass (mid-chain effect quads and fullscreen passthrough): the
-        //   reference's `m_modelViewProjectionPass` is identity, so its
-        //   inverse is identity — `None` falls back to `inverse(mvp)` with
-        //   the identity Pass MVP.
         let mvp_inverse = match pass.geometry {
             Geometry::Scene | Geometry::Puppet => {
                 let rot = if object.angle_z != 0.0 {
@@ -3367,8 +2608,8 @@ fn draw_image_object(
                 let (tw, th) = (pass.tex_resolution[0][0], pass.tex_resolution[0][1]);
                 (tw > 0.0 && th > 0.0).then(|| {
                     let mut m = matrix::IDENTITY;
-                    m[0] = tw / 2.0; // x: (ndc+1)·w/2
-                    m[5] = th / 2.0; // y: (ndc+1)·h/2
+                    m[0] = tw / 2.0;
+                    m[5] = th / 2.0;
                     m[12] = tw / 2.0;
                     m[13] = th / 2.0;
                     m
@@ -3395,8 +2636,6 @@ fn draw_image_object(
             texture0_translation: t0_translation,
             texture0_rotation: t0_rotation,
             texture_resolution: pass.tex_resolution,
-            // Live audio bands (mono; Left == Right, filled by `components`).
-            // Silent (zeros) when no capture is running (docs §8.3).
             audio16: audio.map_or([0.0; 16], |a| a.audio16),
             audio32: audio.map_or([0.0; 32], |a| a.audio32),
             audio64: audio.map_or([0.0; 64], |a| a.audio64),
@@ -3442,7 +2681,6 @@ fn draw_image_object(
         rp.set_bind_group(1, &pass.g1_bind, &[]);
         rp.set_vertex_buffer(0, pass.vertex_buffer.slice(..));
         if let Some(indices) = &pass.puppet_indices {
-            // Puppet base pass: deformable mesh as an indexed triangle list.
             rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..pass.puppet_index_count, 0, 0..1);
         } else {
@@ -3452,44 +2690,15 @@ fn draw_image_object(
     }
 }
 
-/// std140 blit window uniform: scaling UV window + clamp mode + sRGB-cancel.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BlitWindow {
     rect: [f32; 4],
     clamp_mode: u32,
-    /// 1 when the output surface is an sRGB format: the blit sRGB-*decodes* its
-    /// sampled color so wgpu's automatic linear→sRGB encode on store cancels
-    /// out, writing the raw scene-FBO bytes to the surface. This reproduces the
-    /// reference's gamma-naive blit (raw `Rgba16F` → 8-bit default framebuffer,
-    /// no `GL_FRAMEBUFFER_SRGB`; docs/render-architecture.md §2.5, §6). Without
-    /// it the encode brightens the whole frame (clearcolor, shader output, and
-    /// every layer) and tanks SSIM against the oracle.
     srgb: u32,
     _pad: [u32; 2],
 }
 
-/// The scene screen view-projection for the 2D compositor — the reference's
-/// `Camera::setOrthogonalProjection` + `lookAt` pair (`Camera.cpp:76-91`:
-/// `ortho(-w/2..w/2, -h/2..h/2, 0, max(farz, 1000))`, then
-/// `projection = translate(projection, eye)`; `Camera.cpp:14`:
-/// `lookat = lookAt(eye, center, up)`; every image/text draw uses
-/// `projection * lookat`), **conjugated by the Y-mirror**.
-///
-/// The conjugation is the X/Y camera-tilt port: the reference composites in a
-/// Y-mirrored GL space and presents the frame vertically flipped
-/// (`WaylandOutput.cpp:34` `renderVFlip = true`; see the text
-/// `scene_space_quad` note in `extras.rs`), while kirie builds Y-up geometry
-/// and presents unflipped. Feeding the reference matrix `M` to mirrored
-/// vertices is only correct when `M` commutes with the mirror `F =
-/// diag(1,-1,1)` — true for the corpus-dominant centered camera (eye/center on
-/// the z-axis, up `+Y`, where the folded eye and the lookAt translation cancel
-/// and flat z=0 layers map straight through the ortho), but wrong for an
-/// off-axis eye/center: a vertical tilt (an `eye→center` Y displacement
-/// rotating about X) would bend the scene the mirrored way. `F · M · F`
-/// re-expresses the camera in kirie's space — X tilt (rotation about Y, xz
-/// terms) is mirror-even and unchanged; Y tilt and camera roll pick up the
-/// correctly-signed direction.
 fn screen_camera_mvp(proj: (u32, u32), eye: [f32; 3], center: [f32; 3], up: [f32; 3], farz: f32) -> Mat4 {
     let far = farz.max(1000.0);
     let ortho = matrix::ortho(
@@ -3507,8 +2716,6 @@ fn screen_camera_mvp(proj: (u32, u32), eye: [f32; 3], center: [f32; 3], up: [f32
     matrix::mul(&flip, &matrix::mul(&reference, &flip))
 }
 
-/// Compute the scene projection size (docs §5): explicit ortho size, else an
-/// auto size from image extents, else the output size.
 fn projection_size(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     match model.scene.camera.projection {
         Projection::Orthogonal { width, height } if width > 0 && height > 0 => (width as u32, height as u32),
@@ -3516,13 +2723,6 @@ fn projection_size(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     }
 }
 
-/// Auto projection: `2 × max(|origin| + size/2)` over image objects
-/// (docs §5, `CScene.cpp:44-75`); when there are no image extents (pure-3D
-/// scenes like Starscape) the reference falls back to the OUTPUT size
-/// (CScene.cpp:70 `getStableOutputSize`) — a fixed 1080p here renders the
-/// whole scene into an undersized FBO that upscales blurrily/pixelated on
-/// larger outputs. 1920×1080 remains only as the last resort when the output
-/// size is unknown (headless capture before configure).
 fn auto_projection(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     let mut ext_w = 0.0f32;
     let mut ext_h = 0.0f32;
@@ -3545,7 +2745,6 @@ fn auto_projection(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     }
 }
 
-/// The base material's first-pass texture-slot-0 name (docs §7.1), if any.
 fn base_layer_name(image: &ImageObject) -> Option<String> {
     image
         .material
@@ -3555,15 +2754,10 @@ fn base_layer_name(image: &ImageObject) -> Option<String> {
         .and_then(|slot| slot.clone())
 }
 
-/// Whether a texture name refers to the scene FBO (`_rt_FullFrameBuffer` or its
-/// mip alias) — a post-process layer's read of the composite-so-far (docs §6).
 pub(super) fn is_scene_rt(name: &str) -> bool {
     name == "_rt_FullFrameBuffer" || name == "_rt_MipMappedFrameBuffer"
 }
 
-/// The base layer texture: the base material's first pass, texture slot 0
-/// (docs §7.1). White when absent or when the slot is an FBO reference (the
-/// scene-FBO case is handled by the snapshot in [`build_object`]).
 fn base_layer_texture(
     image: &ImageObject,
     source: &dyn AssetSource,
@@ -3575,8 +2769,6 @@ fn base_layer_texture(
     }
 }
 
-/// A 4-vertex triangle-strip fullscreen NDC quad (TL, BL, TR, BR) with uv
-/// `0..ucrop × 0..vcrop`.
 fn ndc_quad(ucrop: f32, vcrop: f32) -> [[f32; 5]; 4] {
     [
         [-1.0, 1.0, 0.0, 0.0, 0.0],
@@ -3586,9 +2778,6 @@ fn ndc_quad(ucrop: f32, vcrop: f32) -> [[f32; 5]; 4] {
     ]
 }
 
-/// A single object's local 2D transform, used to compose the parent chain
-/// (docs §7.3). Only translation/scale/Z-rotation participate — the corpus's
-/// group transforms are planar.
 #[derive(Clone, Copy)]
 struct LocalXf {
     origin: [f32; 2],
@@ -3597,17 +2786,9 @@ struct LocalXf {
     parent: Option<i64>,
 }
 
-/// A composed world transform `(origin, scale, angle_z)` in JSON pixel space
-/// (Y-down), ready for [`scene_space_quad`].
 type WorldXf = ([f32; 2], [f32; 2], f32);
 
-/// Compose an object's world transform by walking its parent chain root-first
-/// (docs §7.3): each level applies its own scale + Z-rotation + translation to
-/// the accumulated frame. A missing/dangling parent stops the walk; a cycle is
-/// capped (SPEC.md §V9). Top-level objects (no parent) return their own local
-/// transform unchanged, so unparented layers render exactly as before.
 fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
-    // Collect node → … → root.
     let mut chain: Vec<LocalXf> = Vec::new();
     let mut cur = Some(id);
     for _ in 0..64 {
@@ -3619,7 +2800,6 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     let (mut ox, mut oy) = (0.0f32, 0.0f32);
     let (mut sx, mut sy) = (1.0f32, 1.0f32);
     let mut ang = 0.0f32;
-    // Apply root → node so a parent's transform frames its children.
     for l in chain.iter().rev() {
         let (lx, ly) = (l.origin[0] * sx, l.origin[1] * sy);
         let (s, c) = ang.sin_cos();
@@ -3632,7 +2812,6 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     ([ox, oy], [sx, sy], ang)
 }
 
-/// The scene-space quad for an image (docs §7.1): centered Y-up scene coords.
 fn scene_space_quad(
     origin: [f32; 2],
     size: (u32, u32),
@@ -3641,19 +2820,11 @@ fn scene_space_quad(
     scene: (u32, u32),
 ) -> [[f32; 5]; 4] {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
-    // Scaled half-extents (docs §7.1: the quad is built at the scaled size).
     let hw = size.0 as f32 / 2.0 * scale[0];
     let hh = size.1 as f32 / 2.0 * scale[1];
-    // Layer center in centered scene space. scene.json origin is Y-UP, so the
-    // prior `sh/2 - origin.y` reflected every off-center layer about the scene
-    // mid-line — masked for Y-centered content, but it flipped e.g. 3428443753's
-    // off-center 男涂鸦 graffiti (origin.y=470) UP over the character's face.
     let cx = origin[0] - sw / 2.0;
     let cy = origin[1] - sh / 2.0;
-    // In-plane rotation about the quad center by the negated Z angle
-    // (CImage.cpp `updateScreenSpacePosition`, docs §7.1).
     let (s, c) = (-angle_z).sin_cos();
-    // Corner offsets in Y-up (top = +hh), matching the UVs below.
     let corner = |dx: f32, dy: f32| [cx + dx * c - dy * s, cy + dx * s + dy * c, 0.0];
     let tl = corner(-hw, hh);
     let bl = corner(-hw, -hh);
@@ -3667,16 +2838,6 @@ fn scene_space_quad(
     ]
 }
 
-/// The blending a pass actually renders with. The base pass of a *loaded*
-/// puppet mesh is forced Translucent — `CImage::setupPasses` does
-/// `pass->setBlendingMode (BlendingMode_Translucent)` on the first pass when
-/// `m_hasPuppetMesh` (`CImage.cpp:832-834`), *after* the §7.1 first→last blend
-/// relocation (`CImage.cpp:789-795`) already set it to Normal. The force is
-/// applied here (not in the pure plan) because it is gated on the puppet `.mdl`
-/// actually parsing, exactly like `m_hasPuppetMesh`: a corrupt puppet falls
-/// back to the flat quad *and* keeps the relocated Normal, as the reference
-/// would. Overlapping puppet triangles need it — Normal (replace) would punch
-/// alpha-0 holes where a transparent margin overdraws an opaque texel.
 fn effective_blending(
     is_puppet_base: bool,
     planned: kirie_scene::material::Blending,
@@ -3688,19 +2849,6 @@ fn effective_blending(
     }
 }
 
-/// Interleaved `[x, y, z, u, v]` local-space puppet vertices in the reference's
-/// `updatePuppetPositionBuffer` space (`size/2 ± p`, `CImage.cpp:536-540`). Both
-/// puppet paths upload these same local vertices; only the MVP differs. A
-/// multi-pass character (`Geometry::PuppetCopy`) draws them through the image's
-/// own ortho model matrix into its copy FBO, so the effect chain then processes
-/// the deformed character and the final flat composite places it at the object
-/// origin. A single-pass character (`Geometry::Puppet`) draws them through the
-/// *screen* MVP with no origin translation — exactly the reference's puppet
-/// geometry callback + `m_modelViewProjectionScreen` override (`CImage.cpp:832,
-/// 855-856`), which lands the mesh near the scene center where later objects
-/// occlude it (this is why the fortune-cat in scene 3428443753 is hidden behind
-/// the two characters drawn after it, matching the oracle). UVs are the mesh
-/// UVs, NPOT-cropped like the flat copy quad.
 fn puppet_copy_vertices(
     mesh: &kirie_formats::model::PuppetMesh,
     size: (u32, u32),
@@ -3709,29 +2857,11 @@ fn puppet_copy_vertices(
     let (hw, hh) = (size.0 as f32 / 2.0, size.1 as f32 / 2.0);
     let mut out = Vec::with_capacity(mesh.vertices.len() * 5);
     for v in &mesh.vertices {
-        // `+y` (not the reference's `size/2 - y`): the reference's copy projection
-        // flips clip-space Y for its Y-down FBO, kirie's ortho does not, so the
-        // sign is absorbed here to keep the character upright once the composite
-        // samples the copy FBO through the Y-up scene quad (cf. the model winding
-        // note in `model.rs`).
-        //
-        // Puppet texcoords are used RAW — the reference pushes the mesh's `u,v`
-        // straight into `m_puppetTexCoord` (`CImage.cpp:491-492`) and never applies
-        // the `texcoordCopy = realSize/textureSize` NPOT crop that the flat-quad
-        // copy path uses. The mesh author already baked the atlas-page coordinates
-        // into the UVs, so scaling them by `uv_crop` (~0.99) shifts every sample
-        // ~1% toward the atlas origin, misregistering the character and reading the
-        // transparent margin at feature/alpha boundaries — the girl's "hole over the
-        // eye" that let the LOGO layer behind bleed through (§ girl eye fix).
         out.extend_from_slice(&[hw + v.position[0], hh + v.position[1], 0.0, v.uv[0], v.uv[1]]);
     }
     out
 }
 
-/// Upload a puppet mesh's `u16` triangle-list index buffer (`CImage.cpp:512-514`).
-/// An odd index count is padded with one trailing index so the byte length is a
-/// multiple of wgpu's 4-byte `COPY_BUFFER_ALIGNMENT` (the pad index is never
-/// drawn — the draw range stays at the real count).
 fn create_puppet_index_buffer(
     device: &wgpu::Device,
     mesh: &kirie_formats::model::PuppetMesh,
@@ -3748,23 +2878,10 @@ fn create_puppet_index_buffer(
     )
 }
 
-/// Scale a quad's UV columns (indices 3, 4) into a texture's real sub-rect —
-/// the reference's `texcoordCopy = realSize / textureSize` NPOT-padding crop
-/// (docs §7.1). Base UVs run 0..1; after this they run 0..crop, so sampling the
-/// padded `.tex` page hits only the real image and the padding never composites.
-/// `g_TextureNResolution` value for a texture: `(texW, texH, realW, realH)`,
-/// where `real` is the logical content size — the NPOT header crop for stills,
-/// `gifWidth/gifHeight` for animated atlases — exactly the reference's
-/// `CTexture::setupResolution` (`CTexture.cpp:149-153`; docs/format-tex.md
-/// §8.1). Shaders derive the padding crop as `real/tex`.
 pub(super) fn tex_res(t: &super::texture::GpuTexture) -> [f32; 4] {
     [t.width as f32, t.height as f32, t.real_size[0], t.real_size[1]]
 }
 
-/// Scale a quad's UV columns (indices 3, 4) into a texture's real sub-rect —
-/// the reference's `texcoordCopy = realSize / textureSize` NPOT-padding crop
-/// (docs §7.1). Base UVs run 0..1; after this they run 0..crop, so sampling the
-/// padded `.tex` page hits only the real image and the padding never composites.
 fn apply_uv_crop(verts: &mut [[f32; 5]; 4], crop: [f32; 2]) {
     for v in verts.iter_mut() {
         v[3] *= crop[0];
@@ -3772,8 +2889,6 @@ fn apply_uv_crop(verts: &mut [[f32; 5]; 4], crop: [f32; 2]) {
     }
 }
 
-/// Upload a 4-vertex strip; `with_uv` decides whether the uv columns matter
-/// (they are uploaded regardless — the vertex layout drops them when unused).
 pub(super) fn create_vertex_buffer(
     device: &wgpu::Device,
     verts: &[[f32; 5]; 4],
@@ -3820,9 +2935,6 @@ pub(super) fn create_buffer_init(
     buffer
 }
 
-/// Resolve a stage's material parameters to global-member values by uniform
-/// name (docs §8.3): the pass `constantshadervalues` keyed by the annotation
-/// `material` name, else the annotation default.
 pub(super) fn resolve_params(
     params: &[Parameter],
     pass: &kirie_scene::material::Pass,
@@ -3870,12 +2982,6 @@ fn param_len(p: &Parameter) -> usize {
     }
 }
 
-/// Build a stage bind group from the module's actual `bindings` (ground truth,
-/// so it matches the layout exactly). The UBO fills its slot; each texture /
-/// sampler binding is resolved via the annotated `samplers` (slot 0 = the pass
-/// input; others = named/default), falling back to the white texture and its
-/// sampler for any binding the reflection does not describe (an un-annotated
-/// sampler the shader still declares — docs/render-architecture.md §8.2, §8.5).
 #[allow(clippy::too_many_arguments)]
 pub(super) fn build_bind_group(
     device: &wgpu::Device,
@@ -3891,9 +2997,6 @@ pub(super) fn build_bind_group(
     scene: (&wgpu::TextureView, &wgpu::Sampler),
     named: &std::collections::HashMap<&str, (&wgpu::TextureView, &wgpu::Sampler)>,
 ) -> wgpu::BindGroup {
-    // How a sampler slot resolves: the pass input, the scene snapshot (a
-    // `_rt_FullFrameBuffer` read), a named effect/composite FBO (§11.2 `bind`),
-    // or a concrete uploaded texture.
     enum Slot<'a> {
         Input,
         Scene,
@@ -3903,30 +3006,17 @@ pub(super) fn build_bind_group(
     let resolved: Vec<Slot> = samplers
         .iter()
         .map(|slot| {
-            // The bound name for this slot: an authored/bind texture override, or
-            // the annotation default. A named FBO / composite / `previous` bind
-            // wins over the slot-0 input default so a combine pass samples the
-            // real prior output rather than the 1×1 white (§11.2).
             let name = slot
                 .slot
                 .and_then(|i| pass.textures.get(i as usize))
                 .and_then(|s| s.clone())
                 .or_else(|| slot.default_texture.clone());
-            // A named FBO / composite / `previous` bind overrides any slot,
-            // including slot 0, so a combine pass reads the right scratch buffer.
             if let Some(hit) = name.as_deref().and_then(|n| named.get(n)) {
                 return Slot::Named(*hit);
             }
-            // A `_rt_FullFrameBuffer` name resolves to the scene snapshot on
-            // any slot, slot 0 included (a `command:"copy"` source may be the
-            // scene): the reference resolves FBO names before falling back to
-            // the pass input (`CPass.cpp` name-based texture resolution). For
-            // the base pass this is the same view the Input arm binds.
             if name.as_deref().is_some_and(is_scene_rt) {
                 return Slot::Scene;
             }
-            // Slot 0 otherwise samples the pass input view (the layer texture or
-            // composite front), whose contents already are slot 0's texture.
             if slot.slot == Some(0) {
                 return Slot::Input;
             }
@@ -3945,8 +3035,6 @@ pub(super) fn build_bind_group(
         let resource = match mb.kind {
             BindKind::Ubo => match ubo {
                 Some(u) => u.as_entire_binding(),
-                // The layout only declares a UBO when the module does, so this
-                // is unreachable; skip defensively rather than panic (§V9).
                 None => continue,
             },
             BindKind::Texture => {
@@ -3986,7 +3074,6 @@ pub(super) fn build_bind_group(
     })
 }
 
-/// Build the final blit pipeline sampling the scene FBO through a UV window.
 fn build_blit(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
@@ -4088,9 +3175,6 @@ fn build_blit(
     (pipeline, bind, window)
 }
 
-/// The final-blit shader: fullscreen strip sampling the scene FBO through the
-/// scaling UV window (docs §2.5, §4). Clamp mode 0 = clamp, 1 = border
-/// (transparent black), 2 = repeat.
 const BLIT_WGSL: &str = r#"
 struct Window { rect: vec4<f32>, clamp_mode: u32, srgb: u32, _p1: u32, _p2: u32 }
 @group(0) @binding(0) var<uniform> win: Window;
@@ -4144,13 +3228,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// The `commands/copy` blit vertex shader. The reference registers this pair
-/// in its virtual asset filesystem instead of shipping files
-/// (`WallpaperApplication.cpp:165-182`), so no [`AssetSource`] can resolve
-/// them; ported verbatim to the WE GLSL dialect the shader pipeline consumes
-/// (`attribute`/`varying`, `gl_FragColor`, `texSample2D`). The pass-space NDC
-/// quad (`gl_Position = a_Position`) drawn into the `target` FBO while
-/// sampling the `source` at slot 0 IS the copy (`CImage.cpp:704-718`).
 const COPY_COMMAND_VERT: &str = "\
 attribute vec3 a_Position;\n\
 attribute vec2 a_TexCoord;\n\
@@ -4160,8 +3237,6 @@ gl_Position = vec4(a_Position, 1.0);\n\
 v_TexCoord = a_TexCoord;\n\
 }\n";
 
-/// The `commands/copy` blit fragment shader — samples the `source` FBO the
-/// plan bound at texture slot 0 (`WallpaperApplication.cpp:165-171`).
 const COPY_COMMAND_FRAG: &str = "\
 uniform sampler2D g_Texture0;\n\
 varying vec2 v_TexCoord;\n\
@@ -4173,7 +3248,6 @@ gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n\
 mod tests {
     use super::*;
 
-    /// Transform a point (column vector) by a column-major matrix.
     fn apply(m: &Mat4, p: [f32; 4]) -> [f32; 4] {
         let mut out = [0.0f32; 4];
         for row in 0..4 {
@@ -4184,10 +3258,6 @@ mod tests {
         out
     }
 
-    /// A live `setParent` moves the visibility gating: an object under a
-    /// visible group draws; after reparenting under a hidden group, the
-    /// ancestor walk gates it off (docs §7.1; `layer_set_parent` rewrites the
-    /// data object's `parent`, `ScriptableObjectAdapter.cpp:226-229`).
     #[test]
     fn reparent_moves_visibility_gating() {
         let mut parent_by_id: HashMap<i64, Option<i64>> =
@@ -4199,7 +3269,6 @@ mod tests {
             &visible_by_id,
             start(&parent_by_id)
         ));
-        // The script host emits (3, 2); the renderer rewrites the map.
         parent_by_id.insert(3, Some(2));
         assert!(!ancestors_visible(
             &parent_by_id,
@@ -4208,9 +3277,6 @@ mod tests {
         ));
     }
 
-    /// Runtime layers draw in creation order by default: synthetic ids descend
-    /// from -1000 as layers are created (host.js `__nextSyntheticId--`), and
-    /// creation assigns ascending `order`, so first-created draws first.
     #[test]
     fn runtime_layers_draw_in_creation_order_by_default() {
         let mut layers = std::collections::HashMap::new();
@@ -4226,9 +3292,6 @@ mod tests {
         assert_eq!(runtime_draw_order(&layers), [-1000, -1001, -1002]);
     }
 
-    /// A `sortLayer` renumber overrides creation order; equal orders (never
-    /// produced by the renumber, but reachable via a raw default) tie-break
-    /// toward creation order (larger id first).
     #[test]
     fn runtime_layers_draw_in_sorted_order_after_renumber() {
         let mut layers = std::collections::HashMap::new();
@@ -4244,8 +3307,6 @@ mod tests {
         assert_eq!(runtime_draw_order(&layers), [-1001, -1003, -1002, -1000]);
     }
 
-    /// The reference's raw screen VP (`Camera.cpp:76-91` + `Camera.cpp:14`),
-    /// without kirie's mirror conjugation.
     fn reference_mvp(proj: (u32, u32), eye: [f32; 3], center: [f32; 3], up: [f32; 3]) -> Mat4 {
         let ortho = matrix::ortho(
             -(proj.0 as f32) / 2.0,
@@ -4260,9 +3321,6 @@ mod tests {
 
     #[test]
     fn centered_camera_mvp_is_mirror_invariant() {
-        // The corpus-dominant camera (eye/center on the z-axis, up +Y) is
-        // Y-even, so the conjugation must be a no-op — no regression for
-        // every already-verified scene.
         let (eye, center, up) = ([0.0, 0.0, 1000.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]);
         let conj = screen_camera_mvp((1920, 1080), eye, center, up, 1000.0);
         let plain = reference_mvp((1920, 1080), eye, center, up);
@@ -4273,12 +3331,6 @@ mod tests {
 
     #[test]
     fn tilted_camera_matches_the_flipped_reference() {
-        // An off-axis center tilts the view (rotation about X — the "X/Y
-        // camera tilt"). The reference draws GL-space vertices vR under its
-        // raw MVP and presents the frame vertically flipped
-        // (WaylandOutput.cpp:34); kirie draws the mirrored vertex F·vR under
-        // the conjugated MVP and presents unflipped. Both must land every
-        // point on the same clip position: conj · (F·vR) == F_ndc · (ref · vR).
         let (eye, center, up) = ([0.0, 0.0, 1000.0], [0.0, 300.0, 0.0], [0.0, 1.0, 0.0]);
         let conj = screen_camera_mvp((1920, 1080), eye, center, up, 1000.0);
         let reference = reference_mvp((1920, 1080), eye, center, up);
@@ -4294,8 +3346,6 @@ mod tests {
                 assert!((a - b).abs() < 1e-4, "clip {i}: {a} vs {b} for {v:?}");
             }
         }
-        // And the conjugation has teeth here: the unconjugated matrix would
-        // send off-center points to the mirrored (wrong-signed) tilt.
         let p = [0.0f32, 200.0, 0.0, 1.0];
         let old = apply(&reference, p);
         let new = apply(&conj, p);
@@ -4304,9 +3354,6 @@ mod tests {
 
     #[test]
     fn puppet_base_forces_translucent_blending() {
-        // `CImage.cpp:832-834`: a loaded puppet's first pass is forced
-        // Translucent regardless of what relocation/material left there; every
-        // other pass keeps its planned blending.
         use kirie_scene::material::Blending;
         for planned in [Blending::Normal, Blending::Translucent, Blending::Additive] {
             assert_eq!(effective_blending(true, planned), Blending::Translucent);
@@ -4316,10 +3363,6 @@ mod tests {
 
     #[test]
     fn embedded_copy_command_shader_translates() {
-        // The `commands/copy` pair never touches an asset container, so a
-        // translation regression would silently drop every copy pass (§V9
-        // skip). Translate both stages exactly as `pipeline::build_pass` does
-        // (CPU-only; no GPU device involved).
         struct NoIncludes;
         impl IncludeResolver for NoIncludes {
             fn resolve(&self, _: &str) -> Option<String> {
@@ -4347,16 +3390,12 @@ mod tests {
 
     #[test]
     fn uv_crop_scales_only_uv_columns_into_real_subrect() {
-        // A page padded to 2× the real height (v_crop = 0.5) must map the base
-        // 0..1 V range into 0..0.5 so the padding below never samples (docs §7.1
-        // texcoordCopy = realSize/textureSize). X/Y/Z position columns untouched.
         let mut q = scene_space_quad([960.0, 540.0], (1920, 1080), [1.0, 1.0], 0.0, (1920, 1080));
         let pos_before: Vec<[f32; 3]> = q.iter().map(|v| [v[0], v[1], v[2]]).collect();
         apply_uv_crop(&mut q, [0.9375, 0.5]);
         for (v, p) in q.iter().zip(&pos_before) {
             assert_eq!([v[0], v[1], v[2]], *p, "position columns must not move");
         }
-        // Corner UVs: (0,0),(0,1),(1,0),(1,1) -> scaled by crop.
         assert_eq!([q[0][3], q[0][4]], [0.0, 0.0]);
         assert_eq!([q[1][3], q[1][4]], [0.0, 0.5]);
         assert_eq!([q[2][3], q[2][4]], [0.9375, 0.0]);

@@ -1,7 +1,3 @@
-//! Full command-matrix integration tests over a real unix socket
-//! (docs/compat-socket.md; expected bytes cross-checked against
-//! fixtures/socket-live-capture.txt where the live capture covers them).
-
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::ffi::OsStrExt;
@@ -17,13 +13,8 @@ use kirie_ipc::{
     StatusSnapshot,
 };
 
-/// The live-captured workshop item path (fixtures/socket-live-capture.txt).
 const LIVE_BG: &str = "/home/aiko/.local/share/Steam/steamapps/workshop/content/431960/3047596375";
 
-// ---------------------------------------------------------------------------
-// harness
-
-/// Unique per-test temp dir (no external tempdir crate in the workspace).
 struct TempDir(PathBuf);
 
 impl TempDir {
@@ -43,24 +34,14 @@ impl Drop for TempDir {
     }
 }
 
-/// Mock app loop: owns the "engine state" (speed + screens), captures every
-/// delivered command, and answers fallible commands via `on_command`
-/// (SPEC V3: everything crosses via channels; the snapshot is built fresh
-/// per status request).
 struct MockApp {
     screens: Vec<ScreenStatus>,
     on_command: Box<dyn FnMut(&Command) -> CommandOutcome + Send>,
-    /// How long the fake app takes to answer a `workshop` request — the real
-    /// one waits on Steam, so a test needs to be able to be slow.
     workshop_delay: Duration,
 }
 
 impl MockApp {
     fn doc_semantics() -> Self {
-        // Default oracle mirroring doc §4: bg fails on paths under /bad,
-        // property fails for key "nosuchkey123" (doc §9 live capture),
-        // scaling/clamp fail for unregistered screens, screenshot fails on
-        // an empty path.
         Self {
             screens: vec![ScreenStatus {
                 screen: "HDMI-A-1".into(),
@@ -79,30 +60,17 @@ impl MockApp {
         }
     }
 
-    /// Spawn the app loop; returns the captured-command stream. The loop
-    /// exits when the server (sole sender) drops the event channel.
     fn spawn(mut self, rx: Receiver<IpcEvent>) -> (JoinHandle<()>, Receiver<Command>) {
         let (cap_tx, cap_rx) = unbounded();
         let handle = thread::spawn(move || {
             let mut speed = 1.0f32;
-            // Post-override property store, keyed by name (docs/compat-socket.md
-            // §4.9 records the override; §11 reads it back).
             let mut props: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
             for event in rx {
                 match event {
-                    // Discovery belongs to the app, not the socket layer; the
-                    // fake app under test has nothing installed to report.
                     IpcEvent::List { reply } => {
                         let _ = reply.send("[]".to_owned());
                     }
-                    // The Workshop surface is the app's, and the fake app has
-                    // no Steam: echoing the request back is what lets a test
-                    // assert the parse without a client.
                     IpcEvent::Workshop { request, reply } => {
-                        // The real app hands this to a worker thread; so does
-                        // the fake one, because a test that asserts the socket
-                        // stays responsive must not have an app loop that is
-                        // itself blocked.
                         let delay = self.workshop_delay;
                         thread::spawn(move || {
                             thread::sleep(delay);
@@ -116,9 +84,6 @@ impl MockApp {
                         });
                     }
                     IpcEvent::GetProperties { screen: _, reply } => {
-                        // Serialize the recorded overrides as a single-line JSON
-                        // array `[{"key":..,"value":..}, ..]` — the same byte
-                        // shape the real applier emits (docs/compat-socket.md §11).
                         let body: String = props
                             .iter()
                             .map(|(k, v)| format!(r#"{{"key":"{k}","value":"{v}"}}"#))
@@ -172,7 +137,6 @@ impl Server {
         request_at(&self.sock, bytes)
     }
 
-    /// Next captured command (the mock echoes them in delivery order).
     fn captured(&self) -> Command {
         self.captured
             .recv_timeout(Duration::from_secs(5))
@@ -195,8 +159,6 @@ fn connect(sock: &Path) -> UnixStream {
     stream
 }
 
-/// One request/response cycle: write, then read to EOF (doc §2: clients must
-/// read to EOF; the server close ends the response).
 fn request_at(sock: &Path, bytes: &[u8]) -> Vec<u8> {
     let mut stream = connect(sock);
     stream.write_all(bytes).expect("write request");
@@ -205,22 +167,16 @@ fn request_at(sock: &Path, bytes: &[u8]) -> Vec<u8> {
     response
 }
 
-// ---------------------------------------------------------------------------
-// fixed vocabulary + framing (doc §2, §3, §9)
-
 #[test]
 fn ping_pong() {
     let s = Server::start("ping", MockApp::doc_semantics());
     assert_eq!(s.request(b"ping\n"), b"pong\n");
-    // Args after the command token are irrelevant for ping.
     assert_eq!(s.request(b"ping whatever\n"), b"pong\n");
-    // '\r' is stream whitespace for token args (doc §2).
     assert_eq!(s.request(b"ping\r\n"), b"pong\n");
 }
 
 #[test]
 fn ping_without_newline_terminated_by_half_close() {
-    // doc §9 verified live: `printf 'ping'` + EOF → pong\n.
     let s = Server::start("ping-eof", MockApp::doc_semantics());
     let mut stream = connect(&s.sock);
     stream.write_all(b"ping").unwrap();
@@ -232,8 +188,6 @@ fn ping_without_newline_terminated_by_half_close() {
 
 #[test]
 fn ping_without_newline_terminated_by_read_timeout() {
-    // doc §2 step 3: after 50 ms of silence the partial buffer is the
-    // request — no EOF required.
     let s = Server::start("ping-timeout", MockApp::doc_semantics());
     let mut stream = connect(&s.sock);
     stream.write_all(b"ping").unwrap();
@@ -244,32 +198,27 @@ fn ping_without_newline_terminated_by_read_timeout() {
 
 #[test]
 fn second_line_discarded() {
-    // doc §9: `ping\nstatus\n` in one connection → pong\n only.
     let s = Server::start("two-lines", MockApp::doc_semantics());
     assert_eq!(s.request(b"ping\nstatus\n"), b"pong\n");
 }
 
 #[test]
 fn empty_line_gets_zero_response_bytes() {
-    // doc §2 step 5 / §9: bare "\n" → 0 bytes, connection closed.
     let s = Server::start("empty", MockApp::doc_semantics());
     assert_eq!(s.request(b"\n"), b"");
-    // Whitespace-only is NOT empty: command extraction fails → unknown.
     assert_eq!(s.request(b"  \n"), b"unknown command\n");
 }
 
 #[test]
 fn unknown_command() {
     let s = Server::start("unknown", MockApp::doc_semantics());
-    assert_eq!(s.request(b"frobnicate\n"), b"unknown command\n"); // doc §9
-    assert_eq!(s.request(b"PING\n"), b"unknown command\n"); // case-sensitive
-    assert_eq!(s.request(b"quit\n"), b"unknown command\n"); // doc §6: no quit
+    assert_eq!(s.request(b"frobnicate\n"), b"unknown command\n");
+    assert_eq!(s.request(b"PING\n"), b"unknown command\n");
+    assert_eq!(s.request(b"quit\n"), b"unknown command\n");
 }
 
 #[test]
 fn oversized_request_line_is_served() {
-    // doc §2 step 3: no cap on request size other than memory. 1 MiB path
-    // must arrive intact at the app.
     let s = Server::start("oversized", MockApp::doc_semantics());
     let long = "a".repeat(1024 * 1024);
     let mut line = format!("bg HDMI-A-1 /{long}").into_bytes();
@@ -287,16 +236,13 @@ fn oversized_request_line_is_served() {
 #[test]
 fn half_open_client_times_out_without_blocking_others() {
     let s = Server::start("half-open", MockApp::doc_semantics());
-    // Client A connects and sends nothing (no EOF either).
     let mut idle = connect(&s.sock);
-    // Client B must still be served promptly (A costs the server ≤ 50 ms).
     let started = Instant::now();
     assert_eq!(s.request(b"ping\n"), b"pong\n");
     assert!(
         started.elapsed() < Duration::from_secs(2),
         "idle client stalled the server"
     );
-    // A's connection: empty request → zero response bytes, then EOF.
     let mut response = Vec::new();
     idle.read_to_end(&mut response).unwrap();
     assert_eq!(response, b"");
@@ -304,20 +250,15 @@ fn half_open_client_times_out_without_blocking_others() {
 
 #[test]
 fn late_bytes_after_read_timeout_are_ignored() {
-    // Per-read 50 ms timeout (doc §2): a pause mid-request ends it; the
-    // partial buffer "pi" is the request → unknown command.
     let s = Server::start("late-bytes", MockApp::doc_semantics());
     let mut stream = connect(&s.sock);
     stream.write_all(b"pi").unwrap();
     thread::sleep(Duration::from_millis(150));
-    let _ = stream.write_all(b"ng\n"); // may hit EPIPE; irrelevant
+    let _ = stream.write_all(b"ng\n");
     let mut response = Vec::new();
     stream.read_to_end(&mut response).unwrap();
     assert_eq!(response, b"unknown command\n");
 }
-
-// ---------------------------------------------------------------------------
-// status (doc §4.2, fixtures)
 
 #[test]
 fn status_matches_live_capture_bytes() {
@@ -328,8 +269,6 @@ fn status_matches_live_capture_bytes() {
 
 #[test]
 fn fixture_file_pairs_are_byte_exact() {
-    // A live C++ engine capture: every recorded request must yield the recorded
-    // response bytes (inlined; the standalone capture file was removed).
     let fixture = "\
 === request: status ===
 speed=1
@@ -365,8 +304,6 @@ ok
 
 #[test]
 fn status_multi_screen_ordering_and_empty_bg() {
-    // Screens delivered unsorted; response must be lexicographic by key
-    // bytes ("DP-10" < "DP-2" < "HDMI-A-1"), std::map order (doc §4.2).
     let mock = MockApp {
         workshop_delay: Duration::ZERO,
         screens: vec![
@@ -398,30 +335,19 @@ fn status_reflects_speed_commands() {
     assert_eq!(s.request(b"speed 0.5\n"), b"ok\n");
     let _ = s.captured();
     assert!(s.request(b"status\n").starts_with(b"speed=0.5\n"));
-    // ≤ 0 / non-numeric coerce back to 1 (doc §4.3).
     assert_eq!(s.request(b"speed 0\n"), b"ok\n");
     let _ = s.captured();
     assert!(s.request(b"status\n").starts_with(b"speed=1\n"));
 }
 
-// ---------------------------------------------------------------------------
-// getproperties read-back (docs/compat-socket.md §11, kirie extension)
-
 #[test]
 fn getproperties_reflects_property_overrides_over_the_socket() {
-    // The daemon's list->edit->save->apply loop: push a `property` set, then
-    // read it back with `getproperties`; the current value must reflect the
-    // override (docs/compat-socket.md §11). Response is a single-line JSON
-    // array terminated by exactly one '\n'.
     let s = Server::start("getprops", MockApp::doc_semantics());
-    // Empty schema before any override, byte-clean.
     assert_eq!(s.request(b"getproperties\n"), b"[]\n");
-    // Set two properties (fallible ok on the registered screen).
     assert_eq!(s.request(b"property HDMI-A-1 bloom true\n"), b"ok\n");
     let _ = s.captured();
     assert_eq!(s.request(b"property HDMI-A-1 outline 0.5 0.25 0.75\n"), b"ok\n");
     let _ = s.captured();
-    // Read back: both overrides present, single line + one trailing newline.
     let body = s.request(b"getproperties HDMI-A-1\n");
     assert_eq!(
         body,
@@ -432,15 +358,12 @@ fn getproperties_reflects_property_overrides_over_the_socket() {
             .collect::<Vec<u8>>()
             .as_slice()
     );
-    // Exactly one trailing newline; no embedded newline in the JSON payload.
     assert_eq!(body.iter().filter(|&&b| b == b'\n').count(), 1);
     assert_eq!(body.last(), Some(&b'\n'));
 }
 
 #[test]
 fn getproperties_is_unknown_absent_an_app_arm() {
-    // If the app drops the reply (e.g. shutting down) the read-back yields the
-    // dead-engine signal: zero response bytes (docs/compat-socket.md §3, §11).
     let dir = TempDir::new("getprops-dead");
     let sock = dir.sock();
     let (tx, rx) = unbounded();
@@ -449,12 +372,8 @@ fn getproperties_is_unknown_absent_an_app_arm() {
     assert_eq!(request_at(&sock, b"getproperties\n"), b"");
 }
 
-// ---------------------------------------------------------------------------
-// always-ok commands (doc §4.3-§4.6, §4.8)
-
 #[test]
 fn bare_speed_and_volume_reply_ok_like_live_capture() {
-    // fixtures/socket-live-capture.txt: bare `speed` / `volume` → ok\n.
     let s = Server::start("bare-args", MockApp::doc_semantics());
     assert_eq!(s.request(b"speed\n"), b"ok\n");
     assert_eq!(s.captured(), Command::Speed(1.0));
@@ -466,7 +385,6 @@ fn bare_speed_and_volume_reply_ok_like_live_capture() {
 
 #[test]
 fn volume_is_not_clamped() {
-    // doc §4.4: out-of-range values forwarded as-is.
     let s = Server::start("volume-raw", MockApp::doc_semantics());
     assert_eq!(s.request(b"volume 500\n"), b"ok\n");
     assert_eq!(s.captured(), Command::Volume(500));
@@ -493,12 +411,11 @@ fn set_recognized_keys_ok_unknown_key_error() {
     assert_eq!(s.request(b"set fps 30\n"), b"ok\n");
     assert_eq!(s.captured(), Command::Set(SetOption::Fps(30)));
     assert_eq!(s.request(b"set renderscale 5\n"), b"ok\n");
-    assert_eq!(s.captured(), Command::Set(SetOption::RenderScale(2.0))); // clamped
+    assert_eq!(s.captured(), Command::Set(SetOption::RenderScale(2.0)));
     assert_eq!(s.request(b"set audiodevice default\n"), b"ok\n");
     assert_eq!(s.captured(), Command::Set(SetOption::AudioDevice(String::new())));
     assert_eq!(s.request(b"set disablemouse TRUE\n"), b"ok\n");
-    assert_eq!(s.captured(), Command::Set(SetOption::DisableMouse(false))); // exact-string bool
-    // Unknown key → error\n (doc §4.6); never reaches the app.
+    assert_eq!(s.captured(), Command::Set(SetOption::DisableMouse(false)));
     assert_eq!(s.request(b"set bogus 1\n"), b"error\n");
     assert_eq!(s.request(b"set\n"), b"error\n");
     assert!(s.captured.is_empty(), "rejected set leaked to the app");
@@ -506,8 +423,6 @@ fn set_recognized_keys_ok_unknown_key_error() {
 
 #[test]
 fn preload_replies_ok_even_when_the_app_fails() {
-    // doc §4.8 / ControlSocket.cpp:128-132: ok\n unconditionally, failures
-    // only logged. The mock reports Error; the wire must still say ok.
     let mock = MockApp {
         workshop_delay: Duration::ZERO,
         screens: vec![],
@@ -523,9 +438,6 @@ fn preload_replies_ok_even_when_the_app_fails() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// fallible commands (doc §4.7, §4.9-§4.12)
-
 #[test]
 fn bg_ok_and_error_paths() {
     let s = Server::start("bg", MockApp::doc_semantics());
@@ -538,11 +450,8 @@ fn bg_ok_and_error_paths() {
             path: PathBuf::from(LIVE_BG)
         }
     );
-    // Unloadable path → error\n, prior wallpaper keeps running (doc §7).
     assert_eq!(s.request(b"bg HDMI-A-1 /bad/dir\n"), b"error\n");
     let _ = s.captured();
-    // No screen-name validation in the engine (doc §4.7): bogus screen with
-    // a loadable path still returns ok.
     assert_eq!(s.request(b"bg BOGUS /w/fine\n"), b"ok\n");
     assert_eq!(
         s.captured(),
@@ -551,7 +460,6 @@ fn bg_ok_and_error_paths() {
             path: PathBuf::from("/w/fine")
         }
     );
-    // Path with spaces survives rest-of-line extraction (doc §2).
     assert_eq!(s.request(b"bg HDMI-A-1 /w/dir with spaces\n"), b"ok\n");
     assert_eq!(
         s.captured(),
@@ -565,7 +473,6 @@ fn bg_ok_and_error_paths() {
 #[test]
 fn property_ok_error_and_value_fidelity() {
     let s = Server::start("property", MockApp::doc_semantics());
-    // doc §4.9 example corpus values.
     assert_eq!(s.request(b"property HDMI-A-1 bloom true\n"), b"ok\n");
     assert_eq!(
         s.captured(),
@@ -575,7 +482,6 @@ fn property_ok_error_and_value_fidelity() {
             value: "true".into()
         }
     );
-    // Color triple: value is rest-of-line WITH spaces, delivered intact.
     assert_eq!(
         s.request(b"property HDMI-A-1 outline 0.36585 0.04268 0.43902\n"),
         b"ok\n"
@@ -588,7 +494,6 @@ fn property_ok_error_and_value_fidelity() {
             value: "0.36585 0.04268 0.43902".into(),
         }
     );
-    // doc §9 verified live: undeclared key → error\n.
     assert_eq!(s.request(b"property HDMI-A-1 nosuchkey123 1\n"), b"error\n");
 }
 
@@ -603,11 +508,8 @@ fn scaling_and_clamp_modes_and_errors() {
             mode: ScalingMode::Fill
         }
     );
-    // doc §9 verified live: bogus mode → error\n, and it must NOT reach the
-    // app (nothing stored, doc §4.10).
     assert_eq!(s.request(b"scaling HDMI-A-1 bogusmode\n"), b"error\n");
     assert!(s.captured.is_empty(), "invalid scaling mode leaked to the app");
-    // Valid mode + unregistered screen → app-side error (doc §4.10).
     assert_eq!(s.request(b"scaling DP-9 fit\n"), b"error\n");
     assert_eq!(
         s.captured(),
@@ -639,34 +541,25 @@ fn screenshot_ok_and_empty_path_error() {
             path: PathBuf::from("/tmp/kirie test.png")
         }
     );
-    assert_eq!(s.request(b"screenshot\n"), b"error\n"); // doc §4.12
+    assert_eq!(s.request(b"screenshot\n"), b"error\n");
 }
-
-// ---------------------------------------------------------------------------
-// lifecycle + architecture
 
 #[test]
 fn stale_socket_file_is_unlinked_on_bind() {
-    // doc §1: unlink(path) unconditionally before bind — a leftover socket
-    // file from an abnormal exit must not prevent startup.
     let dir = TempDir::new("stale");
     let sock = dir.sock();
-    fs::write(&sock, b"stale").unwrap(); // plain file squatting on the path
+    fs::write(&sock, b"stale").unwrap();
     let (tx, rx) = unbounded();
     let server = ControlSocket::bind(&sock, tx).expect("bind over stale file");
     let (app, _cap) = MockApp::doc_semantics().spawn(rx);
     assert_eq!(request_at(&sock, b"ping\n"), b"pong\n");
     drop(server);
     let _ = app.join();
-    // Clean teardown unlinks the socket file (doc §1).
     assert!(!sock.exists(), "socket file left behind after shutdown");
 }
 
 #[test]
 fn app_gone_yields_dead_engine_signal() {
-    // If the app side is gone, commands answer with zero bytes — exactly
-    // the protocol's dead/orphaned-socket signal (doc §3). ping still works:
-    // the socket layer answers it itself (doc §4.1).
     let dir = TempDir::new("app-gone");
     let sock = dir.sock();
     let (tx, rx) = unbounded();
@@ -679,8 +572,6 @@ fn app_gone_yields_dead_engine_signal() {
 
 #[test]
 fn concurrent_clients_are_all_served() {
-    // doc §4.9 latency note: the daemon fires N property sets concurrently;
-    // all must be answered (serialized in accept order server-side).
     let s = Server::start("concurrent", MockApp::doc_semantics());
     let sock = s.sock.clone();
     let handles: Vec<_> = (0..10)
@@ -699,7 +590,6 @@ fn concurrent_clients_are_all_served() {
 
 #[test]
 fn non_utf8_bg_path_reaches_app_byte_exact() {
-    // Paths are raw bytes on Linux; the parser must not mangle them (V9).
     let s = Server::start("non-utf8", MockApp::doc_semantics());
     let mut line = b"bg HDMI-A-1 /weird/\xff\xfe/dir".to_vec();
     line.push(b'\n');
@@ -710,9 +600,6 @@ fn non_utf8_bg_path_reaches_app_byte_exact() {
     }
 }
 
-/// Round-trip every `Command` variant through the full stack: canonical wire
-/// line in, identical typed command captured at the app, correct wire
-/// response out (SPEC V13 adapted to the socket protocol).
 #[test]
 fn round_trip_every_command_variant_over_the_socket() {
     let s = Server::start("roundtrip", MockApp::doc_semantics());
@@ -762,8 +649,6 @@ fn round_trip_every_command_variant_over_the_socket() {
 
 #[test]
 fn read_timeout_close_is_observable_quickly() {
-    // The half-open timeout must be on the order of the C++ 50 ms
-    // SO_RCVTIMEO, not seconds: measure EOF latency for a silent client.
     let s = Server::start("timeout-latency", MockApp::doc_semantics());
     let mut stream = connect(&s.sock);
     let started = Instant::now();
@@ -787,7 +672,7 @@ fn shutdown_is_idempotent_and_unbinds() {
     let (app, _cap) = MockApp::doc_semantics().spawn(rx);
     assert_eq!(request_at(&sock, b"ping\n"), b"pong\n");
     server.shutdown();
-    server.shutdown(); // second call is a no-op
+    server.shutdown();
     let _ = app.join();
     assert!(!sock.exists());
     match UnixStream::connect(&sock) {
@@ -801,8 +686,6 @@ fn shutdown_is_idempotent_and_unbinds() {
 
 #[test]
 fn workshop_verbs_parse_into_typed_requests() {
-    // docs/compat-socket.md §13. The app gets the query text verbatim; only
-    // the verb and its shape are the socket layer's business.
     let s = Server::start("workshop-parse", MockApp::doc_semantics());
 
     let reply = String::from_utf8(s.request(b"workshop search tag=Scene text=blue sky\n")).unwrap();
@@ -821,28 +704,20 @@ fn workshop_verbs_parse_into_typed_requests() {
     let reply = String::from_utf8(s.request(b"workshop job 7\n")).unwrap();
     assert!(reply.contains("Job(7)"), "{reply}");
 
-    // A verb the engine does not know answers like any other unknown token,
-    // so a client can probe for the extension.
     assert_eq!(s.request(b"workshop rummage\n"), b"unknown command\n");
     assert_eq!(s.request(b"workshop\n"), b"unknown command\n");
-    // A verb that needs an argument and did not get one is a rejection, not a
-    // guess at which item was meant.
     assert_eq!(s.request(b"workshop state\n"), b"error\n");
     assert_eq!(s.request(b"workshop job notanumber\n"), b"error\n");
 }
 
 #[test]
 fn a_slow_workshop_request_does_not_stall_other_clients() {
-    // SPEC V4. Workshop requests wait on Steam, which is another process and a
-    // network away; served in accept order they would hold up every client
-    // behind them — a shell's health check included.
     let mut mock = MockApp::doc_semantics();
     mock.workshop_delay = Duration::from_millis(600);
     let s = Server::start("workshop-slow", mock);
 
     let sock = s.sock.clone();
     let slow = thread::spawn(move || request_at(&sock, b"workshop search sort=popular\n"));
-    // Give the slow request time to be accepted and dispatched.
     thread::sleep(Duration::from_millis(100));
 
     let started = Instant::now();

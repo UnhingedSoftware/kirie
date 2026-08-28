@@ -1,39 +1,19 @@
-//! [`ScriptValue`] — the single marshalled value type crossing the JS ↔ host
-//! boundary, plus the QuickJS/JSON conversions.
-//!
-//! docs/scripting-api.md §5.1 (`dynamicToJs` / `jsToDynamicValue`). The C++
-//! defect that dropped `z`/`w` when reading an object return value
-//! (docs §5.1 `DO-NOT-PORT`) is fixed here: all present components are read.
-
 use rquickjs::{Array, Ctx, Function, Object, Value};
 use serde::ser::{Serialize, SerializeMap, Serializer};
 
-/// A value marshalled between a script and the host. Mirrors the reference
-/// `DynamicValue` underlying types (docs §5.1).
 #[derive(Clone, Debug, PartialEq)]
 pub enum ScriptValue {
-    /// JS `null`/`undefined`/uninitialized — property set to the Null type
-    /// (docs §5.1: returning nothing is *not* a no-op).
     Null,
-    /// A boolean.
     Bool(bool),
-    /// A 32-bit integer.
     Int(i64),
-    /// A double.
     Float(f64),
-    /// A string.
     Str(String),
-    /// A 2-component vector.
     Vec2([f32; 2]),
-    /// A 3-component vector.
     Vec3([f32; 3]),
-    /// A 4-component vector.
     Vec4([f32; 4]),
 }
 
 impl ScriptValue {
-    /// Build a JS value for `self` in `ctx`. Vectors become real `VecN`
-    /// instances (so scripts may call methods and mutate components).
     pub fn to_js<'js>(&self, ctx: &Ctx<'js>) -> rquickjs::Result<Value<'js>> {
         Ok(match self {
             ScriptValue::Null => Value::new_null(ctx.clone()),
@@ -47,8 +27,6 @@ impl ScriptValue {
         })
     }
 
-    /// Decode a JS value returned by `update()` (docs §5.1 `jsToDynamicValue`,
-    /// with the z/w-drop defect fixed). Objects are read by `x/y/z/w`.
     pub fn from_js(value: &Value<'_>) -> Self {
         if value.is_undefined() || value.is_null() || value.type_of() == rquickjs::Type::Uninitialized {
             return ScriptValue::Null;
@@ -81,8 +59,6 @@ impl ScriptValue {
                         _ => ScriptValue::Vec2([x as f32, y as f32]),
                     };
                 }
-                // An object without numeric x/y is not a value (docs §5.1 treats
-                // the malformed case as ignore — we map to Null, never throw).
                 _ => return ScriptValue::Null,
             }
         }
@@ -90,15 +66,11 @@ impl ScriptValue {
     }
 }
 
-/// Construct a global `VecN` instance from components (via the `__mkVec` helper
-/// — `rquickjs::Function` has no `construct`, that lives on `Constructor`).
 fn construct_vec<'js>(ctx: &Ctx<'js>, n: i32, c: [f32; 4]) -> rquickjs::Result<Value<'js>> {
     let mk: Function = ctx.globals().get("__mkVec")?;
     mk.call((n, c[0], c[1], c[2], c[3]))
 }
 
-// docs §5.1: userProperties expose vectors as `{x,y,z}`-shaped values; the plain
-// object form is enough for component reads inside `engine.userProperties`.
 impl Serialize for ScriptValue {
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         match self {
@@ -132,9 +104,6 @@ impl Serialize for ScriptValue {
     }
 }
 
-/// Convert a [`serde_json::Value`] into a QuickJS [`Value`]. Used to inject the
-/// per-tick host snapshot (`__host`) as plain JS data (SPEC.md §V3: typed
-/// messages, never shared memory).
 pub fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
     use serde_json::Value as J;
     Ok(match v {

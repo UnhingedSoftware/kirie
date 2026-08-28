@@ -1,4 +1,3 @@
-//! Probe: print low/mid/high group peaks.
 use kirie_audio::{AudioCapture, AudioConfig};
 fn main() {
     let cap = AudioCapture::start(AudioConfig::with_device(std::env::args().nth(1)));

@@ -1,19 +1,3 @@
-//! `kirie check [wallpaper]` — a preflight doctor that verifies everything
-//! needed to *build and run* a wallpaper, so a missing prerequisite fails
-//! loudly with a fix instead of silently rendering a flat clear-color frame.
-//!
-//! Motivation: a scene references Wallpaper Engine's shared builtin shaders
-//! (`genericimage2`, effect passes, …) which live in WE's install, not in the
-//! per-item `scene.pkg`. If that asset directory is absent, the referenced
-//! passes are skipped and the wallpaper composites to its clear color — a
-//! blank/flat render with no error. This command surfaces exactly that (and
-//! the other build/run prerequisites) as a checklist.
-//!
-//! Environment checks always run. Passing a wallpaper path additionally
-//! resolves its type and, for scenes, performs a real headless build while
-//! capturing the renderer's diagnostics (missing shaders, asset problems), so
-//! the report reflects what an actual run would do.
-
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -22,7 +6,6 @@ use anyhow::Result;
 use crate::compat::resolve::{self, Wallpaper};
 use crate::compat::screenshot::Headless;
 
-/// One checklist line's verdict.
 enum Verdict {
     Ok,
     Warn,
@@ -39,7 +22,6 @@ impl Verdict {
     }
 }
 
-/// Accumulates checklist lines and the worst verdict seen.
 #[derive(Default)]
 struct Report {
     any_fail: bool,
@@ -57,28 +39,16 @@ impl Report {
         }
     }
 
-    /// A continuation/hint line under the previous check (indented, no tag).
     fn hint(&self, text: &str) {
         println!("        {text}");
     }
 }
 
-/// Run the doctor. `path` is an optional wallpaper (workshop dir or a direct
-/// media/scene file). Returns `Ok(true)` when everything required passed,
-/// `Ok(false)` when a required check failed.
-///
-/// # Errors
-/// Only for a truly unexpected I/O failure while classifying the path; missing
-/// prerequisites are reported as `[FAIL]` lines, not `Err`.
 pub fn run(path: Option<&Path>) -> Result<bool> {
     let mut r = Report::default();
 
     println!("kirie check — build/run prerequisites\n");
     println!("environment:");
-    // One headless device for the whole run: the driver pipeline cache is
-    // process-wide (a `OnceLock` bound to the device that created it), so a
-    // second device would panic when the renderer reuses that cache. Report
-    // the GPU from it and reuse it for the scene build.
     let gpu = check_gpu(&mut r);
     let assets = check_we_assets(&mut r);
     check_workshop(&mut r);
@@ -101,8 +71,6 @@ pub fn run(path: Option<&Path>) -> Result<bool> {
     Ok(!r.any_fail)
 }
 
-/// A wgpu adapter must exist (hardware or software) to build any wallpaper.
-/// Returns the headless device on success, for reuse by the scene build.
 fn check_gpu(r: &mut Report) -> Option<Headless> {
     match Headless::new() {
         Ok(gpu) => {
@@ -130,10 +98,6 @@ fn check_gpu(r: &mut Report) -> Option<Headless> {
     }
 }
 
-/// What Steam records about the Workshop library, read from its own files.
-///
-/// Answerable with the client closed, which is the point: a wallpaper daemon
-/// starts at login and Steam usually is not up yet.
 fn check_workshop(r: &mut Report) {
     let states = crate::compat::steam::workshop_item_states(crate::compat::args::WORKSHOP_APP_ID);
     if states.is_empty() {
@@ -143,9 +107,6 @@ fn check_workshop(r: &mut Report) {
             "Steam records no items for this app",
         );
         r.hint("subscribe to wallpapers in Steam, or browse from here: kirie workshop browse.");
-        // Whether browsing works is *more* interesting on a machine with
-        // nothing installed, not less — reporting it only for libraries that
-        // already have wallpapers left a fresh install with no answer at all.
         check_workshop_browse(r);
         return;
     }
@@ -160,8 +121,6 @@ fn check_workshop(r: &mut Report) {
         &format!("{installed} installed of {} subscribed", states.len()),
     );
 
-    // Both of these explain a wallpaper that is "missing" or looks wrong, and
-    // neither was visible to kirie before.
     if waiting > 0 {
         r.line(
             &Verdict::Warn,
@@ -182,12 +141,6 @@ fn check_workshop(r: &mut Report) {
     check_workshop_browse(r);
 }
 
-/// Whether `kirie workshop` can reach Steam at all.
-///
-/// Browsing needs three things and fails differently on each: the helper
-/// binary beside kirie, a running Steam client, and an account that owns
-/// Wallpaper Engine. Steam enforces the last one, so the check is simply
-/// whether the helper's `probe` comes back owning the app.
 fn check_workshop_browse(r: &mut Report) {
     let Some(helper) = crate::workshop::helper_path() else {
         r.line(&Verdict::Warn, "workshop browse", "kirie-steam-helper NOT FOUND");
@@ -212,12 +165,9 @@ fn check_workshop_browse(r: &mut Report) {
     }
 }
 
-/// The shared WE builtin-assets directory: required by any scene that uses
-/// builtin shaders/effects (the overwhelming majority).
 fn check_we_assets(r: &mut Report) -> Option<std::path::PathBuf> {
     match resolve::we_assets_dir() {
         Some(dir) => {
-            // Sanity: a canary builtin shader that virtually every scene uses.
             let canary = dir.join("shaders").join("genericimage2.frag");
             if canary.is_file() {
                 r.line(&Verdict::Ok, "WE base assets", &dir.display().to_string());
@@ -245,8 +195,6 @@ fn check_we_assets(r: &mut Report) -> Option<std::path::PathBuf> {
     }
 }
 
-/// Report which web backends this build can drive (feature-dependent) and
-/// whether their out-of-process host binary ships beside the engine.
 #[allow(unused_variables)]
 fn check_web_backends(r: &mut Report) {
     let beside = |name: &str| -> bool {
@@ -272,15 +220,6 @@ fn check_web_backends(r: &mut Report) {
     }
     #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
     {
-        // The host is this binary, re-executed (`kirie __webviewhost`), unless
-        // an override or an older split install points elsewhere. What it
-        // still needs from the system is WebKitGTK, which many distros do not
-        // install by default and which ships under several parallel ABIs —
-        // without this check that failure surfaces much later as an opaque
-        // "webviewhost died during startup".
-        // The host is a separate gtk-linked binary carried inside this one and
-        // extracted on first use, so "is it there" is a property of the build,
-        // not of the filesystem.
         const HOST_BLOB: &[u8] = include_bytes!(env!("KIRIE_WEBVIEWHOST_BLOB"));
         let host = match std::env::var_os("KIRIE_WEBVIEWHOST") {
             Some(path) => format!("host {}", std::path::Path::new(&path).display()),
@@ -312,14 +251,6 @@ fn check_web_backends(r: &mut Report) {
     }
 }
 
-/// The WebKitGTK shared library the webview host can drive, if one is present.
-///
-/// Probes the standard library directories rather than `dlopen`ing (this crate
-/// is `forbid(unsafe_code)`); the host itself loads whichever it finds. The
-/// three ABIs are *parallel-installable different libraries*, not versions:
-/// `4.1` (GTK3 + libsoup3) is today's mainstream, `4.0` (GTK3 + libsoup2)
-/// survives on older LTS distros, and `6.0` is the GTK4 line. Ordered
-/// most-preferred first.
 #[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
 fn webkit_runtime() -> Option<String> {
     const SONAMES: &[&str] = &[
@@ -327,7 +258,6 @@ fn webkit_runtime() -> Option<String> {
         "libwebkit2gtk-4.0.so.37",
         "libwebkit2gtk-4.0.so",
     ];
-    // Covers merged-/usr and Debian/Fedora multiarch layouts.
     const DIRS: &[&str] = &[
         "/usr/lib",
         "/usr/lib64",
@@ -345,14 +275,6 @@ fn webkit_runtime() -> Option<String> {
     None
 }
 
-/// A copy-pasteable install command for the running distro.
-///
-/// Keyed off `/etc/os-release` `ID`/`ID_LIKE`. Deliberately a static table
-/// rather than a package-manager query (`dnf provides`, `pacman -F`,
-/// `apt-file`): those need an extra tool or a synced file database and can
-/// touch the network, none of which belongs in a diagnostic. The soname is
-/// always printed so the user can search their own repositories if their
-/// distro isn't listed.
 #[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
 fn webkit_install_hint() -> String {
     let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
@@ -363,10 +285,6 @@ fn webkit_install_hint() -> String {
     )
 }
 
-/// The install command for the distro described by an `/etc/os-release` body.
-///
-/// Split out from [`webkit_install_hint`] so the mapping is testable without
-/// the host's real `/etc/os-release`.
 #[cfg_attr(not(all(feature = "web-webview", not(feature = "web-cef"))), allow(dead_code))]
 fn webkit_install_cmd(os_release: &str) -> &'static str {
     let field = |key: &str| -> String {
@@ -401,7 +319,6 @@ fn webkit_install_cmd(os_release: &str) -> &'static str {
     }
 }
 
-/// Classify the wallpaper and run type-specific prerequisite checks.
 fn check_wallpaper(r: &mut Report, path: &Path, assets: Option<&Path>, gpu: Option<&Headless>) {
     let wp = match resolve::classify(&path.to_string_lossy()) {
         Ok(wp) => wp,
@@ -440,9 +357,6 @@ fn check_wallpaper(r: &mut Report, path: &Path, assets: Option<&Path>, gpu: Opti
     }
 }
 
-/// Headlessly build the scene and report any missing shaders/assets captured
-/// from the renderer's own diagnostics — the exact failure mode behind a blank
-/// scene.
 fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&Headless>) {
     if !dir.join("scene.pkg").is_file() {
         r.line(&Verdict::Fail, "scene.pkg", "missing");
@@ -471,14 +385,9 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
         scaling: kirie_render::ScalingMode::Default,
         clamp: kirie_render::ClampMode::Clamp,
         disable_parallax: false,
-        // The doctor builds at a fixed probe size, so fitting to "the output"
-        // would only shrink the check's own canvas — it proves nothing here.
         fit_render_to_output: false,
     };
 
-    // Capture the renderer's debug diagnostics during the build. A build that
-    // logs `missing shader source` composites blank at runtime even though it
-    // returns Ok (best-effort clear-color degradation, SPEC §V9).
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let subscriber = tracing_subscriber::fmt()
         .with_writer(BufMakeWriter(buf.clone()))
@@ -500,7 +409,6 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
         return;
     }
 
-    // Missing builtin shaders → passes skipped → blank render.
     let missing: Vec<String> = log
         .lines()
         .filter(|l| l.contains("missing shader source"))
@@ -543,7 +451,6 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
     }
 }
 
-/// A video wallpaper: the media file must exist and open/decode.
 fn check_video(r: &mut Report, media: &Path) {
     if !media.is_file() {
         r.line(
@@ -566,7 +473,6 @@ fn check_video(r: &mut Report, media: &Path) {
     }
 }
 
-/// An image wallpaper: the file must exist and decode.
 fn check_image(r: &mut Report, file: &Path) {
     if !file.is_file() {
         r.line(
@@ -582,8 +488,6 @@ fn check_image(r: &mut Report, file: &Path) {
     }
 }
 
-/// A web wallpaper: the entry page must exist and a web backend must be built
-/// in (runnability already reported by the environment web-backend check).
 fn check_web(r: &mut Report, dir: &Path, file: &str) {
     if file.starts_with("http://") || file.starts_with("https://") {
         r.line(&Verdict::Ok, "web entry", &format!("remote URL: {file}"));
@@ -612,8 +516,6 @@ fn check_web(r: &mut Report, dir: &Path, file: &str) {
     }
 }
 
-/// A `tracing_subscriber` writer that appends to a shared byte buffer, so the
-/// scene build's diagnostics can be captured and scanned.
 #[derive(Clone)]
 struct BufMakeWriter(Arc<Mutex<Vec<u8>>>);
 
@@ -640,9 +542,6 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for BufMakeWriter {
 mod tests {
     use super::webkit_install_cmd;
 
-    /// The distro mapping keys off both `ID` and `ID_LIKE`, so derivatives
-    /// (CachyOS, Pop!_OS, Rocky) resolve to their parent's package manager
-    /// without needing their own entry.
     #[test]
     fn webkit_hint_matches_distro_family() {
         let cases = [
@@ -663,7 +562,6 @@ mod tests {
         }
     }
 
-    /// An unknown distro still gets actionable text rather than an empty hint.
     #[test]
     fn webkit_hint_has_a_generic_fallback() {
         let got = webkit_install_cmd("ID=someobscuredistro\n");

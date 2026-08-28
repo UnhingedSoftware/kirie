@@ -1,18 +1,3 @@
-//! Corpus-gated test for the CPU particle simulation (docs/corpus.md: 58
-//! particle objects across the workshop corpus; docs/render-architecture.md
-//! §7.3).
-//!
-//! For every `scene.pkg` in the corpus this resolves the scene (loading any
-//! external particle definitions and materials), builds a [`ParticleSim`] for
-//! each particle object, and simulates a fixed number of steps. It asserts no
-//! panic, that produced state stays finite, and reports per-item + aggregate
-//! particle-object coverage (how many systems ever spawned, how many use a
-//! supported emitter shape). A small headless GPU burst render runs when a wgpu
-//! adapter is available.
-//!
-//! Skipped (never failed) when the corpus or an adapter is absent — inert in
-//! CI, live on the workstation.
-
 use std::path::{Path, PathBuf};
 
 use kirie_formats::pkg::OwnedPkg;
@@ -96,8 +81,6 @@ fn particle_corpus_simulates_without_panic() {
     let mut ever_spawned = 0usize;
     let mut scenes_with_particles = 0usize;
     let mut lines = Vec::new();
-    // A reused sprite buffer proves the write path never reallocates in steady
-    // state (SPEC §V5): its capacity must not grow once warm.
     let mut sprites: Vec<SpriteInstance> = Vec::new();
 
     for item in &items {
@@ -125,7 +108,6 @@ fn particle_corpus_simulates_without_panic() {
             if sim.has_supported_emitter() {
                 with_supported_emitter += 1;
             }
-            // Simulate 2 seconds at 60 Hz.
             for _ in 0..120 {
                 sim.update(1.0 / 60.0);
                 for pt in sim.particles() {
@@ -159,9 +141,6 @@ fn particle_corpus_simulates_without_panic() {
     );
 
     assert!(total_objects > 0, "expected particle objects in the corpus");
-    // The docs count 58 particle objects across the corpus; we should at least
-    // simulate the bulk of them without panic (some scenes may fail to parse for
-    // unrelated reasons and are skipped above).
     assert!(
         ever_spawned > 0,
         "no particle system spawned anything ({total_objects} objects seen)"
@@ -170,8 +149,6 @@ fn particle_corpus_simulates_without_panic() {
 
 #[test]
 fn particle_burst_renders_on_gpu() {
-    // Headless render of a synthetic burst to prove the instanced-quad path
-    // draws visible pixels. Skipped when no adapter is present.
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -196,8 +173,6 @@ fn particle_burst_renders_on_gpu() {
 
     let renderer = ParticleRenderer::new(&device, &queue, FORMAT, Blending::Additive, None, 16);
 
-    // Four bright quads near the center in NDC (identity VP; positions already
-    // in clip space here for a self-contained visibility check).
     let instances = [
         make_instance([-0.3, -0.3, 0.0], 0.3, [1.0, 0.2, 0.2, 1.0]),
         make_instance([0.3, -0.3, 0.0], 0.3, [0.2, 1.0, 0.2, 1.0]),
@@ -227,7 +202,6 @@ fn particle_burst_renders_on_gpu() {
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    // Clear to black, then draw particles (additive over black).
     {
         encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("clear"),

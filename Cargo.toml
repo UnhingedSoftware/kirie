@@ -42,9 +42,6 @@ wgpu = "30"
 smithay-client-toolkit = "0.20"
 wayland-client = "0.31"
 wayland-backend = { version = "0.3", features = ["client_system"] }
-# wlr protocol extensions. Only `wlr-foreign-toplevel-management-unstable-v1` is
-# used (fullscreen pause); the same 0.3 line smithay-client-toolkit already
-# resolves, so this adds no new tree — just makes the dependency direct.
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 raw-window-handle = "0.6"
 pollster = "0.4"
@@ -65,10 +62,6 @@ gtk = "0.18"
 gtk-layer-shell = "0.8"
 libpulse-binding = "2"
 rquickjs = "0.12"
-# Minimal ffmpeg surface: kirie-video only uses format + software (scaling/
-# resampling). Dropping avdevice/avfilter shrinks the link and, crucially, lets
-# the `portable` static build avoid ffmpeg's external device libs (libavc1394…).
-# The static, from-source ffmpeg is opt-in via kirie's `portable` feature.
 ffmpeg-next = { version = "9", default-features = false, features = ["codec", "format", "software-scaling", "software-resampling"] }
 notify = "8"
 zbus = "5"
@@ -83,17 +76,11 @@ mime_guess = "2"
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-# The symbol table is 2.5 MB of a binary users download; `panic = "abort"`
-# already means a crash gives little more than an address, so keep the
-# symbols in `release-dbg` for triage rather than in everything we ship.
 strip = "symbols"
 
 [profile.release-dbg]
 inherits = "release"
 strip = false
-
-[workspace.lints.rust]
-missing_docs = "warn"
 
 [workspace.lints.clippy]
 undocumented_unsafe_blocks = "deny"

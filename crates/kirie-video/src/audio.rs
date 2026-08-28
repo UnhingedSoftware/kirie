@@ -1,36 +1,3 @@
-//! Audio decode + resample + cpal output, and the audio-master clock feed.
-//!
-//! One thread per playing video that has an audio stream. The thread owns
-//! the demuxer, decoder, `SwrContext` resampler and the cpal output
-//! stream (cpal streams are not `Send`; everything device-related lives
-//! and dies on this thread). Decoded audio is resampled to the device's
-//! rate/channel-count as packed f32 and pushed into a lock-free SPSC ring
-//! (`ringbuf`); the device callback pops, applies gain, converts to the
-//! device sample type and publishes consumption snapshots. All
-//! cross-thread traffic is channels, the SPSC ring, and immutable
-//! `triple_buffer` snapshots (SPEC V3).
-//!
-//! Behavior contract (docs/subsystems-misc.md §2.1, §2.3):
-//! * `volume` is 0–100 (the CLI's 0–128 maps onto it as
-//!   `volume * 100 / 128` at the CVideo-equivalent layer, §2.3). The
-//!   docs fix the endpoints (0 = silent, 100 = full) but not the curve;
-//!   gain is applied linearly here.
-//! * `mute` is independent of volume (§2.1).
-//! * `--silent` plays the video with volume 0, *not* paused (§2.3) — the
-//!   pipeline keeps running so the audio clock stays master.
-//! * speed changes rebuild the resampler so the device consumes media
-//!   `speed×` faster (output rate = device rate / speed); pitch follows,
-//!   like mpv without scaletempo. Speed ≤ 0 coerces to 1.0 (§2.1).
-//! * EOF seeks back to 0 and continues (`loop=inf`, §2.1). The wrap
-//!   advances by at least the container duration so the independently
-//!   demuxed video stays aligned (see [`LoopTimeline`]).
-//!
-//! Known approximation: this loops the *audio stream* independently of
-//! the video stream. mpv restarts the whole file, so a file whose audio
-//! track is much shorter than its video would behave differently (audio
-//! repeats instead of going silent). Same-length tracks — the corpus
-//! case — are unaffected.
-
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -48,40 +15,24 @@ use crate::clock::{ConsumerSnap, ProducerSnap};
 use crate::error::VideoError;
 use crate::pacing::LoopTimeline;
 
-/// Ring depth in seconds of device-rate audio. Small enough that volume
-/// (applied at the callback) reacts instantly and speed-change error is
-/// bounded; large enough to ride out decode-thread scheduling hiccups.
 const RING_SECONDS: f64 = 0.5;
 
-/// Sleep while the ring is full (decode thread backpressure).
 const RING_FULL_BACKOFF: Duration = Duration::from_millis(5);
 
-/// How long `spawn` waits for the audio thread to report its setup result.
 const SETUP_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Commands handled by the device callback (SPEC V3: state changes travel
-/// as messages; the callback owns its own gain state).
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum CallbackCmd {
-    /// Set volume, 0–100 (docs/subsystems-misc.md §2.1).
     Volume(f64),
-    /// Mute on/off, independent of volume (§2.1).
     Mute(bool),
-    /// Pause: emit silence, stop consuming, freeze the audio clock (§2.1).
     Pause(bool),
 }
 
-/// Commands handled by the audio decode thread.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DecodeCmd {
-    /// Playback rate; resampler is rebuilt (≤ 0 already coerced to 1.0).
     Speed(f64),
 }
 
-/// Initial mixer state (latched values applied from the start, matching
-/// the reference where volume/mute/pause set before playback take effect
-/// — docs/subsystems-misc.md §2.1; speed intentionally excluded, see the
-/// quirk note in `player.rs`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AudioInit {
     pub volume: f64,
@@ -90,30 +41,18 @@ pub(crate) struct AudioInit {
     pub paused: bool,
 }
 
-/// What the renderer needs to read the audio-master clock.
 pub(crate) struct AudioLink {
-    /// Decode-side snapshots (what was pushed).
     pub producer: triple_buffer::Output<ProducerSnap>,
-    /// Callback-side snapshots (what was consumed).
     pub consumer: triple_buffer::Output<ConsumerSnap>,
-    /// Device sample rate the counters are measured in.
     pub sample_rate: u32,
 }
 
-/// Result of the in-thread setup, reported once through a channel.
 enum Setup {
     Ready(AudioLink),
-    /// The file has no audio stream — caller falls back to wall clock.
     NoStream,
     Failed(VideoError),
 }
 
-/// Spawn the audio thread for `path`.
-///
-/// Returns `Ok(None)` when the file has no audio stream (playback clock
-/// falls back to wall clock, docs/subsystems-misc.md §2.1 pacing) and
-/// `Err` when audio setup failed — callers may degrade to silent playback
-/// rather than abort (mpv keeps video running without audio too).
 pub(crate) fn spawn(
     path: PathBuf,
     init: AudioInit,
@@ -135,7 +74,6 @@ pub(crate) fn spawn(
     }
 }
 
-/// Everything the audio thread does: probe, device bring-up, decode loop.
 fn run_thread(
     path: &std::path::Path,
     init: AudioInit,
@@ -166,7 +104,6 @@ fn run_thread(
             .decoder()
             .audio()?;
 
-        // Device bring-up.
         let host = cpal::default_host();
         let device = host
             .default_output_device()
@@ -240,7 +177,6 @@ fn run_thread(
         Ok(Some((mut state, stream, link))) => {
             let _ = setup_tx.send(Setup::Ready(link));
             state.run(decode_rx, shutdown_rx);
-            // Keep the device stream alive for the whole decode loop.
             drop(stream);
         }
         Ok(None) => {
@@ -252,7 +188,6 @@ fn run_thread(
     }
 }
 
-/// Gain/consumption state owned by the device callback closure.
 struct CallbackState {
     ring: ringbuf::HeapCons<f32>,
     commands: Receiver<CallbackCmd>,
@@ -267,7 +202,6 @@ struct CallbackState {
 }
 
 impl CallbackState {
-    /// Fill one device buffer. Runs on the cpal audio thread.
     fn fill<T: cpal::SizedSample + cpal::FromSample<f32>>(&mut self, data: &mut [T]) {
         while let Ok(cmd) = self.commands.try_recv() {
             match cmd {
@@ -279,8 +213,6 @@ impl CallbackState {
 
         let silence = T::from_sample(0.0f32);
         if self.paused {
-            // Freeze: emit silence without consuming, so the audio-master
-            // clock stops (docs/subsystems-misc.md §2.1 pause).
             data.fill(silence);
             self.snap.write(ConsumerSnap {
                 consumed: self.consumed,
@@ -291,13 +223,9 @@ impl CallbackState {
         }
 
         if self.scratch.len() < data.len() {
-            // Device grew its buffer beyond the preallocation; one-time
-            // resize outside any render path.
             self.scratch.resize(data.len(), 0.0);
         }
         let got = self.ring.pop_slice(&mut self.scratch[..data.len()]);
-        // Linear 0–100 gain; mute/silent force 0 (docs/subsystems-misc.md
-        // §2.1 volume/mute, §2.3 silent).
         let gain = if self.mute || self.silent {
             0.0
         } else {
@@ -318,7 +246,6 @@ impl CallbackState {
     }
 }
 
-/// Build the output stream for whatever sample type the device wants.
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -348,7 +275,6 @@ fn build_stream(
     }
 }
 
-/// Demux/decode/resample state for the audio stream.
 struct DecodeState {
     input: ffmpeg::format::context::Input,
     decoder: ffmpeg::decoder::Audio,
@@ -363,24 +289,14 @@ struct DecodeState {
     speed: f64,
     ring: ringbuf::HeapProd<f32>,
     snap: triple_buffer::Input<ProducerSnap>,
-    /// Device frames pushed so far.
     pushed: u64,
-    /// Playback seconds of the end of pushed data.
     head: f64,
-    /// Synthesized raw PTS for streams without timestamps.
     synth_pts: f64,
     decoded: ffmpeg::frame::Audio,
-    /// Consecutive undecodable packets skipped, for log throttling (SPEC
-    /// V9: a corrupt run must degrade gracefully, not flood the journal).
     undecodable: u64,
 }
 
 impl DecodeState {
-    /// Output sample rate implementing playback speed: the device drains
-    /// at `device_rate`, so producing `device_rate / speed` samples per
-    /// media second plays `speed×` faster (pitch shifts with it;
-    /// docs/subsystems-misc.md §2.1 defines only that `speed` multiplies
-    /// the playback rate).
     fn out_rate(&self) -> u32 {
         ((f64::from(self.device_rate) / self.speed).round() as u32).max(1)
     }
@@ -401,8 +317,6 @@ impl DecodeState {
         )?)
     }
 
-    /// Decode/push until shutdown. Mirrors the video loop: EOF → seek 0 →
-    /// continue (docs/subsystems-misc.md §2.1 `loop=inf`).
     fn run(&mut self, decode_rx: &Receiver<DecodeCmd>, shutdown_rx: &Receiver<()>) {
         let mut consecutive_read_errors = 0u32;
         loop {
@@ -427,9 +341,6 @@ impl DecodeState {
                     continue;
                 }
                 if let Err(err) = self.decoder.send_packet(&packet) {
-                    // Corrupt packets are skipped (SPEC V9); throttle the
-                    // warning so a corrupt region (re-hit every loop) does
-                    // not flood the log.
                     self.undecodable += 1;
                     if self.undecodable.is_power_of_two() {
                         tracing::warn!(%err, count = self.undecodable, "skipping undecodable audio packet(s)");
@@ -455,7 +366,6 @@ impl DecodeState {
         }
     }
 
-    /// Apply pending speed commands; `false` means shut down.
     fn poll_commands(&mut self, decode_rx: &Receiver<DecodeCmd>, shutdown_rx: &Receiver<()>) -> bool {
         if matches!(shutdown_rx.try_recv(), Err(TryRecvError::Disconnected)) {
             return false;
@@ -465,9 +375,6 @@ impl DecodeState {
                 DecodeCmd::Speed(speed) => {
                     if (speed - self.speed).abs() > f64::EPSILON {
                         self.speed = speed;
-                        // Rebuild at the new output rate; buffered swr
-                        // state is dropped (sub-ring transient, see
-                        // clock.rs docs).
                         self.resampler = None;
                     }
                 }
@@ -476,11 +383,9 @@ impl DecodeState {
         true
     }
 
-    /// Receive decoded audio frames, resample, push. `false` = shut down.
     fn drain(&mut self, shutdown_rx: &Receiver<()>) -> bool {
         loop {
             if self.decoder.receive_frame(&mut self.decoded).is_err() {
-                // EAGAIN (needs more input) or EOF (fully drained).
                 return true;
             }
             if let Err(err) = self.process_frame(shutdown_rx) {
@@ -494,7 +399,6 @@ impl DecodeState {
         }
     }
 
-    /// Resample `self.decoded` and push it into the ring.
     fn process_frame(&mut self, shutdown_rx: &Receiver<()>) -> Result<(), ProcessStop> {
         let samples = self.decoded.samples();
         if samples == 0 {
@@ -509,8 +413,6 @@ impl DecodeState {
             return Ok(());
         };
 
-        // Capacity: converted input + whatever swr still buffers, plus
-        // slack — keeps the swr backlog bounded without a flush loop.
         let out_rate = resampler.output().rate;
         let backlog = resampler.delay().map_or(0, |d| d.output.max(0)) as usize;
         let cap = samples * out_rate as usize / in_rate as usize + backlog + 256;
@@ -519,7 +421,6 @@ impl DecodeState {
             .run(&self.decoded, &mut out)
             .map_err(|e| ProcessStop::Error(e.into()))?;
 
-        // Raw media time at the end of this frame.
         let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
             Some(ts) => ts as f64 * self.time_base - self.start,
             None => self.synth_pts,
@@ -528,13 +429,10 @@ impl DecodeState {
         self.synth_pts = raw + dur;
         let play = self.timeline.map(raw, dur);
 
-        // Push converted samples (packed f32) with backpressure.
         let produced = out.samples() * self.channels;
         if produced > 0 {
             let bytes = &out.data(0)[..produced * size_of::<f32>()];
             let Ok(floats) = bytemuck::try_cast_slice::<u8, f32>(bytes) else {
-                // AVFrame buffers are 32-byte aligned; this cannot fire in
-                // practice, but never panic on data layout (SPEC V9).
                 return Err(ProcessStop::Error(VideoError::AudioOutput(
                     "resampler output misaligned".into(),
                 )));
@@ -546,16 +444,12 @@ impl DecodeState {
                     if matches!(shutdown_rx.try_recv(), Err(TryRecvError::Disconnected)) {
                         return Err(ProcessStop::Shutdown);
                     }
-                    // Ring full: the wallpaper is ahead; park briefly.
                     std::thread::sleep(RING_FULL_BACKOFF);
                 }
             }
             self.pushed += (out.samples()) as u64;
         }
 
-        // Publish the producer snapshot (immutable, SPEC V3). `head` is
-        // the media end of what was *decoded*; the ≤ few ms still inside
-        // swr are ignored (documented approximation).
         self.head = play + dur;
         self.snap.write(ProducerSnap {
             pushed: self.pushed,
@@ -566,10 +460,7 @@ impl DecodeState {
     }
 }
 
-/// Why `process_frame` stopped.
 enum ProcessStop {
-    /// Owner went away; exit the thread.
     Shutdown,
-    /// This frame failed; skip it and continue (SPEC V9).
     Error(VideoError),
 }

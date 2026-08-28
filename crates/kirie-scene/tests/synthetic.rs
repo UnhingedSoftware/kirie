@@ -1,7 +1,3 @@
-//! Synthetic scenes exercising every object kind, value encoding, the user
-//! binding/resolution machinery, and the serde round-trip contract (SPEC.md
-//! §V13). Behavior citations are to docs/format-scene-json.md.
-
 use kirie_scene::material::{Blending, CullMode, DepthMode};
 use kirie_scene::object::ObjectKind;
 use kirie_scene::property::PropertyValue;
@@ -10,7 +6,6 @@ use kirie_scene::value::{DynamicValue, parse_color, parse_vec};
 use kirie_scene::{PropertyBag, Scene, SceneModel};
 use serde_json::{Value, json};
 
-/// Wrap objects in a minimal valid scene root (§4: camera/general/objects).
 fn scene_with(objects: Value) -> Value {
     json!({
         "camera": { "eye": "0 0 0", "center": "0 0 -1", "up": "0 1 0" },
@@ -23,39 +18,30 @@ fn parse(objects: Value) -> Scene {
     Scene::from_value(&scene_with(objects)).expect("scene parses")
 }
 
-/// Assert the serde form round-trips (SPEC.md §V13, the bake/snapshot format).
 fn round_trip(scene: &Scene) {
     let v = serde_json::to_value(scene).expect("serialize");
     let back: Scene = serde_json::from_value(v).expect("deserialize");
     assert_eq!(scene, &back, "serde round-trip must be lossless");
 }
 
-// ---- §2 value encodings ----------------------------------------------------
-
 #[test]
 fn vec_parsing_strict_count() {
     assert_eq!(parse_vec::<3>("1 2 3").unwrap(), [1.0, 2.0, 3.0]);
     assert_eq!(parse_vec::<2>("0.85968 0.84985").unwrap(), [0.85968, 0.84985]);
-    // §2.1: wrong component count is a load error.
     assert!(parse_vec::<3>("1 2").is_err());
     assert!(parse_vec::<3>("1 2 3 4").is_err());
 }
 
 #[test]
 fn color_float_vs_int_path() {
-    // §2.2: a `.` anywhere ⇒ float path.
     assert_eq!(
         parse_color("0.3 0.3 0.3", 1.0, false).unwrap(),
         [0.3, 0.3, 0.3, 1.0]
     );
-    // §2.2: no `.` ⇒ int-0..255 path (scene-side).
     let c = parse_color("255 128 0", 1.0, false).unwrap();
     assert_eq!(c, [1.0, 128.0 / 255.0, 0.0, 1.0]);
-    // §2.2 pitfall: "1 1 1" as ints ≈ black.
     assert_eq!(parse_color("1 1 1", 1.0, false).unwrap()[0], 1.0 / 255.0);
-    // force_float disables that.
     assert_eq!(parse_color("1 1 1", 1.0, true).unwrap(), [1.0, 1.0, 1.0, 1.0]);
-    // §2.2: 4-component carries its own alpha.
     assert_eq!(
         parse_color("0.1 0.2 0.3 0.4", 1.0, false).unwrap(),
         [0.1, 0.2, 0.3, 0.4]
@@ -64,31 +50,25 @@ fn color_float_vs_int_path() {
 
 #[test]
 fn color_hex_forms() {
-    // §2.2: 3-digit expands with the alpha byte.
     assert_eq!(parse_color("#fff", 1.0, false).unwrap(), [1.0, 1.0, 1.0, 1.0]);
-    // clean-impl deviation: 6-digit gains ff alpha.
     assert_eq!(parse_color("#ff0000", 1.0, false).unwrap(), [1.0, 0.0, 0.0, 1.0]);
     assert!(parse_color("#zz", 1.0, false).is_err());
 }
 
 #[test]
 fn dynamic_value_decode() {
-    // §2.4: single token that parses as float → Float.
     assert_eq!(
         DynamicValue::decode(&json!("1.5"), false),
         DynamicValue::Float(1.5)
     );
-    // §2.4: single non-float token → Str.
     assert_eq!(
         DynamicValue::decode(&json!("hello"), false),
         DynamicValue::Str("hello".into())
     );
-    // §2.4: 3 tokens → Vec.
     assert_eq!(
         DynamicValue::decode(&json!("1 2 3"), false),
         DynamicValue::Vec(vec![1.0, 2.0, 3.0])
     );
-    // §2.4: color expected → Color.
     assert_eq!(
         DynamicValue::decode(&json!("0.5 0.5 0.5"), true),
         DynamicValue::Color([0.5, 0.5, 0.5, 1.0])
@@ -100,13 +80,10 @@ fn dynamic_value_decode() {
     assert_eq!(DynamicValue::decode(&json!(7), false), DynamicValue::Int(7));
 }
 
-// ---- §7 base fields + dispatch --------------------------------------------
-
 #[test]
 fn base_defaults_and_salvage() {
     let s = parse(json!([{ "particle": "p/x.json" }]));
     let o = &s.objects[0];
-    // §7.1: id salvages to -1, name to "unknown".
     assert_eq!(o.base.id, -1);
     assert_eq!(o.base.name, "unknown");
     assert_eq!(o.base.scale.value, [1.0, 1.0, 1.0]);
@@ -116,14 +93,12 @@ fn base_defaults_and_salvage() {
 
 #[test]
 fn numeric_name_stringified() {
-    // §7.1: a numeric name is stringified (particle objects in the wild).
     let s = parse(json!([{ "particle": "p.json", "name": 42, "id": 3 }]));
     assert_eq!(s.objects[0].base.name, "42");
 }
 
 #[test]
 fn dispatch_image_null_falls_through_to_particle() {
-    // §7 note: `image: null` + `particle` ⇒ particle (is_string guard).
     let s = parse(json!([{ "id": 97, "name": "Sakura", "image": null, "model": null,
                            "particle": "particles/presets/leaves5.json" }]));
     assert!(matches!(s.objects[0].kind, ObjectKind::Particle(_)));
@@ -153,8 +128,6 @@ fn all_kinds_dispatch() {
     round_trip(&s);
 }
 
-// ---- §8 image + §10 material + §11 effects --------------------------------
-
 #[test]
 fn image_fields_and_alignment() {
     let s = parse(json!([{
@@ -171,12 +144,10 @@ fn image_fields_and_alignment() {
     };
     assert_eq!(img.size, [1920.0, 1080.0]);
     assert_eq!(img.color_blend_mode.value, 2);
-    // §8: horizontalalign wins over alignment.
     assert_eq!(img.alignment, "right");
     assert_eq!(img.effects.len(), 1);
     let pass = &img.effects[0].passes[0];
     assert_eq!(pass.combos.get("NOISE"), Some(&1));
-    // §10.2: null slot preserved, index advances.
     assert_eq!(pass.textures, vec![None, Some("masks/m.tex".to_owned())]);
     round_trip(&s);
 }
@@ -197,12 +168,9 @@ fn material_pass_enums() {
     assert_eq!(p.depthwrite, DepthMode::Disabled);
     assert_eq!(p.shader, "genericimage2");
     assert_eq!(p.textures, vec![Some("cave".to_owned()), None]);
-    // §17.4: unknown enum → default, not fatal.
     let m2 = Material::from_value(&json!({ "passes": [{ "blending": "bogus", "shader": "x" }] }));
     assert_eq!(m2.passes[0].blending, Blending::Normal);
 }
-
-// ---- §13 text / §12 sound / §14 particle ----------------------------------
 
 #[test]
 fn text_defaults() {
@@ -216,7 +184,7 @@ fn text_defaults() {
     assert!(t.text.script.is_some());
     assert_eq!(t.pointsize.value, 48.0);
     assert_eq!(t.verticalalign, "top");
-    assert_eq!(t.horizontalalign, "center"); // default
+    assert_eq!(t.horizontalalign, "center");
     round_trip(&s);
 }
 
@@ -235,17 +203,13 @@ fn particle_instanceoverride_and_emitter() {
         panic!()
     };
     assert_eq!(p.system.maxcount, 500);
-    // §14.3: number broadcast to all vec3 components.
     assert_eq!(p.system.emitters[0].distancemax, [25.0, 25.0, 25.0]);
     assert_eq!(p.system.emitters[0].name, "sphererandom");
     assert_eq!(p.instanceoverride.count.value, 0.2);
-    // §14.6: empty renderer array ⇒ one default sprite renderer.
     assert_eq!(p.system.renderers.len(), 1);
     assert_eq!(p.system.renderers[0].name, "sprite");
     round_trip(&s);
 }
-
-// ---- §5 general / §6 camera -----------------------------------------------
 
 #[test]
 fn general_defaults_and_colors() {
@@ -259,7 +223,6 @@ fn general_defaults_and_colors() {
     assert_eq!(scene.general.ambientcolor.value, [0.3, 0.3, 0.3, 1.0]);
     assert!(scene.general.bloom.value);
     assert_eq!(scene.general.bloomstrength.value, 2.0);
-    // default clearcolor is white but here overridden.
     assert_eq!(scene.general.clearcolor.value, [0.7, 0.7, 0.7, 1.0]);
     round_trip(&scene);
 }
@@ -281,7 +244,6 @@ fn camera_projection_forms() {
     );
     assert_eq!(ortho.camera.eye, [84.0, -248.0, 0.0]);
 
-    // null / missing / {auto:true} ⇒ Auto.
     for general in [
         json!({ "orthogonalprojection": null }),
         json!({}),
@@ -298,7 +260,6 @@ fn camera_projection_forms() {
 
 #[test]
 fn missing_sections_error() {
-    // §4: required sections.
     assert!(Scene::from_value(&json!({ "general": {}, "objects": [] })).is_err());
     assert!(
         Scene::from_value(
@@ -307,17 +268,13 @@ fn missing_sections_error() {
         )
         .is_err()
     );
-    // §6.1: missing required camera field.
     assert!(
         Scene::from_value(&json!({ "camera": { "eye": "0 0 0" }, "general": {}, "objects": [] })).is_err()
     );
 }
 
-// ---- §3 user bindings + resolution ----------------------------------------
-
 #[test]
 fn resolve_name_binding_overwrites() {
-    // §3.2: a bound property overwrites the literal value.
     let s = parse(json!([{ "id": 1, "name": "i", "image": "m.json",
         "alpha": { "value": 1.0, "user": "opacity" } }]));
     let mut bag = PropertyBag::new();
@@ -331,7 +288,6 @@ fn resolve_name_binding_overwrites() {
 
 #[test]
 fn resolve_conditional_binding_is_equality() {
-    // §3.3: conditional binding ⇒ boolean property == condition.
     let make = || {
         parse(json!([{ "id": 1, "name": "i", "image": "m.json",
         "visible": { "value": true, "user": { "name": "style", "condition": "2" } } }]))
@@ -371,5 +327,5 @@ fn unbound_field_keeps_literal_when_property_absent() {
     let ObjectKind::Image(img) = &model.scene.objects[0].kind else {
         panic!()
     };
-    assert_eq!(img.alpha.value, 0.9); // literal kept
+    assert_eq!(img.alpha.value, 0.9);
 }

@@ -1,15 +1,9 @@
-//! Unit tests for the CPU particle simulation: each operator and initializer's
-//! math on synthetic particles (deterministic steps), emitter rate/burst
-//! timing, lifetime culling, and pool bounds (docs/render-architecture.md §7.3).
-
 use kirie_render::particle::{
     Initial, Initializer, Operator, Particle, ParticleSim, Rng, SimConfig, SpawnCtx, StepCtx,
 };
 use kirie_scene::particle::{InstanceOverride, NamedStage, ParticleSystem};
 use kirie_scene::value::Vec3;
 use serde_json::json;
-
-// ---- helpers ---------------------------------------------------------------
 
 fn stage(value: serde_json::Value) -> NamedStage {
     NamedStage::parse(value.as_object().expect("object"))
@@ -65,11 +59,8 @@ fn ovr() -> kirie_render::particle::Overrides {
     kirie_render::particle::Overrides::default()
 }
 
-// ---- operators -------------------------------------------------------------
-
 #[test]
 fn movement_integrates_position_then_velocity() {
-    // gravity "0 10 0" is Y-flipped to (0,-10,0) on read (docs §7.3).
     let op = Operator::compile(
         &stage(json!({"name":"movement","gravity":"0 10 0"})),
         1,
@@ -79,9 +70,7 @@ fn movement_integrates_position_then_velocity() {
     p.velocity = [10.0, 0.0, 0.0];
     let o = ovr();
     op.apply(&mut p, &step_ctx(0.1, 0.0, &[[0.0; 3]], &o));
-    // pos += vel*dt (using pre-gravity velocity)
     approx_v(p.position, [1.0, 0.0, 0.0]);
-    // vel += gravity*dt*speed
     approx_v(p.velocity, [10.0, -1.0, 0.0]);
 }
 
@@ -92,7 +81,6 @@ fn movement_drag_scales_velocity() {
     p.velocity = [10.0, 0.0, 0.0];
     let o = ovr();
     op.apply(&mut p, &step_ctx(0.1, 0.0, &[[0.0; 3]], &o));
-    // vel *= max(0, 1 - drag*dt) = 0.5
     approx_v(p.velocity, [5.0, 0.0, 0.0]);
     approx_v(p.position, [1.0, 0.0, 0.0]);
 }
@@ -108,7 +96,7 @@ fn speed_override_scales_gravity() {
     let mut o = ovr();
     o.speed = 2.0;
     op.apply(&mut p, &step_ctx(0.1, 0.0, &[[0.0; 3]], &o));
-    approx_v(p.velocity, [0.0, -2.0, 0.0]); // -10 * 0.1 * 2
+    approx_v(p.velocity, [0.0, -2.0, 0.0]);
 }
 
 #[test]
@@ -122,7 +110,6 @@ fn angularmovement_wraps_rotation() {
     p.angular_velocity = [0.0, 0.0, 100.0];
     let o = ovr();
     op.apply(&mut p, &step_ctx(1.0, 0.0, &[[0.0; 3]], &o));
-    // rotation += 100 rad then wrapped to (-pi, pi]
     assert!(p.rotation[2] > -std::f32::consts::PI && p.rotation[2] <= std::f32::consts::PI);
 }
 
@@ -134,16 +121,16 @@ fn alphafade_fades_in_and_out() {
         &mut Rng::new(0),
     );
     let o = ovr();
-    let mut p = synth(); // lifetime 2.0
-    p.age = 0.5; // lp = 0.25 -> factor 0.5
+    let mut p = synth();
+    p.age = 0.5;
     op.apply(&mut p, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx(p.alpha, 0.5);
     let mut q = synth();
-    q.age = 1.0; // lp 0.5 -> full
+    q.age = 1.0;
     op.apply(&mut q, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx(q.alpha, 1.0);
     let mut r = synth();
-    r.age = 1.5; // lp 0.75 -> factor 0.5
+    r.age = 1.5;
     op.apply(&mut r, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx(r.alpha, 0.5);
 }
@@ -156,8 +143,8 @@ fn sizechange_ramps_linearly() {
         &mut Rng::new(0),
     );
     let o = ovr();
-    let mut p = synth(); // initial.size 10, lifetime 2
-    p.age = 1.0; // lp 0.5 -> mult 0.5
+    let mut p = synth();
+    p.age = 1.0;
     op.apply(&mut p, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx(p.size, 5.0);
 }
@@ -171,7 +158,7 @@ fn alphachange_ramps_linearly() {
     );
     let o = ovr();
     let mut p = synth();
-    p.age = 1.5; // lp 0.75
+    p.age = 1.5;
     op.apply(&mut p, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx(p.alpha, 0.25);
 }
@@ -185,7 +172,7 @@ fn colorchange_ramps_rgb_over_initial() {
     );
     let o = ovr();
     let mut p = synth();
-    p.age = 1.0; // lp 0.5
+    p.age = 1.0;
     op.apply(&mut p, &step_ctx(0.0, 0.0, &[[0.0; 3]], &o));
     approx_v(p.color, [0.5, 0.5, 0.5]);
 }
@@ -202,7 +189,6 @@ fn controlpointattract_pulls_toward_cp() {
     p.position = [0.0, 0.0, 0.0];
     let cps = [[100.0, 0.0, 0.0]];
     op.apply(&mut p, &step_ctx(0.1, 0.0, &cps, &o));
-    // dir toward (100,0,0) is +x; vel += dir*scale*dt = 100*0.1 = 10
     approx_v(p.velocity, [10.0, 0.0, 0.0]);
 }
 
@@ -215,7 +201,7 @@ fn controlpointattract_ignores_beyond_threshold() {
     );
     let o = ovr();
     let mut p = synth();
-    p.position = [1000.0, 0.0, 0.0]; // beyond threshold/2 = 50
+    p.position = [1000.0, 0.0, 0.0];
     let cps = [[0.0, 0.0, 0.0]];
     op.apply(&mut p, &step_ctx(0.1, 0.0, &cps, &o));
     approx_v(p.velocity, [0.0, 0.0, 0.0]);
@@ -237,7 +223,6 @@ fn vortex_velocity_is_tangential() {
     p.position = [10.0, 0.0, 0.0];
     let cps = [[0.0, 0.0, 0.0]];
     op.apply(&mut p, &step_ctx(0.1, 0.0, &cps, &o));
-    // tangent = cross(z, radial=+x) = +y; radial component stays ~0.
     assert!(
         p.velocity[1] > 0.0,
         "expected +y tangential, got {:?}",
@@ -310,8 +295,6 @@ fn oscillateposition_mask_disables_axis() {
     approx(p.position[2], 0.0);
 }
 
-// ---- initializers ----------------------------------------------------------
-
 fn spawn_ctx<'a>(cps: &'a [Vec3], o: &'a kirie_render::particle::Overrides) -> SpawnCtx<'a> {
     SpawnCtx {
         overrides: o,
@@ -322,7 +305,6 @@ fn spawn_ctx<'a>(cps: &'a [Vec3], o: &'a kirie_render::particle::Overrides) -> S
 
 #[test]
 fn sizerandom_halves_and_applies_override() {
-    // min == max removes randomness: size = 10 * sizeOverride / 2.
     let mut init = Initializer::compile(&stage(json!({"name":"sizerandom","min":10.0,"max":10.0})));
     let o = ovr();
     let mut p = synth();
@@ -364,7 +346,7 @@ fn velocityrandom_flips_y_and_adds() {
     p.velocity = [1.0, 1.0, 0.0];
     let mut rng = Rng::new(0);
     init.apply(&mut p, &spawn_ctx(&[[0.0; 3]], &o), &mut rng);
-    approx_v(p.velocity, [1.0, -9.0, 0.0]); // 1 + (-10)
+    approx_v(p.velocity, [1.0, -9.0, 0.0]);
 }
 
 #[test]
@@ -401,7 +383,6 @@ fn mapsequence_round_robins_and_spawns_at_cp() {
     let o = ovr();
     let cps = [[7.0, 8.0, 9.0]];
     let mut rng = Rng::new(0);
-    // Four spawns rotate the (10,0,0) base velocity by 0, 90, 180, 270 degrees.
     let mut vels = Vec::new();
     for _ in 0..4 {
         let mut p = synth();
@@ -429,8 +410,6 @@ fn unknown_stage_names_are_noops() {
     assert_eq!(p, before);
 }
 
-// ---- emitter timing / sim --------------------------------------------------
-
 fn sim_with(emitter: serde_json::Value, extra: serde_json::Value) -> ParticleSim {
     let mut def = serde_json::Map::new();
     def.insert("maxcount".into(), json!(1000));
@@ -448,7 +427,6 @@ fn sim_with(emitter: serde_json::Value, extra: serde_json::Value) -> ParticleSim
 
 #[test]
 fn boxrandom_rate_emits_one_per_tenth_second() {
-    // rate 10, dt 0.1 -> 1 particle/step; long lifetimes so none die.
     let mut sim = sim_with(
         json!({"name":"boxrandom","rate":10.0}),
         json!({"initializer":[{"name":"lifetimerandom","min":100.0,"max":100.0}]}),
@@ -462,7 +440,6 @@ fn boxrandom_rate_emits_one_per_tenth_second() {
 
 #[test]
 fn one_spawn_per_frame_flag_limits_emission() {
-    // rate 100 would spawn 10/step; flags 0x2 caps to 1/step.
     let mut sim = sim_with(
         json!({"name":"boxrandom","rate":100.0,"flags":2}),
         json!({"initializer":[{"name":"lifetimerandom","min":100.0,"max":100.0}]}),
@@ -475,7 +452,6 @@ fn one_spawn_per_frame_flag_limits_emission() {
 
 #[test]
 fn instantaneous_emits_single_burst() {
-    // instantaneous -> emit round(rate) once, then nothing more.
     let mut sim = sim_with(
         json!({"name":"boxrandom","rate":8.0,"instantaneous":1}),
         json!({"initializer":[{"name":"lifetimerandom","min":100.0,"max":100.0}]}),
@@ -495,18 +471,17 @@ fn emitter_delay_gates_start() {
         json!({"initializer":[{"name":"lifetimerandom","min":100.0,"max":100.0}]}),
     );
     for _ in 0..5 {
-        sim.update(0.1); // t up to 0.5 < delay
+        sim.update(0.1);
     }
     assert_eq!(sim.total_spawned(), 0);
     for _ in 0..10 {
-        sim.update(0.1); // crosses t=1.0
+        sim.update(0.1);
     }
     assert!(sim.total_spawned() > 0, "should emit after the delay");
 }
 
 #[test]
 fn lifetime_culls_particles() {
-    // Emit continuously with a 1s lifetime; live count converges to rate*lifetime.
     let mut sim = sim_with(
         json!({"name":"boxrandom","rate":10.0}),
         json!({"initializer":[{"name":"lifetimerandom","min":1.0,"max":1.0}]}),
@@ -515,7 +490,6 @@ fn lifetime_culls_particles() {
         sim.update(1.0 / 30.0);
     }
     let live = sim.live_count();
-    // 10 particles/s spawned, each living 1s -> ~10 alive (± a frame's worth).
     assert!((9..=11).contains(&live), "live={live}");
 }
 
@@ -548,7 +522,6 @@ fn dt_is_capped_at_max_dt() {
         json!({"name":"boxrandom","rate":10.0}),
         json!({"initializer":[{"name":"lifetimerandom","min":100.0,"max":100.0}]}),
     );
-    // A huge dt advances time by at most MAX_DT (0.1) -> 1 spawn, not thousands.
     sim.update(1000.0);
     assert_eq!(sim.total_spawned(), 1);
     approx(sim.time(), kirie_render::particle::MAX_DT);
