@@ -87,8 +87,12 @@ impl Engine {
 }
 
 fn classify(background: &Path) -> Result<Wallpaper> {
-    resolve::classify(&background.to_string_lossy())
-        .with_context(|| format!("previewing {}", background.display()))
+    let wallpaper = resolve::classify(&background.to_string_lossy())
+        .with_context(|| format!("previewing {}", background.display()))?;
+    if let Some(note) = resolve::refuse_without_assets(&wallpaper) {
+        anyhow::bail!(note);
+    }
+    Ok(wallpaper)
 }
 
 fn size_for(wallpaper: &Wallpaper, background: &Path, edge: u32) -> SurfaceSize {

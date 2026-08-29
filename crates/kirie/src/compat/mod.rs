@@ -177,6 +177,10 @@ fn offscreen_only(args: args::CompatArgs) -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+        if let Some(note) = resolve::refuse_without_assets(&wallpaper) {
+            eprintln!("{note}");
+            return ExitCode::FAILURE;
+        }
         return match screenshot::capture(
             &wallpaper,
             args.window_scaling,

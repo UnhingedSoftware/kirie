@@ -136,6 +136,10 @@ fn run_screenshot(args: &CompatArgs, path: &Path) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    if let Some(note) = resolve::refuse_without_assets(&wallpaper) {
+        eprintln!("{note}");
+        return ExitCode::FAILURE;
+    }
     let audio = Arc::new(AudioCapture::start(audio_config(args)));
     match screenshot::capture(
         &wallpaper,
@@ -195,6 +199,11 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let targets = build_targets(&args);
     if targets.is_empty() {
         eprintln!("At least one background ID must be specified");
+        return ExitCode::FAILURE;
+    }
+
+    if resolve::we_assets_dir().is_none() && targets.iter().any(|t| matches!(t.spec, RunSpec::Scene { .. })) {
+        eprintln!("{}", resolve::missing_assets_note());
         return ExitCode::FAILURE;
     }
 

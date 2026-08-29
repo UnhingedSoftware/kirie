@@ -106,6 +106,23 @@ pub fn steam_assets_candidates() -> Vec<PathBuf> {
 }
 
 #[must_use]
+pub fn needs_we_assets(wallpaper: &Wallpaper) -> bool {
+    matches!(wallpaper, Wallpaper::Scene { .. })
+}
+
+#[must_use]
+pub fn missing_assets_note() -> String {
+    "Wallpaper Engine's base assets are missing, and scenes are drawn with them.\n\
+     Install Wallpaper Engine from Steam, or point KIRIE_WE_ASSETS at a copy of its\n\
+     assets directory. `kirie assets` reports what was found."
+        .to_owned()
+}
+
+#[must_use]
+pub fn refuse_without_assets(wallpaper: &Wallpaper) -> Option<String> {
+    (needs_we_assets(wallpaper) && we_assets_dir().is_none()).then(missing_assets_note)
+}
+
 pub fn we_assets_dir_or_warn() -> Option<PathBuf> {
     let dir = we_assets_dir();
     if dir.is_none() {
