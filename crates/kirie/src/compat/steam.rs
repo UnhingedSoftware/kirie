@@ -1,6 +1,10 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+#[cfg(target_os = "macos")]
+const STEAM_ROOTS: [&str; 1] = ["Library/Application Support/Steam"];
+
+#[cfg(not(target_os = "macos"))]
 const STEAM_ROOTS: [&str; 4] = [
     ".local/share/Steam",
     ".steam/steam",
