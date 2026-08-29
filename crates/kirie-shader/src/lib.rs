@@ -199,6 +199,28 @@ void main() {\n\
     }
 
     #[test]
+    fn a_combo_reads_as_a_boolean_condition() {
+        let src = "\
+// [COMBO] {\"material\":\"Invert\",\"combo\":\"INVERT\",\"type\":\"options\",\"default\":0}\n\
+uniform sampler2D g_Texture0; // {\"default\":\"util/white\"}\n\
+varying vec2 v_TexCoord;\n\
+void main() {\n\
+    float mask = texSample2D(g_Texture0, v_TexCoord).r;\n\
+    mask = INVERT ? 1.0 - mask : mask;\n\
+    if (INVERT) { mask = mask * 0.5; }\n\
+    gl_FragColor = vec4(mask);\n\
+}\n";
+        translate(
+            Stage::Fragment,
+            "combo.frag",
+            src,
+            &NoIncludes,
+            &ShaderInputs::default(),
+        )
+        .expect("a combo used as a condition still translates");
+    }
+
+    #[test]
     fn translate_minimal_vertex() {
         let src = "\
 attribute vec3 a_Position;\n\

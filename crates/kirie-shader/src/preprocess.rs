@@ -258,6 +258,7 @@ pub fn preprocess(
         unused_io.push(name.clone());
     }
 
+    let expanded = booleanize_combo_conditions(&expanded, &active);
     let body = expanded.replace("gl_FragColor", "out_FragColor");
     let body = if unused_io.is_empty() {
         body
@@ -524,6 +525,88 @@ fn resolve_combos(
         }
     }
     values
+}
+
+fn booleanize_combo_conditions(source: &str, combos: &BTreeMap<String, i32>) -> String {
+    if combos.is_empty() {
+        return source.to_owned();
+    }
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        if line.trim_start().starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+        out.push_str(&booleanize_line(line, combos));
+    }
+    out
+}
+
+fn booleanize_line(line: &str, combos: &BTreeMap<String, i32>) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let mut out = String::with_capacity(line.len());
+    let mut at = 0usize;
+    while at < chars.len() {
+        let ch = chars[at];
+        if ch.is_ascii_alphabetic() || ch == '_' {
+            let start = at;
+            while at < chars.len() && (chars[at].is_ascii_alphanumeric() || chars[at] == '_') {
+                at += 1;
+            }
+            let word: String = chars[start..at].iter().collect();
+            if combos.contains_key(&word) && wants_bool(&chars, start, at) {
+                out.push_str("bool(");
+                out.push_str(&word);
+                out.push(')');
+            } else {
+                out.push_str(&word);
+            }
+        } else {
+            out.push(ch);
+            at += 1;
+        }
+    }
+    out
+}
+
+fn wants_bool(chars: &[char], start: usize, end: usize) -> bool {
+    let mut after = end;
+    while chars.get(after).is_some_and(|c| c.is_whitespace()) {
+        after += 1;
+    }
+    let next = chars.get(after).copied();
+    if next == Some('?') {
+        return true;
+    }
+    if matches!(next, Some('&' | '|')) && chars.get(after + 1) == next.as_ref().copied().as_ref() {
+        return true;
+    }
+
+    let mut before = start;
+    while before > 0 && chars[before - 1].is_whitespace() {
+        before -= 1;
+    }
+    if before >= 2 {
+        let prev = chars[before - 1];
+        if matches!(prev, '&' | '|') && chars[before - 2] == prev {
+            return true;
+        }
+    }
+    if next == Some(')') && before > 0 && chars[before - 1] == '(' {
+        let mut word_end = before - 1;
+        while word_end > 0 && chars[word_end - 1].is_whitespace() {
+            word_end -= 1;
+        }
+        let mut word_start = word_end;
+        while word_start > 0
+            && (chars[word_start - 1].is_ascii_alphanumeric() || chars[word_start - 1] == '_')
+        {
+            word_start -= 1;
+        }
+        let keyword: String = chars[word_start..word_end].iter().collect();
+        return keyword == "if" || keyword == "while";
+    }
+    false
 }
 
 #[cfg(test)]
