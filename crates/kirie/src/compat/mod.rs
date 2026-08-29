@@ -5,6 +5,7 @@ pub mod common;
 pub mod ipc_app;
 pub mod list_props;
 pub mod playlist;
+#[cfg(target_os = "linux")]
 pub mod power;
 pub mod resolve;
 #[cfg(target_os = "linux")]

@@ -47,11 +47,11 @@ fn bench() -> Result<()> {
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
     {
-        crate::compat::run::set_render_scale(s);
+        crate::compat::common::set_render_scale(s);
     }
 
     if std::env::var_os("KIRIE_BENCH_FIT").is_some() {
-        crate::compat::run::set_fit_render_to_output(true);
+        crate::compat::common::set_fit_render_to_output(true);
     }
 
     let wp = classify(&dir.to_string_lossy()).map_err(|e| anyhow::anyhow!("{e}"))?;
