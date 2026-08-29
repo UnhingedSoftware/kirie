@@ -62,10 +62,7 @@ pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
 }
 
 pub(crate) fn object_filter() -> (Vec<i64>, Vec<i64>) {
-    OBJECT_FILTER
-        .lock()
-        .map(|slot| slot.clone())
-        .unwrap_or_default()
+    OBJECT_FILTER.lock().map(|slot| slot.clone()).unwrap_or_default()
 }
 
 static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

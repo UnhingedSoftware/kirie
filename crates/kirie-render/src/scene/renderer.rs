@@ -562,8 +562,7 @@ impl SceneRenderer {
                     SceneItem::Particle(p) => p.id,
                     SceneItem::Model(m) => m.id,
                 };
-                let wanted =
-                    options.only_objects.is_empty() || options.only_objects.contains(&id);
+                let wanted = options.only_objects.is_empty() || options.only_objects.contains(&id);
                 if wanted && !options.skip_objects.contains(&id) {
                     continue;
                 }
@@ -2929,10 +2928,7 @@ fn effective_blending(
     }
 }
 
-fn skinned_position(
-    vertex: &kirie_formats::model::PuppetVertex,
-    pose: Option<&[[f32; 16]]>,
-) -> [f32; 3] {
+fn skinned_position(vertex: &kirie_formats::model::PuppetVertex, pose: Option<&[[f32; 16]]>) -> [f32; 3] {
     let Some(pose) = pose.filter(|matrices| !matrices.is_empty()) else {
         return vertex.position;
     };
@@ -2992,13 +2988,7 @@ fn puppet_scene_vertices(
         let p = skinned_position(v, pose);
         let dx = p[0] * scale[0];
         let dy = p[1] * scale[1];
-        out.extend_from_slice(&[
-            cx + dx * c - dy * s,
-            cy + dx * s + dy * c,
-            0.0,
-            v.uv[0],
-            v.uv[1],
-        ]);
+        out.extend_from_slice(&[cx + dx * c - dy * s, cy + dx * s + dy * c, 0.0, v.uv[0], v.uv[1]]);
     }
     out
 }
