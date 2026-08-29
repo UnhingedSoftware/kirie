@@ -257,14 +257,45 @@ impl SceneRenderer {
 
         let parent_by_id: HashMap<i64, Option<i64>> =
             scene.objects.iter().map(|o| (o.base.id, o.base.parent)).collect();
+        let bones_by_object: HashMap<i64, Vec<kirie_formats::model::PuppetBone>> = scene
+            .objects
+            .iter()
+            .filter_map(|o| {
+                let ObjectKind::Image(image) = &o.kind else {
+                    return None;
+                };
+                let path = image.model.as_ref()?.puppet.as_ref()?;
+                let bytes = source.load(path)?;
+                let mesh = kirie_formats::model::PuppetMesh::parse(&bytes).ok()?;
+                (!mesh.bones.is_empty()).then_some((o.base.id, mesh.bones))
+            })
+            .collect();
+
+        let attach_offset = |o: &kirie_scene::object::Object| -> [f32; 2] {
+            let (Some(name), Some(parent)) = (o.base.attachment.as_deref(), o.base.parent) else {
+                return [0.0, 0.0];
+            };
+            bones_by_object
+                .get(&parent)
+                .and_then(|bones| bones.iter().find(|bone| bone.name == name))
+                .map_or([0.0, 0.0], |bone| {
+                    let t = bone.translation();
+                    [t[0], t[1]]
+                })
+        };
+
         let local_xf: HashMap<i64, LocalXf> = scene
             .objects
             .iter()
             .map(|o| {
+                let attach = attach_offset(o);
                 (
                     o.base.id,
                     LocalXf {
-                        origin: [o.base.origin.value[0], o.base.origin.value[1]],
+                        origin: [
+                            o.base.origin.value[0] + attach[0],
+                            o.base.origin.value[1] + attach[1],
+                        ],
                         scale: [o.base.scale.value[0], o.base.scale.value[1]],
                         angle_z: o.base.angles.value[2],
                         parent: o.base.parent,

@@ -309,10 +309,105 @@ pub struct PuppetVertex {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PuppetBone {
+    pub name: String,
+    pub transform: [f32; 16],
+}
+
+impl PuppetBone {
+    #[must_use]
+    pub const fn translation(&self) -> [f32; 3] {
+        [self.transform[12], self.transform[13], self.transform[14]]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PuppetMesh {
     pub version: String,
     pub vertices: Vec<PuppetVertex>,
     pub indices: Vec<u16>,
+    pub bones: Vec<PuppetBone>,
+}
+
+impl PuppetMesh {
+    #[must_use]
+    pub fn bone(&self, name: &str) -> Option<&PuppetBone> {
+        self.bones.iter().find(|bone| bone.name == name)
+    }
+}
+
+const PUPPET_BONE_MATRIX_FLOATS: usize = 16;
+
+fn read_f32(data: &[u8], at: usize) -> Option<f32> {
+    let bytes = data.get(at..at + 4)?;
+    Some(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn puppet_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, usize)> {
+    let tail = data.get(at..stop)?;
+    let len = tail.iter().position(|b| *b == 0)?;
+    if len == 0 || len > 63 {
+        return None;
+    }
+    let name = std::str::from_utf8(tail.get(..len)?).ok()?;
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || " _-.:".contains(c))
+    {
+        return None;
+    }
+
+    let matrix_at = at + len + 1;
+    if matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4 > stop {
+        return None;
+    }
+    let mut transform = [0.0_f32; PUPPET_BONE_MATRIX_FLOATS];
+    for (slot, value) in transform.iter_mut().enumerate() {
+        *value = read_f32(data, matrix_at + slot * 4)?;
+    }
+
+    let affine = (transform[15] - 1.0).abs() < 1e-3
+        && transform[3].abs() < 1e-3
+        && transform[7].abs() < 1e-3
+        && transform[11].abs() < 1e-3
+        && transform.iter().all(|value| value.is_finite());
+    if !affine {
+        return None;
+    }
+
+    Some((
+        PuppetBone {
+            name: name.to_owned(),
+            transform,
+        },
+        matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4,
+    ))
+}
+
+fn parse_puppet_bones(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
+    let Some(block) = data
+        .get(mdls_offset..)
+        .and_then(|tail| tail.windows(7).position(|w| w == b"DAT0001"))
+        .map(|at| mdls_offset + at + 7)
+    else {
+        return Vec::new();
+    };
+    let stop = data
+        .get(block..)
+        .and_then(|tail| tail.windows(4).position(|w| w == b"MDLA"))
+        .map_or(data.len(), |at| block + at);
+
+    let mut bones = Vec::new();
+    let mut at = block;
+    while at < stop {
+        if let Some((bone, next)) = puppet_bone_at(data, at, stop) {
+            bones.push(bone);
+            at = next;
+        } else {
+            at += 1;
+        }
+    }
+    bones
 }
 
 impl PuppetMesh {
@@ -356,6 +451,7 @@ impl PuppetMesh {
             version,
             vertices,
             indices,
+            bones: parse_puppet_bones(data, mdls_offset),
         })
     }
 
@@ -763,6 +859,27 @@ mod tests {
         b.extend_from_slice(b"MDLS");
         b.extend_from_slice(&[0u8; 8]);
         b
+    }
+
+    #[test]
+    fn puppet_bones_are_named_and_carry_a_transform() {
+        let mut bytes = synth_puppet("MDLV0023", 3, 1);
+        bytes.extend_from_slice(b"DAT0001\0");
+        bytes.extend_from_slice(&[0x1a, 0x98, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00]);
+        bytes.extend_from_slice(b"head\0");
+        let matrix: [f32; 16] = [
+            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -32.5, 116.4, 0.0, 1.0,
+        ];
+        for value in matrix {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+        bytes.extend_from_slice(b"MDLA0006\0");
+
+        let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
+        assert_eq!(mesh.bones.len(), 1, "the header before the first bone is skipped");
+        let bone = mesh.bone("head").expect("a bone named head");
+        assert_eq!(bone.translation(), [-32.5, 116.4, 0.0]);
+        assert!(mesh.bone("missing").is_none());
     }
 
     #[test]

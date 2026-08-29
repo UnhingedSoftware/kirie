@@ -134,6 +134,7 @@ pub struct BaseObject {
     pub angles: UserSetting<Vec3>,
     pub angles_animation: Option<AnimationTrack>,
     pub visible: UserSetting<bool>,
+    pub attachment: Option<String>,
 }
 
 impl BaseObject {
@@ -160,6 +161,11 @@ impl BaseObject {
             sortorder: obj.get("sortorder").and_then(coerce_i64).unwrap_or(0),
             dependencies,
             parent: obj.get("parent").and_then(coerce_i64),
+            attachment: obj
+                .get("attachment")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .filter(|name| !name.is_empty()),
             origin: user_vec3(obj, "origin", [0.0, 0.0, 0.0]),
             scale: user_vec3(obj, "scale", [1.0, 1.0, 1.0]),
             angles: user_vec3(obj, "angles", [0.0, 0.0, 0.0]),
