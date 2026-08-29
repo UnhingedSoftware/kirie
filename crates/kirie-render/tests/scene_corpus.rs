@@ -271,6 +271,8 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
                 clamp: ClampMode::Clamp,
                 disable_parallax: false,
                 fit_render_to_output: false,
+                only_objects: Vec::new(),
+                skip_objects: Vec::new(),
             },
             None,
             &[],
