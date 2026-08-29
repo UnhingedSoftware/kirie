@@ -92,7 +92,6 @@ pub(crate) fn battery_fps_target() -> Arc<std::sync::atomic::AtomicU32> {
         .clone()
 }
 
-
 #[must_use]
 pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
     match mode {
@@ -101,4 +100,3 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
         ClampMode::Repeat => kirie_render::ClampMode::Repeat,
     }
 }
-

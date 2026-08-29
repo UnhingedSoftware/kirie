@@ -196,72 +196,72 @@ impl AudioCapture {
 
         #[cfg(target_os = "linux")]
         {
-        let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
-        let device = config.device.clone();
-        let gate = config.resolved_gate();
-        let level: f32 = std::env::var("KIRIE_AUDIO_BOOST")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|b: &f32| b.is_finite() && *b >= 0.0)
-            .unwrap_or(0.12)
-            .min(64.0);
-        let tick = config.tick;
-        let power_save = config.power_save.clone();
+            let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
+            let device = config.device.clone();
+            let gate = config.resolved_gate();
+            let level: f32 = std::env::var("KIRIE_AUDIO_BOOST")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .filter(|b: &f32| b.is_finite() && *b >= 0.0)
+                .unwrap_or(0.12)
+                .min(64.0);
+            let tick = config.tick;
+            let power_save = config.power_save.clone();
 
-        let (prod, cons) = HeapRb::<u8>::new(RING_CAPACITY).split();
+            let (prod, cons) = HeapRb::<u8>::new(RING_CAPACITY).split();
 
-        let worker_thread = {
-            let shared = shared.clone();
-            let shutdown = shutdown.clone();
-            Some(
-                std::thread::Builder::new()
-                    .name("kirie-audio-fft".into())
-                    .spawn(move || {
-                        worker::run(
-                            cons,
-                            shared,
-                            shutdown,
-                            worker::WorkerParams {
-                                level,
-                                gate,
-                                tick,
-                                power_save,
-                            },
-                        );
-                    })
-                    .expect("spawn fft worker"),
-            )
-        };
+            let worker_thread = {
+                let shared = shared.clone();
+                let shutdown = shutdown.clone();
+                Some(
+                    std::thread::Builder::new()
+                        .name("kirie-audio-fft".into())
+                        .spawn(move || {
+                            worker::run(
+                                cons,
+                                shared,
+                                shutdown,
+                                worker::WorkerParams {
+                                    level,
+                                    gate,
+                                    tick,
+                                    power_save,
+                                },
+                            );
+                        })
+                        .expect("spawn fft worker"),
+                )
+            };
 
-        let capture_thread = {
-            let status = status.clone();
-            let shutdown = shutdown.clone();
-            let device = device.clone();
-            let player_cap = player.clone();
-            Some(
-                std::thread::Builder::new()
-                    .name("kirie-audio-capture".into())
-                    .spawn(move || {
-                        if let Err(e) = capture::run(device, prod, &status, &shutdown, &player_cap) {
-                            status.store(CaptureStatus::Failed.as_u8(), Ordering::Relaxed);
-                            tracing::warn!(error = %e, "audio capture unavailable; spectrum silent");
-                        }
-                    })
-                    .expect("spawn capture thread"),
-            )
-        };
+            let capture_thread = {
+                let status = status.clone();
+                let shutdown = shutdown.clone();
+                let device = device.clone();
+                let player_cap = player.clone();
+                Some(
+                    std::thread::Builder::new()
+                        .name("kirie-audio-capture".into())
+                        .spawn(move || {
+                            if let Err(e) = capture::run(device, prod, &status, &shutdown, &player_cap) {
+                                status.store(CaptureStatus::Failed.as_u8(), Ordering::Relaxed);
+                                tracing::warn!(error = %e, "audio capture unavailable; spectrum silent");
+                            }
+                        })
+                        .expect("spawn capture thread"),
+                )
+            };
 
-        Self {
-            shared,
-            status,
-            shutdown,
-            device,
-            player,
-            capture_thread,
-            worker_thread,
+            Self {
+                shared,
+                status,
+                shutdown,
+                device,
+                player,
+                capture_thread,
+                worker_thread,
+            }
         }
     }
-        }
 
     pub fn set_player(&self, hint: Option<PlayerHint>) {
         self.player.store(hint.map(Arc::new));

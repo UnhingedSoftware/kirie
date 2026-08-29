@@ -1,6 +1,6 @@
 pub mod args;
-pub mod common;
 pub mod autopin;
+pub mod common;
 #[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;

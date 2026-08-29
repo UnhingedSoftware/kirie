@@ -29,7 +29,6 @@ type LiveWebBackend = kirie_web::hosted::HostedBackend;
 #[cfg(all(feature = "web-webview", not(feature = "web-cef")))]
 type LiveWebBackend = kirie_web::viewhost::ViewHostBackend;
 
-
 fn wants_audio(spec: &RunSpec) -> bool {
     match spec {
         RunSpec::Scene { .. } => true,
