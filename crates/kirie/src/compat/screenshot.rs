@@ -515,6 +515,7 @@ fn capture_web_host(
     Ok(true)
 }
 
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 const WEB_CONTENT_FLOOR: f64 = 0.02;
 
 fn capture_budget(wallpaper: &Wallpaper) -> Duration {

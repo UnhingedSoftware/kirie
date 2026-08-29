@@ -39,12 +39,15 @@ pub(crate) fn object_filter() -> (Vec<i64>, Vec<i64>) {
     OBJECT_FILTER.lock().map(|slot| slot.clone()).unwrap_or_default()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn set_disable_parallax(on: bool) {
     DISABLE_PARALLAX.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn disable_parallax() -> bool {
     DISABLE_PARALLAX.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -79,12 +82,14 @@ pub fn to_render_scaling(mode: ScalingMode) -> kirie_render::ScalingMode {
     }
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn power_save_flag() -> Arc<std::sync::atomic::AtomicBool> {
     static FLAG: std::sync::OnceLock<Arc<std::sync::atomic::AtomicBool>> = std::sync::OnceLock::new();
     FLAG.get_or_init(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
         .clone()
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn battery_fps_target() -> Arc<std::sync::atomic::AtomicU32> {
     static TARGET: std::sync::OnceLock<Arc<std::sync::atomic::AtomicU32>> = std::sync::OnceLock::new();
     TARGET
