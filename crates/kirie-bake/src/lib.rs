@@ -26,12 +26,16 @@ pub(crate) fn we_assets_shaders_dir() -> Option<std::path::PathBuf> {
         .find(|p| p.is_dir())
 }
 
+#[cfg(target_os = "linux")]
 pub fn limit_malloc_arenas(n: i32) {
     // SAFETY: mallopt sets an allocator tuning knob; no pointers involved.
     unsafe {
         libc::mallopt(libc::M_ARENA_MAX, n.max(1));
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+pub fn limit_malloc_arenas(_n: i32) {}
 
 pub fn resolve_vulkan_icd(selector: &str) -> Option<std::path::PathBuf> {
     let sel = selector.trim().to_ascii_lowercase();
@@ -73,6 +77,7 @@ pub fn resolve_vulkan_icd(selector: &str) -> Option<std::path::PathBuf> {
     Some(manifest)
 }
 
+#[cfg(target_os = "linux")]
 pub fn trim_heap() {
     // SAFETY: malloc_trim(0) only releases free arena memory back to the OS;
     unsafe {
@@ -80,6 +85,10 @@ pub fn trim_heap() {
     }
 }
 
+#[cfg(not(target_os = "linux"))]
+pub fn trim_heap() {}
+
+#[cfg(target_os = "linux")]
 pub fn pageout_cold_libs() {
     const COLD: &[&str] = &[
         "libnvidia-gpucomp",
@@ -117,6 +126,9 @@ pub fn pageout_cold_libs() {
         }
     }
 }
+
+#[cfg(not(target_os = "linux"))]
+pub fn pageout_cold_libs() {}
 
 pub fn map_readonly(path: &std::path::Path) -> std::io::Result<Box<dyn AsRef<[u8]> + Send + Sync>> {
     let f = std::fs::File::open(path)?;

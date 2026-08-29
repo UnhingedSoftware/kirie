@@ -7,7 +7,6 @@ repository.workspace = true
 description = "System audio capture (PulseAudio monitor) + real-FFT spectrum bands for audio-reactive wallpapers"
 
 [dependencies]
-libpulse-binding = { workspace = true }
 ringbuf = { workspace = true }
 rustfft = { workspace = true }
 arc-swap = { workspace = true }
@@ -19,3 +18,6 @@ ringbuf = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = { workspace = true }

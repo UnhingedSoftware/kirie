@@ -1,9 +1,12 @@
 #![forbid(unsafe_code)]
 
+#[cfg(target_os = "linux")]
 mod automute;
+#[cfg(target_os = "linux")]
 mod capture;
 pub mod dsp;
 mod spectrum;
+#[cfg(target_os = "linux")]
 mod worker;
 
 use std::sync::Arc;
@@ -12,15 +15,19 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+#[cfg(target_os = "linux")]
 use ringbuf::HeapRb;
+#[cfg(target_os = "linux")]
 use ringbuf::traits::Split;
 
+#[cfg(target_os = "linux")]
 pub use automute::AutoMute;
 pub use dsp::{
     BANDS_16, BANDS_32, BANDS_64, DEFAULT_GATE, DEFAULT_LEVEL, SAMPLE_RATE, SMOOTH_RATE, WAVE_BUFFER_SIZE,
 };
 pub use spectrum::AudioSpectrum;
 
+#[cfg(target_os = "linux")]
 const RING_CAPACITY: usize = SAMPLE_RATE as usize / 4;
 
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +107,15 @@ impl AudioConfig {
         }
     }
 
+    #[must_use]
+    pub fn disabled_on(config: Self) -> Self {
+        Self {
+            enabled: false,
+            ..config
+        }
+    }
+
+    #[cfg(target_os = "linux")]
     fn resolved_gate(&self) -> f32 {
         if let Some(g) = self.gate {
             return g;
@@ -144,10 +160,27 @@ pub struct AudioCapture {
 impl AudioCapture {
     #[must_use]
     pub fn start(config: AudioConfig) -> Self {
+        #[cfg(not(target_os = "linux"))]
+        let config = AudioConfig::disabled_on(config);
         let shared = Arc::new(ArcSwap::from_pointee(AudioSpectrum::silent()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let player = PlayerSlot::default();
 
+        #[cfg(not(target_os = "linux"))]
+        {
+            let status = Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8()));
+            return Self {
+                shared,
+                status,
+                shutdown,
+                device: config.device.clone(),
+                player,
+                capture_thread: None,
+                worker_thread: None,
+            };
+        }
+
+        #[cfg(target_os = "linux")]
         if !config.enabled {
             let status = Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8()));
             return Self {
@@ -161,6 +194,8 @@ impl AudioCapture {
             };
         }
 
+        #[cfg(target_os = "linux")]
+        {
         let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
         let device = config.device.clone();
         let gate = config.resolved_gate();
@@ -226,6 +261,7 @@ impl AudioCapture {
             worker_thread,
         }
     }
+        }
 
     pub fn set_player(&self, hint: Option<PlayerHint>) {
         self.player.store(hint.map(Arc::new));

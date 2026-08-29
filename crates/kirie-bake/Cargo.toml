@@ -15,7 +15,6 @@ naga = { workspace = true }
 rkyv = { workspace = true }
 blake3 = { workspace = true }
 memmap2 = { workspace = true }
-libc = { workspace = true }
 notify = { workspace = true }
 rayon = { workspace = true }
 crossbeam-channel = { workspace = true }
@@ -25,3 +24,6 @@ tracing = { workspace = true }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { workspace = true }

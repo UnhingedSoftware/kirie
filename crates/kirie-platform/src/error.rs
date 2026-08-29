@@ -2,12 +2,15 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum PlatformError {
+    #[cfg(target_os = "linux")]
     #[error("failed to connect to the wayland display: {0}")]
     Connect(#[from] wayland_client::ConnectError),
 
+    #[cfg(target_os = "linux")]
     #[error("failed to enumerate wayland globals: {0}")]
     Globals(#[from] wayland_client::globals::GlobalError),
 
+    #[cfg(target_os = "linux")]
     #[error("required wayland global unavailable: {0}")]
     Bind(#[from] wayland_client::globals::BindError),
 
@@ -29,6 +32,7 @@ pub enum PlatformError {
     #[error("adapter reports no supported configuration for output {output:?}")]
     UnsupportedSurface { output: String },
 
+    #[cfg(target_os = "linux")]
     #[error("event loop error: {0}")]
     EventLoop(#[from] smithay_client_toolkit::reexports::calloop::Error),
 

@@ -1,10 +1,15 @@
+#[cfg(target_os = "linux")]
 use std::ptr::NonNull;
 use std::sync::OnceLock;
 
+#[cfg(target_os = "linux")]
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle};
+#[cfg(target_os = "linux")]
 use wayland_client::protocol::wl_surface::WlSurface;
+#[cfg(target_os = "linux")]
 use wayland_client::{Connection, Proxy};
 
+#[cfg(target_os = "linux")]
 use crate::error::PlatformError;
 
 pub fn power_preference() -> wgpu::PowerPreference {
@@ -15,6 +20,7 @@ pub fn power_preference() -> wgpu::PowerPreference {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
@@ -88,6 +94,7 @@ pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Gpu {
     pub fn new_for_surface(
         conn: &Connection,
@@ -159,6 +166,7 @@ impl Gpu {
 }
 
 #[allow(unsafe_code)]
+#[cfg(target_os = "linux")]
 fn create_wgpu_surface(
     instance: &wgpu::Instance,
     conn: &Connection,

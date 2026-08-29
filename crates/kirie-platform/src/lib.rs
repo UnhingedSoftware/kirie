@@ -11,6 +11,7 @@ mod platform;
 #[cfg(target_os = "linux")]
 mod pointer;
 mod renderer;
+#[cfg(target_os = "linux")]
 mod snapshot;
 mod test_pattern;
 #[cfg(target_os = "linux")]
