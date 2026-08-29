@@ -46,13 +46,33 @@ impl MacPlatform {
         finish_launching(&app);
 
         let screens = NSScreen::screens(mtm);
+        let wanted: Vec<(Retained<NSScreen>, String)> = screens
+            .iter()
+            .enumerate()
+            .map(|(index, screen)| {
+                let name = screen_name(&screen, index);
+                (screen, name)
+            })
+            .collect();
+        let asked: Vec<&(Retained<NSScreen>, String)> = wanted
+            .iter()
+            .filter(|(_, name)| {
+                options.screen_roots.is_empty() || options.screen_roots.iter().any(|want| want == name)
+            })
+            .collect();
+        let chosen = if asked.is_empty() {
+            tracing::warn!(
+                asked = ?options.screen_roots,
+                "no screen matched; covering every screen instead"
+            );
+            wanted.iter().collect()
+        } else {
+            asked
+        };
+
         let mut windows = Vec::new();
-        for (index, screen) in screens.iter().enumerate() {
-            let name = screen_name(&screen, index);
-            if !options.screen_roots.is_empty() && !options.screen_roots.iter().any(|want| want == &name) {
-                continue;
-            }
-            windows.push((desktop_window(mtm, &screen), pixel_size(&screen), name));
+        for (screen, name) in chosen {
+            windows.push((desktop_window(mtm, screen), pixel_size(screen), name.clone()));
         }
         if windows.is_empty() {
             return Err(PlatformError::NoCrtcs);
