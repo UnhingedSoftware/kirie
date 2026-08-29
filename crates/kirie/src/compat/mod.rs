@@ -1,10 +1,13 @@
 pub mod args;
+pub mod common;
 pub mod autopin;
+#[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;
 pub mod playlist;
 pub mod power;
 pub mod resolve;
+#[cfg(target_os = "linux")]
 pub mod run;
 pub mod screenshot;
 pub mod signals;
@@ -55,7 +58,14 @@ pub fn run(argv: &[OsString]) -> ExitCode {
         return fail(&argv0, &e);
     }
 
-    run::dispatch(validated)
+    #[cfg(target_os = "linux")]
+    {
+        run::dispatch(validated)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        offscreen_only(validated)
+    }
 }
 
 fn pin_gpu(argv: &[OsString]) {
@@ -137,4 +147,55 @@ fn init_tracing() {
             .with_writer(std::io::stderr)
             .try_init();
     });
+}
+
+#[cfg(not(target_os = "linux"))]
+fn offscreen_only(args: args::CompatArgs) -> ExitCode {
+    common::set_render_scale(args.render_scale as f32);
+    common::set_fit_render_to_output(args.fit_render_to_output);
+    common::set_object_filter(&args.render_debug);
+
+    if args.list_properties || args.list_properties_json {
+        return match list_props::run(&args) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    if let Some(path) = args.screenshot.clone() {
+        let Some(bg) = args.default_background.clone() else {
+            eprintln!("At least one background ID must be specified");
+            return ExitCode::FAILURE;
+        };
+        let wallpaper = match resolve::classify(&bg) {
+            Ok(found) => found,
+            Err(err) => {
+                eprintln!("{err}");
+                return ExitCode::FAILURE;
+            }
+        };
+        return match screenshot::capture(
+            &wallpaper,
+            args.window_scaling,
+            args.window_clamp,
+            args.screenshot_delay,
+            &path,
+            None,
+            &args.set_properties,
+        ) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(err) => {
+                eprintln!("screenshot failed: {err:#}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
+    eprintln!(
+        "this build renders off-screen only: --screenshot, `preview` and `list` work, putting a wallpaper on a screen does not"
+    );
+    ExitCode::FAILURE
 }

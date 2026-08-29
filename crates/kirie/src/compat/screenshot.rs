@@ -294,7 +294,7 @@ pub(crate) fn build_offscreen_renderer(
     let renderer: Box<dyn Renderer> = match wallpaper {
         Wallpaper::Video { media } => {
             let options = VideoOptions {
-                scaling: super::run::to_video_scaling(scaling),
+                scaling: super::common::to_video_scaling(scaling),
                 enable_audio: false,
                 ..VideoOptions::default()
             };
@@ -306,20 +306,20 @@ pub(crate) fn build_offscreen_renderer(
             let content =
                 ImageContent::from_path(file).with_context(|| format!("loading image {}", file.display()))?;
             let options = ImageOptions {
-                scaling: super::run::to_render_scaling(scaling),
-                clamp: super::run::to_render_clamp(clamp),
+                scaling: super::common::to_render_scaling(scaling),
+                clamp: super::common::to_render_clamp(clamp),
             };
             Box::new(ImageRenderer::new(render_target, &content, options).context("building image renderer")?)
         }
         Wallpaper::Scene { dir } => {
             let options = kirie_render::SceneOptions {
-                render_scale: super::run::render_scale(),
-                scaling: super::run::to_render_scaling(scaling),
-                clamp: super::run::to_render_clamp(clamp),
+                render_scale: super::common::render_scale(),
+                scaling: super::common::to_render_scaling(scaling),
+                clamp: super::common::to_render_clamp(clamp),
                 disable_parallax: false,
-                fit_render_to_output: super::run::fit_render_to_output(),
-                only_objects: super::run::object_filter().0,
-                skip_objects: super::run::object_filter().1,
+                fit_render_to_output: super::common::fit_render_to_output(),
+                only_objects: super::common::object_filter().0,
+                skip_objects: super::common::object_filter().1,
             };
             kirie_render::load_workshop_scene(
                 render_target,
@@ -342,7 +342,7 @@ pub(crate) fn build_offscreen_renderer(
             let mut backend = <HostedBackend as WebBackend>::new(&url, size)
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
 
-            let props = super::run::web_props_json(dir, properties);
+            let props = super::common::web_props_json(dir, properties);
             if props != "{}" {
                 backend.apply_properties(&props);
             }
