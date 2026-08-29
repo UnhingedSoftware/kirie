@@ -1191,11 +1191,12 @@ fn build_object(
         };
         let (vertex_buffer, puppet_indices) = match geometry {
             Geometry::Puppet | Geometry::PuppetCopy => {
-                let verts = puppet_copy_vertices(
-                    puppet.as_ref().expect("puppet base has a mesh"),
-                    (iw, ih),
-                    uv_crop,
-                );
+                let mesh = puppet.as_ref().expect("puppet base has a mesh");
+                let verts = if matches!(geometry, Geometry::Puppet) {
+                    puppet_scene_vertices(mesh, origin, scale, angle_z, scene_size)
+                } else {
+                    puppet_copy_vertices(mesh, (iw, ih), uv_crop)
+                };
                 (
                     create_buffer_init(
                         device,
@@ -1203,7 +1204,7 @@ fn build_object(
                         bytemuck::cast_slice(&verts),
                         wgpu::BufferUsages::VERTEX,
                     ),
-                    Some(create_puppet_index_buffer(device, puppet.as_ref().unwrap())),
+                    Some(create_puppet_index_buffer(device, mesh)),
                 )
             }
             _ => {
@@ -2858,6 +2859,32 @@ fn puppet_copy_vertices(
     let mut out = Vec::with_capacity(mesh.vertices.len() * 5);
     for v in &mesh.vertices {
         out.extend_from_slice(&[hw + v.position[0], hh + v.position[1], 0.0, v.uv[0], v.uv[1]]);
+    }
+    out
+}
+
+fn puppet_scene_vertices(
+    mesh: &kirie_formats::model::PuppetMesh,
+    origin: [f32; 2],
+    scale: [f32; 2],
+    angle_z: f32,
+    scene: (u32, u32),
+) -> Vec<f32> {
+    let (sw, sh) = (scene.0 as f32, scene.1 as f32);
+    let cx = origin[0] - sw / 2.0;
+    let cy = origin[1] - sh / 2.0;
+    let (s, c) = (-angle_z).sin_cos();
+    let mut out = Vec::with_capacity(mesh.vertices.len() * 5);
+    for v in &mesh.vertices {
+        let dx = v.position[0] * scale[0];
+        let dy = v.position[1] * scale[1];
+        out.extend_from_slice(&[
+            cx + dx * c - dy * s,
+            cy + dx * s + dy * c,
+            0.0,
+            v.uv[0],
+            v.uv[1],
+        ]);
     }
     out
 }
