@@ -22,6 +22,12 @@ wayland-backend = { workspace = true }
 wayland-protocols-wlr = { workspace = true }
 x11rb = { workspace = true, features = ["allow-unsafe-code", "as-raw-xcb-connection", "randr"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSScreen", "NSGraphics", "NSRunningApplication", "NSEvent", "objc2-core-foundation"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSGeometry", "NSDate", "NSRunLoop", "NSObjCRuntime", "objc2-core-foundation"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "libc", "CGWindowLevel"] }
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 

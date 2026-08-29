@@ -4,6 +4,8 @@ pub mod common;
 #[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;
+#[cfg(target_os = "macos")]
+pub mod mac_present;
 pub mod playlist;
 #[cfg(target_os = "linux")]
 pub mod power;
@@ -199,8 +201,15 @@ fn offscreen_only(args: args::CompatArgs) -> ExitCode {
         };
     }
 
-    eprintln!(
-        "this build renders off-screen only: --screenshot, `preview` and `list` work, putting a wallpaper on a screen does not"
-    );
-    ExitCode::FAILURE
+    #[cfg(target_os = "macos")]
+    {
+        mac_present::present(&args)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!(
+            "this build renders off-screen only: --screenshot, `preview` and `list` work, putting a wallpaper on a screen does not"
+        );
+        ExitCode::FAILURE
+    }
 }

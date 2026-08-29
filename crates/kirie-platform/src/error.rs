@@ -50,4 +50,12 @@ pub enum PlatformError {
 
     #[error("no active RANDR CRTC found; nothing to render on")]
     NoCrtcs,
+
+    #[cfg(target_os = "macos")]
+    #[error("the wallpaper window must be built on the main thread")]
+    NotMainThread,
+
+    #[cfg(target_os = "macos")]
+    #[error("cannot prepare the desktop window: {0}")]
+    MacWindow(String),
 }

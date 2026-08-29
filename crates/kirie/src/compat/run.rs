@@ -881,7 +881,6 @@ fn build_web(
     }
 }
 
-#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 #[allow(clippy::too_many_arguments)]
 fn build_for_spec(
     target: &RenderTarget<'_>,

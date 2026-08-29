@@ -101,6 +101,7 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
     }
 }
 
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
 pub fn web_props_json(dir: &std::path::Path, overrides: &[(String, String)]) -> String {
     use kirie_formats::project::{Project, PropertyEntry, PropertyKind};
     let Ok(project) = Project::from_path(dir.join("project.json")) else {

@@ -75,7 +75,6 @@ pub enum PropertyImpact {
     NeedsRebuild,
 }
 
-#[cfg(target_os = "linux")]
 pub type RendererFactory = Box<dyn FnMut(&RenderTarget<'_>) -> Box<dyn Renderer>>;
 
 #[cfg(target_os = "linux")]
