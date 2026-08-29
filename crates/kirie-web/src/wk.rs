@@ -183,39 +183,42 @@ fn make_window(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSWindow> {
 
 fn load(view: &WKWebView, url: &str) -> Result<(), WebError> {
     let text = NSString::from_str(url);
-    let target =
-        unsafe { NSURL::URLWithString(&text) }.ok_or_else(|| WebError::Url(format!("not a url: {url}")))?;
+    let target = NSURL::URLWithString(&text).ok_or_else(|| WebError::Url(format!("not a url: {url}")))?;
 
     if url.starts_with("file://") {
-        let root = unsafe { target.URLByDeletingLastPathComponent() }.unwrap_or_else(|| target.clone());
+        let root = target
+            .URLByDeletingLastPathComponent()
+            .unwrap_or_else(|| target.clone());
+        // SAFETY: both URLs are owned here and outlive the call
         unsafe { view.loadFileURL_allowingReadAccessToURL(&target, &root) };
         return Ok(());
     }
 
-    let request = unsafe { NSURLRequest::requestWithURL(&target) };
+    let request = NSURLRequest::requestWithURL(&target);
+    // SAFETY: the request is owned here and outlives the call
     unsafe { view.loadRequest(&request) };
     Ok(())
 }
 
 fn pump_runloop() {
-    let until = unsafe { NSDate::dateWithTimeIntervalSinceNow(PUMP) };
-    unsafe { NSRunLoop::currentRunLoop().runUntilDate(&until) };
+    let until = NSDate::dateWithTimeIntervalSinceNow(PUMP);
+    NSRunLoop::currentRunLoop().runUntilDate(&until);
 }
 
 fn frame_from_image(image: &NSImage) -> Option<FrameBuffer> {
-    let tiff = unsafe { image.TIFFRepresentation() }?;
-    let rep = unsafe { NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff) }?;
+    let tiff = image.TIFFRepresentation()?;
+    let rep = NSBitmapImageRep::initWithData(NSBitmapImageRep::alloc(), &tiff)?;
 
-    let width = u32::try_from(unsafe { rep.pixelsWide() }).ok()?;
-    let height = u32::try_from(unsafe { rep.pixelsHigh() }).ok()?;
-    let stride = usize::try_from(unsafe { rep.bytesPerRow() }).ok()?;
-    let samples = unsafe { rep.samplesPerPixel() };
-    let bits = unsafe { rep.bitsPerPixel() };
+    let width = u32::try_from(rep.pixelsWide()).ok()?;
+    let height = u32::try_from(rep.pixelsHigh()).ok()?;
+    let stride = usize::try_from(rep.bytesPerRow()).ok()?;
+    let samples = rep.samplesPerPixel();
+    let bits = rep.bitsPerPixel();
     if width == 0 || height == 0 || bits != 32 || samples < 3 {
         return None;
     }
 
-    let pixels = unsafe { rep.bitmapData() };
+    let pixels = rep.bitmapData();
     let row_bytes = width as usize * 4;
     let total = stride.checked_mul(height as usize)?;
     // SAFETY: `rep` owns `total` bytes of pixel data for as long as it is alive

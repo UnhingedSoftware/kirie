@@ -366,17 +366,12 @@ fn desktop_window_alloc(mtm: MainThreadMarker, screen: &NSScreen) -> Retained<NS
     window
 }
 
-#[allow(unsafe_code)]
 fn finish_launching(app: &NSApplication) {
-    // SAFETY: AppKit start-up call made on the main thread before any window
-    unsafe { app.finishLaunching() };
+    app.finishLaunching();
 }
 
-#[allow(unsafe_code)]
 fn desktop_level() -> isize {
-    // SAFETY: a pure CoreGraphics lookup with no pointer arguments
-    let level = unsafe { CGWindowLevelForKey(CGWindowLevelKey::DesktopWindowLevelKey) };
-    level as isize
+    CGWindowLevelForKey(CGWindowLevelKey::DesktopWindowLevelKey) as isize
 }
 
 fn bring_up_gpu(window: &NSWindow) -> Result<(Gpu, wgpu::Surface<'static>), PlatformError> {

@@ -345,7 +345,7 @@ pub(crate) fn build_offscreen_renderer(
             )
             .with_context(|| format!("building scene renderer for {}", dir.display()))?
         }
-        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+        #[cfg(any(feature = "web-cef", all(feature = "web-webview", not(target_os = "macos"))))]
         Wallpaper::Web { dir, file } => {
             use kirie_web::{WebBackend, WebRenderer, WebSize};
             let url = super::resolve::web_entry_url(dir, file);
@@ -353,7 +353,7 @@ pub(crate) fn build_offscreen_renderer(
                 width: capture_size.width,
                 height: capture_size.height,
             };
-            let mut backend = <OffscreenWebBackend as WebBackend>::new(&url, size)
+            let mut backend = <LiveWebBackend as WebBackend>::new(&url, size)
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
 
             let props = super::common::web_props_json(dir, properties);
@@ -369,7 +369,7 @@ pub(crate) fn build_offscreen_renderer(
             }
             Box::new(renderer)
         }
-        #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
+        #[cfg(not(any(feature = "web-cef", all(feature = "web-webview", not(target_os = "macos")))))]
         Wallpaper::Web { .. } => {
             bail!(
                 "cannot screenshot a web wallpaper: this build has no web backend \
@@ -387,6 +387,11 @@ pub(crate) fn build_offscreen_renderer(
     };
     Ok(renderer)
 }
+
+#[cfg(feature = "web-cef")]
+type LiveWebBackend = kirie_web::hosted::HostedBackend;
+#[cfg(all(feature = "web-webview", not(feature = "web-cef"), not(target_os = "macos")))]
+type LiveWebBackend = kirie_web::viewhost::ViewHostBackend;
 
 #[cfg(feature = "web-cef")]
 type OffscreenWebBackend = kirie_web::hosted::HostedBackend;

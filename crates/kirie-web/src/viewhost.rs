@@ -24,7 +24,7 @@ pub fn set_embedded_host(bytes: &'static [u8]) {
 }
 
 fn extracted_host() -> Option<std::path::PathBuf> {
-    extract_host(*EMBEDDED_HOST.get()?)
+    extract_host(EMBEDDED_HOST.get()?)
 }
 
 fn extract_host(bytes: &[u8]) -> Option<std::path::PathBuf> {
@@ -279,9 +279,7 @@ impl WebBackend for ViewHostBackend {
         while self.stdout.try_recv().is_ok() {}
 
         let path = snap_path();
-        let Some(arg) = path.to_str() else {
-            return None;
-        };
+        let arg = path.to_str()?;
         self.send_line(&format!("snap {arg}"));
 
         let reply = self.await_snap_reply();

@@ -23,6 +23,13 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         eprintln!("{note}");
         return ExitCode::FAILURE;
     }
+    if matches!(wallpaper, Wallpaper::Web { .. }) {
+        eprintln!(
+            "web wallpapers cannot be shown on the desktop on macOS yet; previewing one works, \
+             putting it up does not"
+        );
+        return ExitCode::FAILURE;
+    }
     if let Some(reason) = wallpaper.unrunnable_reason() {
         eprintln!("cannot put this on a screen: {reason}");
         return ExitCode::FAILURE;
