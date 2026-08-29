@@ -25,13 +25,15 @@ use super::text::TextFonts;
 use super::texture::TextureRegistry;
 use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SceneOptions {
     pub scaling: ScalingMode,
     pub clamp: ClampMode,
     pub render_scale: f32,
     pub disable_parallax: bool,
     pub fit_render_to_output: bool,
+    pub only_objects: Vec<i64>,
+    pub skip_objects: Vec<i64>,
 }
 
 impl Default for SceneOptions {
@@ -42,6 +44,8 @@ impl Default for SceneOptions {
             render_scale: 1.0,
             disable_parallax: false,
             fit_render_to_output: false,
+            only_objects: Vec::new(),
+            skip_objects: Vec::new(),
         }
     }
 }
@@ -537,6 +541,28 @@ impl SceneRenderer {
                 _ => false,
             }))
         .then_some(scene_snapshot);
+
+        if !options.only_objects.is_empty() || !options.skip_objects.is_empty() {
+            for item in &mut items {
+                let id = match item {
+                    SceneItem::Image(o) => o.id,
+                    SceneItem::Text(t) => t.id,
+                    SceneItem::Particle(p) => p.id,
+                    SceneItem::Model(m) => m.id,
+                };
+                let wanted =
+                    options.only_objects.is_empty() || options.only_objects.contains(&id);
+                if wanted && !options.skip_objects.contains(&id) {
+                    continue;
+                }
+                match item {
+                    SceneItem::Image(o) => o.visible = false,
+                    SceneItem::Text(t) => t.visible = false,
+                    SceneItem::Particle(p) => p.visible = false,
+                    SceneItem::Model(m) => m.visible = false,
+                }
+            }
+        }
 
         let (blit_pipeline, blit_bind, blit_window) =
             build_blit(device, target.format, &scene_fbo, &fbo_sampler);

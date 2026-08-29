@@ -43,6 +43,31 @@ pub(crate) fn render_scale() -> f32 {
     f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
+static OBJECT_FILTER: std::sync::Mutex<(Vec<i64>, Vec<i64>)> =
+    std::sync::Mutex::new((Vec::new(), Vec::new()));
+
+pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
+    let mut only = Vec::new();
+    let mut skip = Vec::new();
+    for entry in debug {
+        match entry {
+            super::args::RenderDebug::Object(id) => only.push(*id),
+            super::args::RenderDebug::SkipObject(id) => skip.push(*id),
+            _ => {}
+        }
+    }
+    if let Ok(mut slot) = OBJECT_FILTER.lock() {
+        *slot = (only, skip);
+    }
+}
+
+pub(crate) fn object_filter() -> (Vec<i64>, Vec<i64>) {
+    OBJECT_FILTER
+        .lock()
+        .map(|slot| slot.clone())
+        .unwrap_or_default()
+}
+
 static DISABLE_PARALLAX: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 pub(crate) fn set_disable_parallax(on: bool) {
@@ -181,6 +206,7 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
 pub fn dispatch(args: CompatArgs) -> ExitCode {
     set_render_scale(args.render_scale as f32);
     set_fit_render_to_output(args.fit_render_to_output);
+    set_object_filter(&args.render_debug);
 
     if args.list_properties || args.list_properties_json {
         return match list_props::run(&args) {
@@ -1084,6 +1110,8 @@ fn build_for_spec(
                 clamp: to_render_clamp(*clamp),
                 disable_parallax: disable_parallax(),
                 fit_render_to_output: fit_render_to_output(),
+                only_objects: object_filter().0,
+                skip_objects: object_filter().1,
             };
             match kirie_render::load_workshop_scene(
                 target,

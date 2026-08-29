@@ -318,6 +318,8 @@ pub(crate) fn build_offscreen_renderer(
                 clamp: super::run::to_render_clamp(clamp),
                 disable_parallax: false,
                 fit_render_to_output: super::run::fit_render_to_output(),
+                only_objects: super::run::object_filter().0,
+                skip_objects: super::run::object_filter().1,
             };
             kirie_render::load_workshop_scene(
                 render_target,
