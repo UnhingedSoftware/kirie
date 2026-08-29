@@ -44,19 +44,26 @@ pub const BRIDGE_INIT: &str = r#"(function(){
   // the listener. Without replay the batch lands on nothing and the page runs
   // on its JS defaults forever — ION, for one, defaults its particle count to
   // 0, so the wallpaper visibly loses a whole feature.
+  // A page may assign the listener from inside its render, so each batch is
+  // replayed at most once: replaying on every assignment loops apply -> render
+  // -> assign -> apply until the framework tears the tree down.
   var propListener = undefined;
   var lastUser;
   var lastGeneral;
+  var userDelivered = false;
+  var generalDelivered = false;
   Object.defineProperty(window, 'wallpaperPropertyListener', {
     configurable: true,
     get: function () { return propListener; },
     set: function (l) {
       propListener = l;
       if (!l) { return; }
-      if (lastUser !== undefined && typeof l.applyUserProperties === 'function') {
+      if (lastUser !== undefined && !userDelivered && typeof l.applyUserProperties === 'function') {
+        userDelivered = true;
         try { l.applyUserProperties(lastUser); } catch (e) { /* page's problem, not the bridge's */ }
       }
-      if (lastGeneral !== undefined && typeof l.applyGeneralProperties === 'function') {
+      if (lastGeneral !== undefined && !generalDelivered && typeof l.applyGeneralProperties === 'function') {
+        generalDelivered = true;
         try { l.applyGeneralProperties(lastGeneral); } catch (e) {}
       }
     }
@@ -64,14 +71,18 @@ pub const BRIDGE_INIT: &str = r#"(function(){
   window.__wpApplyProps = function (p) {
     lastUser = p;
     var l = propListener;
-    if (l && typeof l.applyUserProperties === 'function') {
+    var can = l && typeof l.applyUserProperties === 'function';
+    userDelivered = !!can;
+    if (can) {
       try { l.applyUserProperties(p); } catch (e) {}
     }
   };
   window.__wpApplyGeneral = function (p) {
     lastGeneral = p;
     var l = propListener;
-    if (l && typeof l.applyGeneralProperties === 'function') {
+    var can = l && typeof l.applyGeneralProperties === 'function';
+    generalDelivered = !!can;
+    if (can) {
       try { l.applyGeneralProperties(p); } catch (e) {}
     }
   };
