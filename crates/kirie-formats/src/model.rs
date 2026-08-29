@@ -289,7 +289,9 @@ impl PuppetLayout {
 
 #[derive(Debug, Error)]
 pub enum PuppetError {
-    #[error("unsupported puppet model header {header:?} (expected \"MDLV0013\", \"MDLV0021\" or \"MDLV0023\")")]
+    #[error(
+        "unsupported puppet model header {header:?} (expected \"MDLV0013\", \"MDLV0021\" or \"MDLV0023\")"
+    )]
     BadMagic { header: String },
 
     #[error("no usable puppet mesh block found before the MDLS marker")]
@@ -456,9 +458,7 @@ impl PuppetMesh {
         let now = self.bone_world(animation, time);
         rest.iter()
             .zip(now.iter())
-            .map(|(bind, posed)| {
-                matrix_invert(*bind).map_or(IDENTITY, |back| matrix_mul(back, *posed))
-            })
+            .map(|(bind, posed)| matrix_invert(*bind).map_or(IDENTITY, |back| matrix_mul(back, *posed)))
             .collect()
     }
 }
@@ -543,10 +543,8 @@ fn matrix_invert(m: [f32; 16]) -> Option<[f32; 16]> {
     ];
     for row in 0..3 {
         for column in 0..3 {
-            if let (Some(slot), Some(value)) = (
-                out.get_mut(row * 4 + column),
-                cofactor.get(row * 3 + column),
-            ) {
+            if let (Some(slot), Some(value)) = (out.get_mut(row * 4 + column), cofactor.get(row * 3 + column))
+            {
                 *slot = *value;
             }
         }
@@ -590,48 +588,6 @@ fn read_cstring(data: &[u8], at: usize, stop: usize) -> Option<(String, usize)> 
     let len = tail.iter().position(|b| *b == 0)?;
     let text = std::str::from_utf8(tail.get(..len)?).ok()?;
     Some((text.to_owned(), at + len + 1))
-}
-
-fn puppet_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, usize)> {
-    let tail = data.get(at..stop)?;
-    let len = tail.iter().position(|b| *b == 0)?;
-    if len == 0 || len > 63 {
-        return None;
-    }
-    let name = std::str::from_utf8(tail.get(..len)?).ok()?;
-    if !name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || " _-.:".contains(c))
-    {
-        return None;
-    }
-
-    let matrix_at = at + len + 1;
-    if matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4 > stop {
-        return None;
-    }
-    let mut transform = [0.0_f32; PUPPET_BONE_MATRIX_FLOATS];
-    for (slot, value) in transform.iter_mut().enumerate() {
-        *value = read_f32(data, matrix_at + slot * 4)?;
-    }
-
-    let affine = (transform[15] - 1.0).abs() < 1e-3
-        && transform[3].abs() < 1e-3
-        && transform[7].abs() < 1e-3
-        && transform[11].abs() < 1e-3
-        && transform.iter().all(|value| value.is_finite());
-    if !affine {
-        return None;
-    }
-
-    Some((
-        PuppetBone {
-            name: name.to_owned(),
-            parent: -1,
-            transform,
-        },
-        matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4,
-    ))
 }
 
 fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetAttachment> {
@@ -898,9 +854,7 @@ fn find_puppet_mesh_block(data: &[u8], mdls_offset: usize, stride: usize) -> Opt
         let vertices_offset = offset + PUPPET_MESH_HEADER_SIZE;
         let index_length_offset = vertices_offset + vertex_bytes;
 
-        if vertex_bytes == 0
-            || !vertex_bytes.is_multiple_of(stride)
-            || index_length_offset + 4 > mdls_offset
+        if vertex_bytes == 0 || !vertex_bytes.is_multiple_of(stride) || index_length_offset + 4 > mdls_offset
         {
             offset += 1;
             continue;
@@ -936,11 +890,7 @@ fn decode_puppet_vertex(chunk: &[u8], layout: PuppetLayout) -> PuppetVertex {
         }
     };
     PuppetVertex {
-        position: [
-            f(layout.position),
-            f(layout.position + 4),
-            f(layout.position + 8),
-        ],
+        position: [f(layout.position), f(layout.position + 4), f(layout.position + 8)],
         normal: [f(layout.normal), f(layout.normal + 4), f(layout.normal + 8)],
         tangent: layout.tangent.map_or([0.0, 0.0, 0.0, 1.0], |at| {
             [f(at), f(at + 4), f(at + 8), f(at + 12)]
@@ -1376,10 +1326,7 @@ mod tests {
         assert_eq!(animation.tracks[1].bone, 1);
 
         let pose = mesh.pose(Some(animation), 0.0);
-        assert!(
-            (pose[0][12]).abs() < 0.01,
-            "an unmoved bone poses to identity"
-        );
+        assert!((pose[0][12]).abs() < 0.01, "an unmoved bone poses to identity");
         assert!(
             (pose[1][12] - 401.0).abs() < 1.0,
             "a moved bone carries the animation delta, got {}",
@@ -1397,8 +1344,22 @@ mod tests {
             b.extend_from_slice(name.as_bytes());
             b.push(0);
             let matrix: [f32; 16] = [
-                1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, translation[0],
-                translation[1], 0.0, 1.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                translation[0],
+                translation[1],
+                0.0,
+                1.0,
             ];
             for value in matrix {
                 b.extend_from_slice(&value.to_le_bytes());
