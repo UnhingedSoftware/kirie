@@ -8,14 +8,16 @@ description = "Wayland presentation layer: layer-shell surfaces per output, wgpu
 
 [dependencies]
 kirie-bake = { path = "../kirie-bake" }
-smithay-client-toolkit = { workspace = true }
-wayland-client = { workspace = true }
 wgpu = { workspace = true }
 raw-window-handle = { workspace = true }
 pollster = { workspace = true }
 bytemuck = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { workspace = true }
+wayland-client = { workspace = true }
 wayland-backend = { workspace = true }
 wayland-protocols-wlr = { workspace = true }
 x11rb = { workspace = true, features = ["allow-unsafe-code", "as-raw-xcb-connection", "randr"] }
