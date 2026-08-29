@@ -267,7 +267,7 @@ impl SceneRenderer {
                 let path = image.model.as_ref()?.puppet.as_ref()?;
                 let bytes = source.load(path)?;
                 let mesh = kirie_formats::model::PuppetMesh::parse(&bytes).ok()?;
-                (!mesh.bones.is_empty()).then_some((o.base.id, mesh.bones))
+                (!mesh.attachments.is_empty()).then_some((o.base.id, mesh.attachments))
             })
             .collect();
 
@@ -1038,6 +1038,16 @@ fn build_object(
             })
     };
 
+    let pose = puppet.as_ref().map(|mesh| {
+        let wanted = image
+            .animationlayers
+            .iter()
+            .find(|layer| layer.visible.value)
+            .and_then(|layer| u32::try_from(layer.animation.value).ok());
+        let animation = wanted.and_then(|id| mesh.animation(id));
+        mesh.pose(animation, 0.0)
+    });
+
     let (mut iw, mut ih) = (image.size[0] as u32, image.size[1] as u32);
     let (world_origin, world_scale, world_angle_z) = world;
     let mut origin = world_origin;
@@ -1224,9 +1234,9 @@ fn build_object(
             Geometry::Puppet | Geometry::PuppetCopy => {
                 let mesh = puppet.as_ref().expect("puppet base has a mesh");
                 let verts = if matches!(geometry, Geometry::Puppet) {
-                    puppet_scene_vertices(mesh, origin, scale, angle_z, scene_size)
+                    puppet_scene_vertices(mesh, origin, scale, angle_z, scene_size, pose.as_deref())
                 } else {
-                    puppet_copy_vertices(mesh, (iw, ih), uv_crop)
+                    puppet_copy_vertices(mesh, (iw, ih), uv_crop, pose.as_deref())
                 };
                 (
                     create_buffer_init(
@@ -2881,15 +2891,48 @@ fn effective_blending(
     }
 }
 
+fn skinned_position(
+    vertex: &kirie_formats::model::PuppetVertex,
+    pose: Option<&[[f32; 16]]>,
+) -> [f32; 3] {
+    let Some(pose) = pose.filter(|matrices| !matrices.is_empty()) else {
+        return vertex.position;
+    };
+    let mut out = [0.0_f32; 3];
+    let mut total = 0.0;
+    for (index, weight) in vertex.bone_indices.iter().zip(vertex.bone_weights.iter()) {
+        if *weight <= 0.0 {
+            continue;
+        }
+        let Some(matrix) = usize::try_from(*index).ok().and_then(|at| pose.get(at)) else {
+            continue;
+        };
+        let moved = kirie_formats::model::puppet_skin_point(vertex.position, *matrix);
+        for (slot, value) in out.iter_mut().zip(moved.iter()) {
+            *slot += value * weight;
+        }
+        total += weight;
+    }
+    if total <= 0.0 {
+        return vertex.position;
+    }
+    for slot in &mut out {
+        *slot /= total;
+    }
+    out
+}
+
 fn puppet_copy_vertices(
     mesh: &kirie_formats::model::PuppetMesh,
     size: (u32, u32),
     _uv_crop: [f32; 2],
+    pose: Option<&[[f32; 16]]>,
 ) -> Vec<f32> {
     let (hw, hh) = (size.0 as f32 / 2.0, size.1 as f32 / 2.0);
     let mut out = Vec::with_capacity(mesh.vertices.len() * 5);
     for v in &mesh.vertices {
-        out.extend_from_slice(&[hw + v.position[0], hh + v.position[1], 0.0, v.uv[0], v.uv[1]]);
+        let p = skinned_position(v, pose);
+        out.extend_from_slice(&[hw + p[0], hh + p[1], 0.0, v.uv[0], v.uv[1]]);
     }
     out
 }
@@ -2900,6 +2943,7 @@ fn puppet_scene_vertices(
     scale: [f32; 2],
     angle_z: f32,
     scene: (u32, u32),
+    pose: Option<&[[f32; 16]]>,
 ) -> Vec<f32> {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
     let cx = origin[0] - sw / 2.0;
@@ -2907,8 +2951,9 @@ fn puppet_scene_vertices(
     let (s, c) = (-angle_z).sin_cos();
     let mut out = Vec::with_capacity(mesh.vertices.len() * 5);
     for v in &mesh.vertices {
-        let dx = v.position[0] * scale[0];
-        let dy = v.position[1] * scale[1];
+        let p = skinned_position(v, pose);
+        let dx = p[0] * scale[0];
+        let dy = p[1] * scale[1];
         out.extend_from_slice(&[
             cx + dx * c - dy * s,
             cy + dx * s + dy * c,
