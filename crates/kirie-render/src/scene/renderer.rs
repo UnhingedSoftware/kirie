@@ -261,7 +261,7 @@ impl SceneRenderer {
 
         let parent_by_id: HashMap<i64, Option<i64>> =
             scene.objects.iter().map(|o| (o.base.id, o.base.parent)).collect();
-        let bones_by_object: HashMap<i64, Vec<kirie_formats::model::PuppetBone>> = scene
+        let anchors_by_object: HashMap<i64, HashMap<String, [f32; 2]>> = scene
             .objects
             .iter()
             .filter_map(|o| {
@@ -271,7 +271,21 @@ impl SceneRenderer {
                 let path = image.model.as_ref()?.puppet.as_ref()?;
                 let bytes = source.load(path)?;
                 let mesh = kirie_formats::model::PuppetMesh::parse(&bytes).ok()?;
-                (!mesh.attachments.is_empty()).then_some((o.base.id, mesh.attachments))
+                let wanted = image
+                    .animationlayers
+                    .iter()
+                    .find(|layer| layer.visible.value)
+                    .and_then(|layer| u32::try_from(layer.animation.value).ok());
+                let pose = mesh.pose(wanted.and_then(|id| mesh.animation(id)), 0.0);
+                let anchors: HashMap<String, [f32; 2]> = mesh
+                    .attachments
+                    .iter()
+                    .filter_map(|point| {
+                        let at = mesh.anchor(&point.name, Some(&pose))?;
+                        Some((point.name.clone(), [at[0], at[1]]))
+                    })
+                    .collect();
+                (!anchors.is_empty()).then_some((o.base.id, anchors))
             })
             .collect();
 
@@ -279,13 +293,11 @@ impl SceneRenderer {
             let (Some(name), Some(parent)) = (o.base.attachment.as_deref(), o.base.parent) else {
                 return [0.0, 0.0];
             };
-            bones_by_object
+            anchors_by_object
                 .get(&parent)
-                .and_then(|bones| bones.iter().find(|bone| bone.name == name))
-                .map_or([0.0, 0.0], |bone| {
-                    let t = bone.translation();
-                    [t[0], t[1]]
-                })
+                .and_then(|anchors| anchors.get(name))
+                .copied()
+                .unwrap_or([0.0, 0.0])
         };
 
         let local_xf: HashMap<i64, LocalXf> = scene

@@ -323,6 +323,20 @@ impl PuppetBone {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PuppetAttachment {
+    pub name: String,
+    pub bone: usize,
+    pub transform: [f32; 16],
+}
+
+impl PuppetAttachment {
+    #[must_use]
+    pub const fn translation(&self) -> [f32; 3] {
+        [self.transform[12], self.transform[13], self.transform[14]]
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PuppetKey {
     pub translation: [f32; 3],
@@ -383,17 +397,24 @@ pub struct PuppetMesh {
     pub vertices: Vec<PuppetVertex>,
     pub indices: Vec<u16>,
     pub bones: Vec<PuppetBone>,
-    pub attachments: Vec<PuppetBone>,
+    pub attachments: Vec<PuppetAttachment>,
     pub animations: Vec<PuppetAnimation>,
 }
 
 impl PuppetMesh {
     #[must_use]
-    pub fn bone(&self, name: &str) -> Option<&PuppetBone> {
-        self.attachments
-            .iter()
-            .chain(self.bones.iter())
-            .find(|bone| bone.name == name)
+    pub fn attachment(&self, name: &str) -> Option<&PuppetAttachment> {
+        self.attachments.iter().find(|point| point.name == name)
+    }
+
+    #[must_use]
+    pub fn anchor(&self, name: &str, pose: Option<&[[f32; 16]]>) -> Option<[f32; 3]> {
+        let point = self.attachment(name)?;
+        let local = point.translation();
+        let Some(matrix) = pose.and_then(|matrices| matrices.get(point.bone)) else {
+            return Some(local);
+        };
+        Some(puppet_skin_point(local, *matrix))
     }
 
     #[must_use]
@@ -600,11 +621,11 @@ fn puppet_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, us
     ))
 }
 
-fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
+fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetAttachment> {
     let Some(block) = data
         .get(mdls_offset..)
-        .and_then(|tail| tail.windows(7).position(|w| w == b"DAT0001"))
-        .map(|at| mdls_offset + at + 7)
+        .and_then(|tail| tail.windows(4).position(|w| w == b"MDAT"))
+        .map(|at| mdls_offset + at)
     else {
         return Vec::new();
     };
@@ -612,18 +633,39 @@ fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> 
         .get(block..)
         .and_then(|tail| tail.windows(4).position(|w| w == b"MDLA"))
         .map_or(data.len(), |at| block + at);
-
-    let mut bones = Vec::new();
-    let mut at = block;
-    while at < stop {
-        if let Some((bone, next)) = puppet_bone_at(data, at, stop) {
-            bones.push(bone);
-            at = next;
-        } else {
-            at += 1;
-        }
+    let Some(count) = data
+        .get(block + 13..block + 15)
+        .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+    else {
+        return Vec::new();
+    };
+    if count == 0 || count > 4096 {
+        return Vec::new();
     }
-    bones
+
+    let mut out = Vec::with_capacity(count);
+    let mut at = block + 15;
+    for _ in 0..count {
+        let Some(bone) = data
+            .get(at..at + 2)
+            .map(|b| usize::from(u16::from_le_bytes([b[0], b[1]])))
+        else {
+            break;
+        };
+        let Some((name, after)) = read_cstring(data, at + 2, stop) else {
+            break;
+        };
+        let Some(transform) = read_affine(data, after, stop) else {
+            break;
+        };
+        out.push(PuppetAttachment {
+            name,
+            bone,
+            transform,
+        });
+        at = after + PUPPET_BONE_MATRIX_FLOATS * 4;
+    }
+    out
 }
 
 const PUPPET_BONE_MATRIX_BYTES: u32 = 64;
@@ -1236,8 +1278,10 @@ mod tests {
     #[test]
     fn puppet_bones_are_named_and_carry_a_transform() {
         let mut bytes = synth_puppet("MDLV0023", 3, 1);
-        bytes.extend_from_slice(b"DAT0001\0");
-        bytes.extend_from_slice(&[0x1a, 0x98, 0x01, 0x00, 0x01, 0x00, 0x02, 0x00]);
+        bytes.extend_from_slice(b"MDAT0001\0");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
         bytes.extend_from_slice(b"head\0");
         let matrix: [f32; 16] = [
             1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -32.5, 116.4, 0.0, 1.0,
@@ -1253,9 +1297,11 @@ mod tests {
             1,
             "the header before the first bone is skipped"
         );
-        let bone = mesh.bone("head").expect("a bone named head");
-        assert_eq!(bone.translation(), [-32.5, 116.4, 0.0]);
-        assert!(mesh.bone("missing").is_none());
+        let point = mesh.attachment("head").expect("an attachment named head");
+        assert_eq!(point.bone, 2);
+        assert_eq!(point.translation(), [-32.5, 116.4, 0.0]);
+        assert_eq!(mesh.anchor("head", None), Some([-32.5, 116.4, 0.0]));
+        assert!(mesh.attachment("missing").is_none());
     }
 
     fn synth_skeleton(bones: &[[f32; 2]]) -> Vec<u8> {
