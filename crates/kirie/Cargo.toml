@@ -12,7 +12,7 @@ default = ["tui"]
 portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
 portable-fatlibs = ["kirie-video/static-ffmpeg-from-source", "kirie-render/static-shaderc"]
 web-cef = ["dep:kirie-web", "kirie-web/host"]
-web-webview = ["dep:kirie-web", "kirie-web/webview-client"]
+web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview-mac"]
 web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
 vaapi = ["kirie-video/vaapi"]
 

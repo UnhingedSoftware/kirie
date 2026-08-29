@@ -101,6 +101,51 @@ pub trait WebBackend: Send {
     fn shutdown(&mut self);
 }
 
+pub trait OffscreenWeb {
+    fn open(url: &str, size: WebSize) -> Result<Self, WebError>
+    where
+        Self: Sized;
+
+    fn produces_frames(&self) -> bool;
+
+    fn tick(&mut self, dt: f32);
+
+    fn apply_properties(&mut self, json: &str);
+
+    fn snapshot(&mut self) -> Option<FrameBuffer>;
+
+    fn shutdown(&mut self);
+}
+
+impl<T: WebBackend> OffscreenWeb for T {
+    fn open(url: &str, size: WebSize) -> Result<Self, WebError>
+    where
+        Self: Sized,
+    {
+        <T as WebBackend>::new(url, size)
+    }
+
+    fn produces_frames(&self) -> bool {
+        WebBackend::produces_frames(self)
+    }
+
+    fn tick(&mut self, dt: f32) {
+        WebBackend::tick(self, dt);
+    }
+
+    fn apply_properties(&mut self, json: &str) {
+        WebBackend::apply_properties(self, json);
+    }
+
+    fn snapshot(&mut self) -> Option<FrameBuffer> {
+        WebBackend::snapshot(self)
+    }
+
+    fn shutdown(&mut self) {
+        WebBackend::shutdown(self);
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum WebError {
     #[error("web backend `{0}` is not compiled in (enable its cargo feature)")]

@@ -188,10 +188,24 @@ pub fn capture(
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
 ) -> Result<()> {
+    let capture_size = resolve_capture_size(wallpaper);
+
+    #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+    if let Wallpaper::Web { dir, file } = wallpaper
+        && capture_web_host(
+            dir,
+            file,
+            capture_size,
+            properties,
+            out_path,
+            capture_budget(wallpaper),
+        )?
+    {
+        return Ok(());
+    }
+
     let gpu = Headless::new()?;
     let format = wgpu::TextureFormat::Rgba8UnormSrgb;
-
-    let capture_size = resolve_capture_size(wallpaper);
     tracing::info!(
         width = capture_size.width,
         height = capture_size.height,
@@ -331,15 +345,15 @@ pub(crate) fn build_offscreen_renderer(
             )
             .with_context(|| format!("building scene renderer for {}", dir.display()))?
         }
-        #[cfg(feature = "web-cef")]
+        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
         Wallpaper::Web { dir, file } => {
-            use kirie_web::{WebBackend, WebRenderer, WebSize, hosted::HostedBackend};
+            use kirie_web::{WebBackend, WebRenderer, WebSize};
             let url = super::resolve::web_entry_url(dir, file);
             let size = WebSize {
                 width: capture_size.width,
                 height: capture_size.height,
             };
-            let mut backend = <HostedBackend as WebBackend>::new(&url, size)
+            let mut backend = <OffscreenWebBackend as WebBackend>::new(&url, size)
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
 
             let props = super::common::web_props_json(dir, properties);
@@ -355,11 +369,11 @@ pub(crate) fn build_offscreen_renderer(
             }
             Box::new(renderer)
         }
-        #[cfg(not(feature = "web-cef"))]
+        #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
         Wallpaper::Web { .. } => {
             bail!(
-                "cannot screenshot a web wallpaper: this build has no off-screen web backend \
-                 (rebuild with --features web-cef)"
+                "cannot screenshot a web wallpaper: this build has no web backend \
+                 (rebuild with --features web-webview)"
             );
         }
         Wallpaper::Unsupported { kind } => {
@@ -373,6 +387,13 @@ pub(crate) fn build_offscreen_renderer(
     };
     Ok(renderer)
 }
+
+#[cfg(feature = "web-cef")]
+type OffscreenWebBackend = kirie_web::hosted::HostedBackend;
+#[cfg(all(feature = "web-webview", not(feature = "web-cef"), not(target_os = "macos")))]
+type OffscreenWebBackend = kirie_web::viewhost::ViewHostBackend;
+#[cfg(all(feature = "web-webview", not(feature = "web-cef"), target_os = "macos"))]
+type OffscreenWebBackend = kirie_web::wk::WkBackend;
 
 pub fn capture_live(
     device: &wgpu::Device,
@@ -418,6 +439,78 @@ pub fn capture_live(
     }
     write_image(path, size.width, size.height, &pixels)
 }
+
+#[cfg(any(feature = "web-cef", feature = "web-webview"))]
+fn capture_web_host(
+    dir: &Path,
+    file: &str,
+    size: SurfaceSize,
+    properties: &[(String, String)],
+    out_path: &Path,
+    budget: Duration,
+) -> Result<bool> {
+    use kirie_web::{OffscreenWeb, PixelFormat, WebSize};
+
+    let url = super::resolve::web_entry_url(dir, file);
+    let mut backend = <OffscreenWebBackend as OffscreenWeb>::open(
+        &url,
+        WebSize {
+            width: size.width,
+            height: size.height,
+        },
+    )
+    .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
+
+    if backend.produces_frames() {
+        backend.shutdown();
+        return Ok(false);
+    }
+
+    let props = super::common::web_props_json(dir, properties);
+    if props != "{}" {
+        backend.apply_properties(&props);
+    }
+
+    let deadline = Instant::now() + budget;
+    let mut best: Option<(Vec<u8>, u32, u32)> = None;
+    loop {
+        backend.tick(1.0 / 60.0);
+        if let Some(frame) = backend.snapshot()
+            && frame.is_consistent()
+        {
+            let mut pixels = frame.data;
+            if matches!(frame.format, PixelFormat::Bgra8) {
+                for px in pixels.as_chunks_mut::<4>().0 {
+                    px.swap(0, 2);
+                }
+            }
+            let lit = lit_fraction(&pixels);
+            best = Some((pixels, frame.width, frame.height));
+            if lit > WEB_CONTENT_FLOOR {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    backend.shutdown();
+
+    let Some((pixels, width, height)) = best else {
+        return Ok(false);
+    };
+    if lit_fraction(&pixels) <= f64::EPSILON {
+        tracing::warn!(
+            path = %out_path.display(),
+            "web host returned only black frames (is its surface visible?)"
+        );
+    }
+    write_image(out_path, width, height, &pixels)?;
+    Ok(true)
+}
+
+const WEB_CONTENT_FLOOR: f64 = 0.02;
 
 fn capture_budget(wallpaper: &Wallpaper) -> Duration {
     let default_secs = match wallpaper {

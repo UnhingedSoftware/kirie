@@ -100,3 +100,53 @@ pub fn to_render_clamp(mode: ClampMode) -> kirie_render::ClampMode {
         ClampMode::Repeat => kirie_render::ClampMode::Repeat,
     }
 }
+
+pub fn web_props_json(dir: &std::path::Path, overrides: &[(String, String)]) -> String {
+    use kirie_formats::project::{Project, PropertyEntry, PropertyKind};
+    let Ok(project) = Project::from_path(dir.join("project.json")) else {
+        return "{}".to_owned();
+    };
+    let over: std::collections::HashMap<&str, &str> =
+        overrides.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+    let mut out = String::from("{");
+    let mut first = true;
+    for (name, entry) in &project.general.properties {
+        let PropertyEntry::Property(p) = entry else {
+            continue;
+        };
+        let raw = over.get(name.as_str()).copied();
+        let value = match &p.kind {
+            PropertyKind::Bool { value } => {
+                let v = raw.map_or(*value, |r| matches!(r.trim(), "1" | "true" | "True" | "TRUE"));
+                if v { "true".to_owned() } else { "false".to_owned() }
+            }
+            PropertyKind::Slider { value, .. } => {
+                let v = raw
+                    .and_then(|r| r.trim().parse::<f64>().ok())
+                    .unwrap_or(f64::from(*value));
+                format!("{v}")
+            }
+            PropertyKind::Color { value: [r, g, b] } => {
+                let s = raw.map_or_else(|| format!("{r:.4} {g:.4} {b:.4}"), str::to_owned);
+                format!("\"{}\"", esc(&s))
+            }
+            PropertyKind::Text => continue,
+            PropertyKind::Combo { value, .. }
+            | PropertyKind::TextInput { value }
+            | PropertyKind::UserShortcut { value }
+            | PropertyKind::File { value }
+            | PropertyKind::Directory { value }
+            | PropertyKind::SceneTexture { value } => {
+                format!("\"{}\"", esc(raw.unwrap_or(value)))
+            }
+        };
+        if !first {
+            out.push(',');
+        }
+        first = false;
+        out.push_str(&format!("\"{}\":{{\"value\":{value}}}", esc(name)));
+    }
+    out.push('}');
+    out
+}
