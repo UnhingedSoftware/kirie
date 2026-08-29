@@ -276,12 +276,12 @@ impl SceneRenderer {
                     .iter()
                     .find(|layer| layer.visible.value)
                     .and_then(|layer| u32::try_from(layer.animation.value).ok());
-                let pose = mesh.pose(wanted.and_then(|id| mesh.animation(id)), 0.0);
+                let animation = wanted.and_then(|id| mesh.animation(id));
                 let anchors: HashMap<String, [f32; 2]> = mesh
                     .attachments
                     .iter()
                     .filter_map(|point| {
-                        let at = mesh.anchor(&point.name, Some(&pose))?;
+                        let at = mesh.anchor(&point.name, animation, 0.0)?;
                         Some((point.name.clone(), [at[0], at[1]]))
                     })
                     .collect();
