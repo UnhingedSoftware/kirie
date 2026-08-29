@@ -241,9 +241,54 @@ pub const PUPPET_BONE_INDEX_OFFSET: usize = 40;
 pub const PUPPET_BONE_WEIGHT_OFFSET: usize = 56;
 pub const PUPPET_UV_OFFSET: usize = 72;
 
+pub const PUPPET_LEGACY_VERTEX_STRIDE: usize = 52;
+const PUPPET_LEGACY_BONE_INDEX_OFFSET: usize = 24;
+const PUPPET_LEGACY_BONE_WEIGHT_OFFSET: usize = 28;
+const PUPPET_LEGACY_UV_OFFSET: usize = 44;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PuppetLayout {
+    stride: usize,
+    position: usize,
+    normal: usize,
+    tangent: Option<usize>,
+    bone_indices: usize,
+    wide_bone_indices: bool,
+    bone_weights: usize,
+    uv: usize,
+}
+
+impl PuppetLayout {
+    const fn for_version(version: &str) -> Option<Self> {
+        match version.as_bytes() {
+            b"MDLV0021" | b"MDLV0023" => Some(Self {
+                stride: PUPPET_VERTEX_STRIDE,
+                position: PUPPET_POSITION_OFFSET,
+                normal: PUPPET_NORMAL_OFFSET,
+                tangent: Some(PUPPET_TANGENT_OFFSET),
+                bone_indices: PUPPET_BONE_INDEX_OFFSET,
+                wide_bone_indices: true,
+                bone_weights: PUPPET_BONE_WEIGHT_OFFSET,
+                uv: PUPPET_UV_OFFSET,
+            }),
+            b"MDLV0013" => Some(Self {
+                stride: PUPPET_LEGACY_VERTEX_STRIDE,
+                position: PUPPET_POSITION_OFFSET,
+                normal: PUPPET_NORMAL_OFFSET,
+                tangent: None,
+                bone_indices: PUPPET_LEGACY_BONE_INDEX_OFFSET,
+                wide_bone_indices: false,
+                bone_weights: PUPPET_LEGACY_BONE_WEIGHT_OFFSET,
+                uv: PUPPET_LEGACY_UV_OFFSET,
+            }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum PuppetError {
-    #[error("unsupported puppet model header {header:?} (expected \"MDLV0021\" or \"MDLV0023\")")]
+    #[error("unsupported puppet model header {header:?} (expected \"MDLV0013\", \"MDLV0021\" or \"MDLV0023\")")]
     BadMagic { header: String },
 
     #[error("no usable puppet mesh block found before the MDLS marker")]
@@ -277,23 +322,24 @@ impl PuppetMesh {
         } else {
             String::new()
         };
-        if version != "MDLV0021" && version != "MDLV0023" {
+        let Some(layout) = PuppetLayout::for_version(&version) else {
             return Err(PuppetError::BadMagic { header: version });
-        }
+        };
 
         let mdls_offset = find_mdls(data);
-        let block = find_puppet_mesh_block(data, mdls_offset).ok_or(PuppetError::NoMeshBlock)?;
+        let block =
+            find_puppet_mesh_block(data, mdls_offset, layout.stride).ok_or(PuppetError::NoMeshBlock)?;
 
-        let vertex_count = block.vertex_bytes / PUPPET_VERTEX_STRIDE;
+        let vertex_count = block.vertex_bytes / layout.stride;
         let vertices_offset = block.header_offset + PUPPET_MESH_HEADER_SIZE;
         let indices_offset = vertices_offset + block.vertex_bytes + 4;
         let index_count = block.index_bytes / 2;
 
         let mut vertices = Vec::with_capacity(vertex_count);
         for i in 0..vertex_count {
-            let base = vertices_offset + i * PUPPET_VERTEX_STRIDE;
-            let rec = &data[base..base + PUPPET_VERTEX_STRIDE];
-            vertices.push(decode_puppet_vertex(rec));
+            let base = vertices_offset + i * layout.stride;
+            let rec = &data[base..base + layout.stride];
+            vertices.push(decode_puppet_vertex(rec, layout));
         }
 
         let mut indices = Vec::with_capacity(index_count);
@@ -336,7 +382,7 @@ fn find_mdls(data: &[u8]) -> usize {
     data.len()
 }
 
-fn find_puppet_mesh_block(data: &[u8], mdls_offset: usize) -> Option<PuppetMeshBlock> {
+fn find_puppet_mesh_block(data: &[u8], mdls_offset: usize, stride: usize) -> Option<PuppetMeshBlock> {
     let read_u32 =
         |off: usize| -> u32 { u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) };
     let mut offset = PUPPET_MARKER_SIZE;
@@ -346,7 +392,7 @@ fn find_puppet_mesh_block(data: &[u8], mdls_offset: usize) -> Option<PuppetMeshB
         let index_length_offset = vertices_offset + vertex_bytes;
 
         if vertex_bytes == 0
-            || !vertex_bytes.is_multiple_of(PUPPET_VERTEX_STRIDE)
+            || !vertex_bytes.is_multiple_of(stride)
             || index_length_offset + 4 > mdls_offset
         {
             offset += 1;
@@ -372,39 +418,34 @@ fn find_puppet_mesh_block(data: &[u8], mdls_offset: usize) -> Option<PuppetMeshB
     None
 }
 
-fn decode_puppet_vertex(chunk: &[u8]) -> PuppetVertex {
+fn decode_puppet_vertex(chunk: &[u8], layout: PuppetLayout) -> PuppetVertex {
     let f = |off: usize| f32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
     let u = |off: usize| u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+    let bone = |slot: usize| -> u32 {
+        if layout.wide_bone_indices {
+            u(layout.bone_indices + slot * 4)
+        } else {
+            u32::from(chunk[layout.bone_indices + slot])
+        }
+    };
     PuppetVertex {
         position: [
-            f(PUPPET_POSITION_OFFSET),
-            f(PUPPET_POSITION_OFFSET + 4),
-            f(PUPPET_POSITION_OFFSET + 8),
+            f(layout.position),
+            f(layout.position + 4),
+            f(layout.position + 8),
         ],
-        normal: [
-            f(PUPPET_NORMAL_OFFSET),
-            f(PUPPET_NORMAL_OFFSET + 4),
-            f(PUPPET_NORMAL_OFFSET + 8),
-        ],
-        tangent: [
-            f(PUPPET_TANGENT_OFFSET),
-            f(PUPPET_TANGENT_OFFSET + 4),
-            f(PUPPET_TANGENT_OFFSET + 8),
-            f(PUPPET_TANGENT_OFFSET + 12),
-        ],
-        bone_indices: [
-            u(PUPPET_BONE_INDEX_OFFSET),
-            u(PUPPET_BONE_INDEX_OFFSET + 4),
-            u(PUPPET_BONE_INDEX_OFFSET + 8),
-            u(PUPPET_BONE_INDEX_OFFSET + 12),
-        ],
+        normal: [f(layout.normal), f(layout.normal + 4), f(layout.normal + 8)],
+        tangent: layout.tangent.map_or([0.0, 0.0, 0.0, 1.0], |at| {
+            [f(at), f(at + 4), f(at + 8), f(at + 12)]
+        }),
+        bone_indices: [bone(0), bone(1), bone(2), bone(3)],
         bone_weights: [
-            f(PUPPET_BONE_WEIGHT_OFFSET),
-            f(PUPPET_BONE_WEIGHT_OFFSET + 4),
-            f(PUPPET_BONE_WEIGHT_OFFSET + 8),
-            f(PUPPET_BONE_WEIGHT_OFFSET + 12),
+            f(layout.bone_weights),
+            f(layout.bone_weights + 4),
+            f(layout.bone_weights + 8),
+            f(layout.bone_weights + 12),
         ],
-        uv: [f(PUPPET_UV_OFFSET), f(PUPPET_UV_OFFSET + 4)],
+        uv: [f(layout.uv), f(layout.uv + 4)],
     }
 }
 
@@ -691,6 +732,52 @@ mod tests {
         assert_eq!(v.bone_indices[0], 3);
         assert_eq!(v.bone_weights[0], 1.0);
         assert_eq!(v.uv[0], 1.5);
+        assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
+    }
+
+    fn synth_legacy_puppet(verts: u32, tris: u32) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MDLV0013");
+        b.push(0);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        let vbytes = verts * PUPPET_LEGACY_VERTEX_STRIDE as u32;
+        b.extend_from_slice(&vbytes.to_le_bytes());
+        for i in 0..verts {
+            let mut rec = [0u8; PUPPET_LEGACY_VERTEX_STRIDE];
+            rec[PUPPET_POSITION_OFFSET..PUPPET_POSITION_OFFSET + 4]
+                .copy_from_slice(&(i as f32).to_le_bytes());
+            rec[PUPPET_LEGACY_BONE_INDEX_OFFSET] = i as u8;
+            rec[PUPPET_LEGACY_BONE_WEIGHT_OFFSET..PUPPET_LEGACY_BONE_WEIGHT_OFFSET + 4]
+                .copy_from_slice(&1.0f32.to_le_bytes());
+            rec[PUPPET_LEGACY_UV_OFFSET..PUPPET_LEGACY_UV_OFFSET + 4]
+                .copy_from_slice(&(i as f32 * 0.25).to_le_bytes());
+            b.extend_from_slice(&rec);
+        }
+        let ibytes = tris * 3 * 2;
+        b.extend_from_slice(&ibytes.to_le_bytes());
+        for t in 0..tris {
+            for k in 0..3u16 {
+                b.extend_from_slice(&((t as u16 + k) % verts as u16).to_le_bytes());
+            }
+        }
+        b.extend_from_slice(b"MDLS");
+        b.extend_from_slice(&[0u8; 8]);
+        b
+    }
+
+    #[test]
+    fn puppet_accepts_mdlv0013_with_its_own_stride() {
+        let bytes = synth_legacy_puppet(6, 4);
+        let m = PuppetMesh::parse(&bytes).expect("parse legacy puppet");
+        assert_eq!(m.version, "MDLV0013");
+        assert_eq!(m.vertex_count(), 6);
+        assert_eq!(m.indices.len(), 12);
+        let v = &m.vertices[3];
+        assert_eq!(v.position[0], 3.0);
+        assert_eq!(v.bone_indices[0], 3);
+        assert_eq!(v.bone_weights[0], 1.0);
+        assert_eq!(v.uv[0], 0.75);
+        assert_eq!(v.tangent, [0.0, 0.0, 0.0, 1.0]);
         assert!(m.indices.iter().all(|&i| (i as usize) < m.vertex_count()));
     }
 
