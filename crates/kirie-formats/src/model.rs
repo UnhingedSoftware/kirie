@@ -242,7 +242,8 @@ pub const PUPPET_BONE_WEIGHT_OFFSET: usize = 56;
 pub const PUPPET_UV_OFFSET: usize = 72;
 
 pub const PUPPET_LEGACY_VERTEX_STRIDE: usize = 52;
-const PUPPET_LEGACY_BONE_INDEX_OFFSET: usize = 24;
+const PUPPET_LEGACY_BONE_INDEX_OFFSET: usize = 12;
+const PUPPET_LEGACY_NORMAL_OFFSET: usize = 16;
 const PUPPET_LEGACY_BONE_WEIGHT_OFFSET: usize = 28;
 const PUPPET_LEGACY_UV_OFFSET: usize = 44;
 
@@ -274,7 +275,7 @@ impl PuppetLayout {
             b"MDLV0013" => Some(Self {
                 stride: PUPPET_LEGACY_VERTEX_STRIDE,
                 position: PUPPET_POSITION_OFFSET,
-                normal: PUPPET_NORMAL_OFFSET,
+                normal: PUPPET_LEGACY_NORMAL_OFFSET,
                 tangent: None,
                 bone_indices: PUPPET_LEGACY_BONE_INDEX_OFFSET,
                 wide_bone_indices: false,
@@ -311,6 +312,7 @@ pub struct PuppetVertex {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PuppetBone {
     pub name: String,
+    pub parent: i32,
     pub transform: [f32; 16],
 }
 
@@ -321,19 +323,220 @@ impl PuppetBone {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PuppetKey {
+    pub translation: [f32; 3],
+    pub rotation: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PuppetTrack {
+    pub bone: usize,
+    pub keys: Vec<PuppetKey>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PuppetAnimation {
+    pub id: u32,
+    pub name: String,
+    pub mode: String,
+    pub fps: f32,
+    pub frames: u32,
+    pub tracks: Vec<PuppetTrack>,
+}
+
+impl PuppetAnimation {
+    #[must_use]
+    pub fn key_at(&self, track: &PuppetTrack, time: f32) -> Option<PuppetKey> {
+        let keys = track.keys.len();
+        if keys == 0 {
+            return None;
+        }
+        if keys == 1 || self.fps <= 0.0 {
+            return track.keys.first().copied();
+        }
+        let last = (keys - 1) as f32;
+        let position = (time * self.fps).rem_euclid(last);
+        let lower = position.floor();
+        let blend = position - lower;
+        let first = track.keys.get(lower as usize)?;
+        let second = track.keys.get(lower as usize + 1).unwrap_or(first);
+        let mix = |a: [f32; 3], b: [f32; 3]| {
+            [
+                a[0] + (b[0] - a[0]) * blend,
+                a[1] + (b[1] - a[1]) * blend,
+                a[2] + (b[2] - a[2]) * blend,
+            ]
+        };
+        Some(PuppetKey {
+            translation: mix(first.translation, second.translation),
+            rotation: mix(first.rotation, second.rotation),
+            scale: mix(first.scale, second.scale),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PuppetMesh {
     pub version: String,
     pub vertices: Vec<PuppetVertex>,
     pub indices: Vec<u16>,
     pub bones: Vec<PuppetBone>,
+    pub attachments: Vec<PuppetBone>,
+    pub animations: Vec<PuppetAnimation>,
 }
 
 impl PuppetMesh {
     #[must_use]
     pub fn bone(&self, name: &str) -> Option<&PuppetBone> {
-        self.bones.iter().find(|bone| bone.name == name)
+        self.attachments
+            .iter()
+            .chain(self.bones.iter())
+            .find(|bone| bone.name == name)
     }
+
+    #[must_use]
+    pub fn animation(&self, id: u32) -> Option<&PuppetAnimation> {
+        let mut playable = self.animations.iter().filter(|a| !a.tracks.is_empty());
+        let first = playable.next()?;
+        if first.id == id || playable.next().is_none() {
+            return Some(first);
+        }
+        self.animations
+            .iter()
+            .find(|animation| animation.id == id && !animation.tracks.is_empty())
+    }
+
+    #[must_use]
+    pub fn pose(&self, animation: Option<&PuppetAnimation>, time: f32) -> Vec<[f32; 16]> {
+        self.bones
+            .iter()
+            .enumerate()
+            .map(|(index, bone)| {
+                let rest = bone.transform;
+                let now = animation
+                    .and_then(|a| {
+                        a.tracks
+                            .iter()
+                            .find(|track| track.bone == index)
+                            .and_then(|track| a.key_at(track, time))
+                    })
+                    .map_or(rest, key_matrix);
+                matrix_invert(rest).map_or(IDENTITY, |back| matrix_mul(back, now))
+            })
+            .collect()
+    }
+}
+
+const IDENTITY: [f32; 16] = [
+    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
+];
+
+fn key_matrix(key: PuppetKey) -> [f32; 16] {
+    let (sx, cx) = key.rotation[0].sin_cos();
+    let (sy, cy) = key.rotation[1].sin_cos();
+    let (sz, cz) = key.rotation[2].sin_cos();
+    let rotation = [
+        cy * cz,
+        cy * sz,
+        -sy,
+        0.0,
+        sx * sy * cz - cx * sz,
+        sx * sy * sz + cx * cz,
+        sx * cy,
+        0.0,
+        cx * sy * cz + sx * sz,
+        cx * sy * sz - sx * cz,
+        cx * cy,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+    ];
+    let mut out = rotation;
+    for row in 0..3 {
+        for column in 0..3 {
+            if let (Some(slot), Some(scale)) = (out.get_mut(row * 4 + column), key.scale.get(row)) {
+                *slot *= scale;
+            }
+        }
+    }
+    out[12] = key.translation[0];
+    out[13] = key.translation[1];
+    out[14] = key.translation[2];
+    out
+}
+
+fn matrix_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
+    let mut out = [0.0_f32; 16];
+    for row in 0..4 {
+        for column in 0..4 {
+            let mut sum = 0.0;
+            for k in 0..4 {
+                sum += a.get(row * 4 + k).copied().unwrap_or(0.0)
+                    * b.get(k * 4 + column).copied().unwrap_or(0.0);
+            }
+            if let Some(slot) = out.get_mut(row * 4 + column) {
+                *slot = sum;
+            }
+        }
+    }
+    out
+}
+
+fn matrix_invert(m: [f32; 16]) -> Option<[f32; 16]> {
+    let at = |row: usize, column: usize| m.get(row * 4 + column).copied().unwrap_or(0.0);
+    let determinant = at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1))
+        - at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0))
+        + at(0, 2) * (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0));
+    if determinant.abs() < 1e-9 {
+        return None;
+    }
+    let inv = 1.0 / determinant;
+    let mut out = IDENTITY;
+    let cofactor = [
+        (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1)) * inv,
+        (at(0, 2) * at(2, 1) - at(0, 1) * at(2, 2)) * inv,
+        (at(0, 1) * at(1, 2) - at(0, 2) * at(1, 1)) * inv,
+        (at(1, 2) * at(2, 0) - at(1, 0) * at(2, 2)) * inv,
+        (at(0, 0) * at(2, 2) - at(0, 2) * at(2, 0)) * inv,
+        (at(0, 2) * at(1, 0) - at(0, 0) * at(1, 2)) * inv,
+        (at(1, 0) * at(2, 1) - at(1, 1) * at(2, 0)) * inv,
+        (at(0, 1) * at(2, 0) - at(0, 0) * at(2, 1)) * inv,
+        (at(0, 0) * at(1, 1) - at(0, 1) * at(1, 0)) * inv,
+    ];
+    for row in 0..3 {
+        for column in 0..3 {
+            if let (Some(slot), Some(value)) = (
+                out.get_mut(row * 4 + column),
+                cofactor.get(row * 3 + column),
+            ) {
+                *slot = *value;
+            }
+        }
+    }
+    for column in 0..3 {
+        let mut sum = 0.0;
+        for k in 0..3 {
+            sum += at(3, k) * out.get(k * 4 + column).copied().unwrap_or(0.0);
+        }
+        if let Some(slot) = out.get_mut(12 + column) {
+            *slot = -sum;
+        }
+    }
+    Some(out)
+}
+
+#[must_use]
+pub fn puppet_skin_point(point: [f32; 3], matrix: [f32; 16]) -> [f32; 3] {
+    let at = |index: usize| matrix.get(index).copied().unwrap_or(0.0);
+    [
+        point[0] * at(0) + point[1] * at(4) + point[2] * at(8) + at(12),
+        point[0] * at(1) + point[1] * at(5) + point[2] * at(9) + at(13),
+        point[0] * at(2) + point[1] * at(6) + point[2] * at(10) + at(14),
+    ]
 }
 
 const PUPPET_BONE_MATRIX_FLOATS: usize = 16;
@@ -341,6 +544,18 @@ const PUPPET_BONE_MATRIX_FLOATS: usize = 16;
 fn read_f32(data: &[u8], at: usize) -> Option<f32> {
     let bytes = data.get(at..at + 4)?;
     Some(f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_u32(data: &[u8], at: usize) -> Option<u32> {
+    let bytes = data.get(at..at + 4)?;
+    Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn read_cstring(data: &[u8], at: usize, stop: usize) -> Option<(String, usize)> {
+    let tail = data.get(at..stop)?;
+    let len = tail.iter().position(|b| *b == 0)?;
+    let text = std::str::from_utf8(tail.get(..len)?).ok()?;
+    Some((text.to_owned(), at + len + 1))
 }
 
 fn puppet_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, usize)> {
@@ -378,13 +593,14 @@ fn puppet_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, us
     Some((
         PuppetBone {
             name: name.to_owned(),
+            parent: -1,
             transform,
         },
         matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4,
     ))
 }
 
-fn parse_puppet_bones(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
+fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
     let Some(block) = data
         .get(mdls_offset..)
         .and_then(|tail| tail.windows(7).position(|w| w == b"DAT0001"))
@@ -401,6 +617,160 @@ fn parse_puppet_bones(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
     let mut at = block;
     while at < stop {
         if let Some((bone, next)) = puppet_bone_at(data, at, stop) {
+            bones.push(bone);
+            at = next;
+        } else {
+            at += 1;
+        }
+    }
+    bones
+}
+
+const PUPPET_BONE_MATRIX_BYTES: u32 = 64;
+
+fn skeleton_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, usize)> {
+    let tail = data.get(at..stop)?;
+    let len = tail.iter().position(|b| *b == 0)?;
+    if len > 63 {
+        return None;
+    }
+    let name = std::str::from_utf8(tail.get(..len)?).ok()?;
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || " _-.:".contains(c))
+    {
+        return None;
+    }
+
+    let fields = at + len + 1;
+    let read_u32 = |off: usize| -> Option<u32> {
+        let b = data.get(off..off + 4)?;
+        Some(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let parent = read_u32(fields + 4)? as i32;
+    if read_u32(fields + 8)? != PUPPET_BONE_MATRIX_BYTES {
+        return None;
+    }
+
+    let matrix_at = fields + 12;
+    let transform = read_affine(data, matrix_at, stop)?;
+    Some((
+        PuppetBone {
+            name: name.to_owned(),
+            parent,
+            transform,
+        },
+        matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4,
+    ))
+}
+
+fn read_affine(data: &[u8], at: usize, stop: usize) -> Option<[f32; 16]> {
+    if at + PUPPET_BONE_MATRIX_FLOATS * 4 > stop {
+        return None;
+    }
+    let mut transform = [0.0_f32; PUPPET_BONE_MATRIX_FLOATS];
+    for (slot, value) in transform.iter_mut().enumerate() {
+        *value = read_f32(data, at + slot * 4)?;
+    }
+    let affine = (transform[15] - 1.0).abs() < 1e-3
+        && transform[3].abs() < 1e-3
+        && transform[7].abs() < 1e-3
+        && transform[11].abs() < 1e-3
+        && transform.iter().all(|value| value.is_finite());
+    affine.then_some(transform)
+}
+
+const PUPPET_KEY_BYTES: usize = 36;
+
+fn parse_puppet_animations(data: &[u8]) -> Vec<PuppetAnimation> {
+    let Some(block) = data.windows(4).position(|w| w == b"MDLA") else {
+        return Vec::new();
+    };
+    let stop = data.len();
+    let Some(count) = read_u32(data, block + 13).map(|value| value as usize) else {
+        return Vec::new();
+    };
+    if count == 0 || count > 256 {
+        return Vec::new();
+    }
+
+    let mut animations = Vec::with_capacity(count);
+    let mut at = block + 17;
+    for _ in 0..count {
+        let Some(animation) = parse_one_animation(data, &mut at, stop) else {
+            break;
+        };
+        animations.push(animation);
+    }
+    animations
+}
+
+fn parse_one_animation(data: &[u8], at: &mut usize, stop: usize) -> Option<PuppetAnimation> {
+    let id = read_u32(data, *at)?;
+    let (name, after_name) = read_cstring(data, *at + 8, stop)?;
+    let (mode, after_mode) = read_cstring(data, after_name, stop)?;
+    let fps = read_f32(data, after_mode)?;
+    let frames = read_u32(data, after_mode + 4)?;
+    let bone_count = read_u32(data, after_mode + 12)? as usize;
+    if bone_count > 4096 {
+        return None;
+    }
+
+    let mut cursor = after_mode + 16;
+    let mut tracks = Vec::with_capacity(bone_count);
+    for bone in 0..bone_count {
+        let bytes = read_u32(data, cursor + 4)? as usize;
+        if bytes == 0 || !bytes.is_multiple_of(PUPPET_KEY_BYTES) || cursor + 8 + bytes > stop {
+            return None;
+        }
+        let keys_at = cursor + 8;
+        let mut keys = Vec::with_capacity(bytes / PUPPET_KEY_BYTES);
+        for index in 0..bytes / PUPPET_KEY_BYTES {
+            let key = keys_at + index * PUPPET_KEY_BYTES;
+            let mut values = [0.0_f32; 9];
+            for (slot, value) in values.iter_mut().enumerate() {
+                *value = read_f32(data, key + slot * 4)?;
+            }
+            keys.push(PuppetKey {
+                translation: [values[0], values[1], values[2]],
+                rotation: [values[3], values[4], values[5]],
+                scale: [values[6], values[7], values[8]],
+            });
+        }
+        tracks.push(PuppetTrack { bone, keys });
+        cursor = keys_at + bytes;
+    }
+
+    *at = cursor;
+    Some(PuppetAnimation {
+        id,
+        name,
+        mode,
+        fps,
+        frames,
+        tracks,
+    })
+}
+
+fn parse_puppet_skeleton(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
+    let Some(count_at) = mdls_offset.checked_add(13) else {
+        return Vec::new();
+    };
+    let Some(count) = read_u32(data, count_at).map(|value| value as usize) else {
+        return Vec::new();
+    };
+    if count == 0 || count > 4096 {
+        return Vec::new();
+    }
+    let stop = data
+        .get(mdls_offset..)
+        .and_then(|tail| tail.windows(4).position(|w| w == b"MDAT" || w == b"MDLA"))
+        .map_or(data.len(), |at| mdls_offset + at);
+
+    let mut bones = Vec::with_capacity(count);
+    let mut at = count_at + 4;
+    while bones.len() < count && at < stop {
+        if let Some((bone, next)) = skeleton_bone_at(data, at, stop) {
             bones.push(bone);
             at = next;
         } else {
@@ -451,7 +821,9 @@ impl PuppetMesh {
             version,
             vertices,
             indices,
-            bones: parse_puppet_bones(data, mdls_offset),
+            bones: parse_puppet_skeleton(data, mdls_offset),
+            attachments: parse_puppet_attachments(data, mdls_offset),
+            animations: parse_puppet_animations(data),
         })
     }
 
@@ -876,10 +1248,113 @@ mod tests {
         bytes.extend_from_slice(b"MDLA0006\0");
 
         let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
-        assert_eq!(mesh.bones.len(), 1, "the header before the first bone is skipped");
+        assert_eq!(
+            mesh.attachments.len(),
+            1,
+            "the header before the first bone is skipped"
+        );
         let bone = mesh.bone("head").expect("a bone named head");
         assert_eq!(bone.translation(), [-32.5, 116.4, 0.0]);
         assert!(mesh.bone("missing").is_none());
+    }
+
+    fn synth_skeleton(bones: &[[f32; 2]]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MDLS0001\0");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&(bones.len() as u32).to_le_bytes());
+        for (index, translation) in bones.iter().enumerate() {
+            b.push(0);
+            b.extend_from_slice(&(index as u32).to_le_bytes());
+            b.extend_from_slice(&(if index == 0 { -1i32 } else { 0 }).to_le_bytes());
+            b.extend_from_slice(&64u32.to_le_bytes());
+            let matrix: [f32; 16] = [
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                0.0,
+                0.0,
+                0.0,
+                1.0,
+                0.0,
+                translation[0],
+                translation[1],
+                0.0,
+                1.0,
+            ];
+            for value in matrix {
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        b
+    }
+
+    fn synth_animation(id: u32, keys: &[[f32; 2]]) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MDLA0001\0");
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&id.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(b"Animation 1\0");
+        b.extend_from_slice(b"loop\0");
+        b.extend_from_slice(&12.0f32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&(keys.len() as u32).to_le_bytes());
+        for key in keys {
+            b.extend_from_slice(&0u32.to_le_bytes());
+            b.extend_from_slice(&(PUPPET_KEY_BYTES as u32).to_le_bytes());
+            for value in [key[0], key[1], 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+        }
+        b
+    }
+
+    #[test]
+    fn puppet_reads_an_unnamed_skeleton_and_its_animation() {
+        let mut bytes = synth_puppet("MDLV0023", 3, 1);
+        bytes.truncate(bytes.len() - 12);
+        bytes.extend_from_slice(&synth_skeleton(&[[-178.3, 532.2], [-519.0, 339.0]]));
+        bytes.extend_from_slice(&synth_animation(167, &[[-178.3, 532.2], [-118.0, 139.3]]));
+
+        let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
+        assert_eq!(mesh.bones.len(), 2);
+        assert_eq!(mesh.bones[0].parent, -1);
+        assert_eq!(mesh.bones[1].parent, 0);
+        let animation = mesh.animation(167).expect("animation 167");
+        assert_eq!(animation.tracks.len(), 2);
+        assert_eq!(animation.tracks[1].bone, 1);
+
+        let pose = mesh.pose(Some(animation), 0.0);
+        assert!(
+            (pose[0][12]).abs() < 0.01,
+            "an unmoved bone poses to identity"
+        );
+        assert!(
+            (pose[1][12] - 401.0).abs() < 1.0,
+            "a moved bone carries the animation delta, got {}",
+            pose[1][12]
+        );
+    }
+
+    #[test]
+    fn legacy_puppet_reads_bone_indices_from_offset_twelve() {
+        let mut bytes = synth_legacy_puppet(6, 4);
+        let vertices_at = 17;
+        let slot = vertices_at + 3 * PUPPET_LEGACY_VERTEX_STRIDE + 12;
+        bytes[slot] = 5;
+
+        let mesh = PuppetMesh::parse(&bytes).expect("parse legacy puppet");
+        assert_eq!(
+            mesh.vertices[3].bone_indices[0], 5,
+            "MDLV0013 stores bone indices 12 bytes into the vertex"
+        );
     }
 
     #[test]
