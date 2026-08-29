@@ -269,9 +269,64 @@ jobs:
           retention-days: 1
 
 
+
+  build-macos:
+    needs: [prepare, test]
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            asset: kirie-macos-aarch64
+          - runner: macos-13
+            asset: kirie-macos-x86_64
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.asset }}
+
+      - name: Install ffmpeg
+        run: brew install ffmpeg pkg-config
+
+      - name: Set crate version
+        run: |
+          python3 - <<'PY'
+          import os, re
+          want = os.environ["V"].lstrip("v")
+          text = open("Cargo.toml").read()
+          text = re.sub(r'^version = "\d+\.\d+\.\d+"', f'version = "{want}"', text, count=1, flags=re.M)
+          open("Cargo.toml", "w").write(text)
+          PY
+
+      - name: Build (web wallpapers use the system WebKit)
+        run: KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features web-webview
+
+      - name: Stage binary
+        run: |
+          set -euo pipefail
+          cp target/release/kirie "${{ matrix.asset }}"
+          chmod +x "${{ matrix.asset }}"
+          file "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 1
+
+
   # 4. Create/update the draft release once, with all built artifacts + notes.
   release:
-    needs: [prepare, build-linux, build-webview]
+    needs: [prepare, build-linux, build-webview, build-macos]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -285,14 +340,14 @@ jobs:
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
         with:
-          pattern: "*-linux-x86_64"
+          pattern: "kirie-*"
           merge-multiple: true
       - name: Create or update the draft release
         run: |
           set -euo pipefail
           # Three standalone executables (no archives): kirie, kirie-web-cef
           # (self-extracting), kirie-web-webview.
-          files=$(ls *-linux-x86_64*)
+          files=$(ls kirie-*)
           cat >> RELEASE_NOTES.md <<'EOF'
 
           ## Downloads
@@ -304,6 +359,8 @@ jobs:
           | `kirie-linux-x86_64` | scenes + video + images |
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
+          | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Needs `brew install ffmpeg`. |
+          | `kirie-macos-x86_64` | the same for Intel Macs. |
 
           EOF
           echo "attaching:"; echo "$files"
