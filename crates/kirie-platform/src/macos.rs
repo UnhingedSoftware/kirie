@@ -150,6 +150,10 @@ impl MacPlatform {
                     self.take_back(at);
                     let (name, size, format) = self.shape_of(at);
                     let renderer = build_local(&device, &queue, format, &name, (size.width, size.height));
+                    if renderer.is_placeholder() {
+                        tracing::error!(screen = %name, "keeping the wallpaper that is up");
+                        continue;
+                    }
                     if let Some(output) = self.outputs.get_mut(at) {
                         output.renderer = Some(renderer);
                         output.last_frame = None;
@@ -157,6 +161,10 @@ impl MacPlatform {
                     }
                 }
                 RenderCommand::Install { screen, renderer, .. } => {
+                    if renderer.is_placeholder() {
+                        tracing::error!(screen, "keeping the wallpaper that is up");
+                        continue;
+                    }
                     if let Some(at) = self.output_at(&screen)
                         && let Some(output) = self.outputs.get_mut(at)
                     {

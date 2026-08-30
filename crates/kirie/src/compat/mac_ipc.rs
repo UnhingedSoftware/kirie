@@ -16,6 +16,7 @@ pub struct Showing {
     screens: Mutex<BTreeMap<String, Option<PathBuf>>>,
     speed: Mutex<f32>,
     props: Mutex<BTreeMap<String, String>>,
+    staged: Mutex<BTreeMap<String, String>>,
     generation: std::sync::atomic::AtomicU64,
     sound: Mutex<Sound>,
 }
@@ -31,6 +32,7 @@ impl Showing {
             screens: Mutex::new(screens),
             speed: Mutex::new(speed),
             props: Mutex::new(BTreeMap::new()),
+            staged: Mutex::new(BTreeMap::new()),
             generation: std::sync::atomic::AtomicU64::new(0),
             sound: Mutex::new(sound),
         })
@@ -88,9 +90,21 @@ impl Showing {
         props.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
-    fn forget_props(&self) {
+    fn stage(&self, key: &str, value: &str) {
+        if let Ok(mut staged) = self.staged.lock() {
+            staged.insert(key.to_owned(), value.to_owned());
+        }
+    }
+
+    // A wallpaper starts with whatever was staged for it and nothing the one
+    // before it was given.
+    fn take_staged(&self) {
+        let staged = match self.staged.lock() {
+            Ok(mut staged) => std::mem::take(&mut *staged),
+            Err(_) => BTreeMap::new(),
+        };
         if let Ok(mut props) = self.props.lock() {
-            props.clear();
+            *props = staged;
         }
     }
 
@@ -280,6 +294,15 @@ fn act(
         "ping" => "pong\n".to_owned(),
         "status" => showing.report(),
         "property" => set_property(rest, orders, showing, args),
+        "stage" => {
+            let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
+            if key.is_empty() {
+                "error nothing to stage\n".to_owned()
+            } else {
+                showing.stage(key, value);
+                "ok\n".to_owned()
+            }
+        }
         "speed" => {
             let speed = rest.trim().parse::<f32>().unwrap_or(1.0);
             let speed = if speed > 0.0 { speed } else { 1.0 };
@@ -401,7 +424,7 @@ fn put_up(
             return ("error\n".to_owned(), None);
         }
     }
-    showing.forget_props();
+    showing.take_staged();
     showing.put_up(screen, Path::new(path));
     showing
         .generation
@@ -446,7 +469,7 @@ fn hand_to_web(
             return ("error the renderer stopped listening\n".to_owned(), None);
         }
     }
-    showing.forget_props();
+    showing.take_staged();
     showing.put_up("", Path::new(path));
     showing
         .generation
@@ -888,6 +911,36 @@ mod tests {
             renderer.render(&view, SIZE, 1.0 / 60.0);
             let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
         }
+    }
+
+    #[test]
+    fn a_staged_property_belongs_to_the_wallpaper_that_follows() {
+        let served = serving("staging");
+        assert_eq!(ask(&served.socket, "stage colour 1 0 0"), "ok\n");
+
+        let first = served._scratch.wallpaper("first");
+        assert_eq!(
+            ask(&served.socket, &format!("bg Desktop {}", first.display())),
+            "ok\n"
+        );
+        assert_eq!(
+            served.showing.properties(),
+            vec![("colour".to_owned(), "1 0 0".to_owned())]
+        );
+
+        // The next wallpaper starts clean unless something is staged for it.
+        let second = served._scratch.wallpaper("second");
+        assert_eq!(
+            ask(&served.socket, &format!("bg Desktop {}", second.display())),
+            "ok\n"
+        );
+        assert!(served.showing.properties().is_empty());
+    }
+
+    #[test]
+    fn staging_nothing_is_refused() {
+        let served = serving("staging-empty");
+        assert!(ask(&served.socket, "stage").starts_with("error"));
     }
 
     #[test]
