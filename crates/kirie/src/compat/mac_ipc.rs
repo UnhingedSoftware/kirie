@@ -263,6 +263,9 @@ fn put_up(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, ar
     }
     showing.forget_props();
     showing.put_up(screen, Path::new(path));
+    showing
+        .generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     "ok\n".to_owned()
 }
 
@@ -318,9 +321,9 @@ fn rebuild_if_needed(
     args: &CompatArgs,
     props: Vec<(String, String)>,
 ) {
-    let Some(path) = showing.wallpaper_on(screen) else {
+    if showing.wallpaper_on(screen).is_none() {
         return;
-    };
+    }
     let orders = orders.clone();
     let sound = showing.sound();
     let showing = Arc::clone(showing);
@@ -335,6 +338,9 @@ fn rebuild_if_needed(
             if now != generation || !structural.load(std::sync::atomic::Ordering::SeqCst) {
                 return;
             }
+            let Some(path) = showing.wallpaper_on(&screen) else {
+                return;
+            };
             let Ok(wallpaper) = resolve::classify(&path.to_string_lossy()) else {
                 return;
             };
