@@ -1,8 +1,14 @@
 # kirie (切り絵)
 
-A fast, memory-safe wallpaper renderer for Linux, compatible with
+A fast, memory-safe wallpaper renderer for Linux and macOS, compatible with
 [Wallpaper Engine](https://www.wallpaperengine.io/) content. Written in Rust on
-wgpu/Vulkan, fully multithreaded, with a hash-keyed prebaked scene-bundle cache.
+wgpu — Vulkan on Linux, Metal on macOS — fully multithreaded, with a hash-keyed
+prebaked scene-bundle cache.
+
+kirie renders wallpapers you already own: scenes are drawn with Wallpaper
+Engine's shared assets, which Steam releases only to an account that owns the
+app. It ships none of them, and it is not a way to get Wallpaper Engine content
+without buying it.
 
 Every wallpaper is validated scene by scene against how Wallpaper Engine itself
 renders it, so what you see on Linux is what the author published.
@@ -79,7 +85,8 @@ Homebrew moves to a new major version. Release binaries carry their own
 Wallpapers are drawn in one borderless window per screen, at the desktop window
 level, so they sit behind your icons. Web wallpapers use the system WebKit —
 there is nothing to install for them. Scenes need Wallpaper Engine's shared
-assets; point `KIRIE_WE_ASSETS` at a copy, or let
+assets — which means owning Wallpaper Engine; point `KIRIE_WE_ASSETS` at a copy,
+or let
 [haru](https://github.com/UnhingedSoftware/haru) fetch them.
 
 Copy the binary somewhere on your path with `rm` first — overwriting a Mach-O
