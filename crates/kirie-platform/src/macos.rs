@@ -9,7 +9,7 @@ use objc2_app_kit::{
 };
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
 use objc2_foundation::NSDefaultRunLoopMode;
-use raw_window_handle::{AppKitWindowHandle, RawWindowHandle};
+use raw_window_handle::{AppKitDisplayHandle, AppKitWindowHandle, RawDisplayHandle, RawWindowHandle};
 
 use crate::backend::PresentOptions;
 use crate::error::PlatformError;
@@ -416,11 +416,12 @@ fn create_surface(
     let pointer = NonNull::new(Retained::as_ptr(&view).cast_mut().cast())
         .ok_or_else(|| PlatformError::MacWindow("content view pointer was null".to_string()))?;
     let raw_window_handle = RawWindowHandle::AppKit(AppKitWindowHandle::new(pointer));
+    let raw_display_handle = RawDisplayHandle::AppKit(AppKitDisplayHandle::new());
 
     // SAFETY: the view outlives the surface because the window owns it for the run
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
-            raw_display_handle: None,
+            raw_display_handle: Some(raw_display_handle),
             raw_window_handle,
         })
     }?;
