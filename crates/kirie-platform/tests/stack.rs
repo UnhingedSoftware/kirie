@@ -1,3 +1,6 @@
+// The Wayland and X11 backends only exist on Linux.
+#![cfg(target_os = "linux")]
+
 use std::time::Duration;
 
 use kirie_platform::{Backend, Platform, RenderTarget, Renderer, SurfaceSize, TestPattern};
