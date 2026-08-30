@@ -15,6 +15,8 @@ use crate::compat::screenshot::{Sound, build_presented_renderer};
 pub struct Showing {
     screens: Mutex<BTreeMap<String, Option<PathBuf>>>,
     speed: Mutex<f32>,
+    props: Mutex<BTreeMap<String, String>>,
+    generation: std::sync::atomic::AtomicU64,
 }
 
 impl Showing {
@@ -27,6 +29,8 @@ impl Showing {
         Arc::new(Self {
             screens: Mutex::new(screens),
             speed: Mutex::new(speed),
+            props: Mutex::new(BTreeMap::new()),
+            generation: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -46,14 +50,45 @@ impl Showing {
     }
 
     fn put_up(&self, screen: &str, wallpaper: &Path) {
+        let wanted = self.meaning(screen);
         if let Ok(mut screens) = self.screens.lock() {
-            if screen.is_empty() {
-                for held in screens.values_mut() {
+            for name in wanted {
+                if let Some(held) = screens.get_mut(&name) {
                     *held = Some(wallpaper.to_path_buf());
                 }
-            } else if let Some(held) = screens.get_mut(screen) {
-                *held = Some(wallpaper.to_path_buf());
             }
+        }
+    }
+
+    fn meaning(&self, screen: &str) -> Vec<String> {
+        let names = self.names();
+        if screen.is_empty() || !names.iter().any(|name| name == screen) {
+            return names;
+        }
+        vec![screen.to_owned()]
+    }
+
+    fn wallpaper_on(&self, screen: &str) -> Option<PathBuf> {
+        let screens = self.screens.lock().ok()?;
+        screens
+            .get(screen)
+            .cloned()
+            .flatten()
+            .or_else(|| screens.values().find_map(Clone::clone))
+    }
+
+    fn remember(&self, key: &str, value: &str) -> Vec<(String, String)> {
+        let mut props = match self.props.lock() {
+            Ok(props) => props,
+            Err(_) => return Vec::new(),
+        };
+        props.insert(key.to_owned(), value.to_owned());
+        props.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    fn forget_props(&self) {
+        if let Ok(mut props) = self.props.lock() {
+            props.clear();
         }
     }
 
@@ -101,7 +136,7 @@ fn act(line: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args:
         "ping" => "pong\n".to_owned(),
         "status" => showing.report(),
         "bg" => put_up(rest, orders, showing, args),
-        "property" => set_property(rest, orders, showing),
+        "property" => set_property(rest, orders, showing, args),
         "speed" => {
             let speed = rest.trim().parse::<f32>().unwrap_or(1.0);
             let speed = if speed > 0.0 { speed } else { 1.0 };
@@ -144,12 +179,7 @@ fn put_up(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, ar
         return "error\n".to_owned();
     }
 
-    let screens = if screen.is_empty() {
-        showing.names()
-    } else {
-        vec![screen.to_owned()]
-    };
-    for name in screens {
+    for name in showing.meaning(screen) {
         let build_local = build_for(wallpaper.clone(), args);
         if orders
             .send(RenderCommand::SwapLocal {
@@ -161,35 +191,105 @@ fn put_up(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, ar
             return "error\n".to_owned();
         }
     }
+    showing.forget_props();
     showing.put_up(screen, Path::new(path));
     "ok\n".to_owned()
 }
 
-fn set_property(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>) -> String {
+fn set_property(
+    rest: &str,
+    orders: &Sender<RenderCommand>,
+    showing: &Arc<Showing>,
+    args: &CompatArgs,
+) -> String {
     let mut parts = rest.splitn(3, ' ');
     let (Some(screen), Some(key), Some(value)) = (parts.next(), parts.next(), parts.next()) else {
         return "error\n".to_owned();
     };
-    let screens = if screen.is_empty() {
-        showing.names()
-    } else {
-        vec![screen.to_owned()]
-    };
-    for name in screens {
-        let _ = orders.send(RenderCommand::SetProperty {
-            screen: name,
-            key: key.to_owned(),
-            value: value.to_owned(),
-            structural: Arc::new(AtomicBool::new(false)),
-        });
+
+    let props = showing.remember(key, value);
+    let generation = showing
+        .generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        + 1;
+
+    for name in showing.meaning(screen) {
+        let structural = Arc::new(AtomicBool::new(true));
+        if orders
+            .send(RenderCommand::SetProperty {
+                screen: name.clone(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+                structural: Arc::clone(&structural),
+            })
+            .is_err()
+        {
+            return "error\n".to_owned();
+        }
+        rebuild_if_needed(
+            &name,
+            structural,
+            generation,
+            orders,
+            showing,
+            args,
+            props.clone(),
+        );
     }
     "ok\n".to_owned()
 }
 
+fn rebuild_if_needed(
+    screen: &str,
+    structural: Arc<AtomicBool>,
+    generation: u64,
+    orders: &Sender<RenderCommand>,
+    showing: &Arc<Showing>,
+    args: &CompatArgs,
+    props: Vec<(String, String)>,
+) {
+    let Some(path) = showing.wallpaper_on(screen) else {
+        return;
+    };
+    let orders = orders.clone();
+    let showing = Arc::clone(showing);
+    let args = args.clone();
+    let screen = screen.to_owned();
+
+    let started = std::thread::Builder::new()
+        .name("kirie-property".to_owned())
+        .spawn(move || {
+            std::thread::sleep(SETTLE);
+            let now = showing.generation.load(std::sync::atomic::Ordering::SeqCst);
+            if now != generation || !structural.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            let Ok(wallpaper) = resolve::classify(&path.to_string_lossy()) else {
+                return;
+            };
+            let _ = orders.send(RenderCommand::SwapLocal {
+                screen,
+                build_local: build_with(wallpaper, &args, props),
+            });
+        });
+    if let Err(err) = started {
+        tracing::warn!(%err, "cannot rebuild after a property change");
+    }
+}
+
+const SETTLE: std::time::Duration = std::time::Duration::from_millis(350);
+
 fn build_for(wallpaper: Wallpaper, args: &CompatArgs) -> kirie_platform::BuildLocalFn {
+    build_with(wallpaper, args, args.set_properties.clone())
+}
+
+fn build_with(
+    wallpaper: Wallpaper,
+    args: &CompatArgs,
+    properties: Vec<(String, String)>,
+) -> kirie_platform::BuildLocalFn {
     let scaling: ScalingMode = args.window_scaling;
     let clamp: ClampMode = args.window_clamp;
-    let properties = args.set_properties.clone();
     let sound = Sound {
         volume: args.volume,
         silent: args.silent,
