@@ -368,7 +368,7 @@ jobs:
           | `kirie-linux-x86_64` | scenes + video + images |
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
-          | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Needs `brew install ffmpeg`. |
+          | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Needs `brew install ffmpeg`, and `xattr -d com.apple.quarantine kirie-macos-aarch64` once, since it is not notarized. |
 
           EOF
           echo "attaching:"; echo "$files"
