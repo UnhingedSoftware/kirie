@@ -173,6 +173,7 @@ fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Sho
 
 fn act(line: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) -> String {
     let (verb, rest) = line.split_once(' ').unwrap_or((line, ""));
+    tracing::debug!(verb, rest, "control command");
     match verb {
         "ping" => "pong\n".to_owned(),
         "status" => showing.report(),
@@ -422,4 +423,8 @@ struct Blank;
 
 impl Renderer for Blank {
     fn render(&mut self, _view: &wgpu::TextureView, _size: SurfaceSize, _dt: f32) {}
+
+    fn is_placeholder(&self) -> bool {
+        true
+    }
 }

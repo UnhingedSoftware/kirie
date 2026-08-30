@@ -22,6 +22,11 @@ pub enum RedrawHint {
 pub trait Renderer {
     fn render(&mut self, view: &wgpu::TextureView, size: SurfaceSize, dt: f32);
 
+    /// A renderer that stands in for one that could not be built.
+    fn is_placeholder(&self) -> bool {
+        false
+    }
+
     fn is_passive(&self) -> bool {
         false
     }
