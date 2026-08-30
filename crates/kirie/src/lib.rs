@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod ask;
 pub mod assets;
 pub mod check;
 pub mod compat;
@@ -33,6 +34,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Send one command to a running kirie and print what it says.
+    Ask {
+        #[arg(long)]
+        socket: Option<PathBuf>,
+        #[arg(required = true, trailing_var_arg = true)]
+        words: Vec<String>,
+    },
     Info {
         path: PathBuf,
     },
@@ -165,6 +173,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
                 || sub == "workshop"
                 || sub == "update"
                 || sub == "preview"
+                || sub == "ask"
                 || sub == "assets" =>
         {
             run_subcommand(args)
@@ -183,6 +192,20 @@ fn default_control_socket() -> PathBuf {
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
     kirie_bake::limit_malloc_arenas(2);
     let cli = Cli::parse_from(args);
+    if let Command::Ask { socket, words } = &cli.command {
+        let path = socket.clone().unwrap_or_else(default_control_socket);
+        return match ask::run(&path, &words.join(" ")) {
+            Ok(said) => {
+                print!("{said}");
+                ExitCode::SUCCESS
+            }
+            Err(err) => {
+                eprintln!("{err}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     if let Command::Assets { json } = &cli.command {
         return match assets::run(*json) {
             Ok(true) => ExitCode::SUCCESS,
@@ -205,6 +228,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
         };
     }
     let result = match cli.command {
+        Command::Ask { .. } => unreachable!("answered above"),
         Command::Info { path } => info::run(&path),
         Command::Preview {
             socket,
