@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub mod annotation;
 pub mod coerce;
+pub mod matinverse;
 pub mod modernize;
 pub mod preprocess;
 pub mod reflect;
@@ -14,7 +15,7 @@ pub mod translate;
 
 pub use reflect::Reflection;
 
-pub const TRANSLATOR_VERSION: u32 = 3;
+pub const TRANSLATOR_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
