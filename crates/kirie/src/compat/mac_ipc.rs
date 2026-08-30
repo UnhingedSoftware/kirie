@@ -802,6 +802,94 @@ mod tests {
         }
     }
 
+    fn a_scene_from_the_corpus() -> Option<PathBuf> {
+        let roots = crate::compat::steam::steamapps_dirs("workshop/content/431960");
+        for root in roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let dir = entry.path();
+                if !dir.join("scene.pkg").is_file() {
+                    continue;
+                }
+                if matches!(
+                    resolve::classify(&dir.to_string_lossy()),
+                    Ok(Wallpaper::Scene { .. })
+                ) {
+                    return Some(dir);
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn a_swap_hands_back_a_renderer_that_draws() {
+        let Some(scene) = a_scene_from_the_corpus() else {
+            eprintln!("note: no scene wallpaper installed; skipping");
+            return;
+        };
+        if crate::compat::resolve::we_assets_dir().is_none() {
+            eprintln!("note: no Wallpaper Engine assets; skipping");
+            return;
+        }
+        let Ok(gpu) = crate::compat::screenshot::Headless::new() else {
+            eprintln!("note: no gpu; skipping");
+            return;
+        };
+
+        let served = serving("swap-renders");
+        let said = ask(&served.socket, &format!("bg Desktop {}", scene.display()));
+        assert_eq!(said, "ok\n", "the socket refused a scene it should take");
+
+        let order = served
+            .orders
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a swap");
+        let RenderCommand::SwapLocal { build_local, .. } = order else {
+            panic!("expected a local swap");
+        };
+
+        const SIZE: SurfaceSize = SurfaceSize {
+            width: 320,
+            height: 180,
+        };
+        const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8UnormSrgb;
+        let mut renderer = build_local(
+            &gpu.device,
+            &gpu.queue,
+            FORMAT,
+            "Desktop",
+            (SIZE.width, SIZE.height),
+        );
+        assert!(
+            !renderer.is_placeholder(),
+            "the swap built nothing for {}",
+            scene.display()
+        );
+
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("swap-test"),
+            size: wgpu::Extent3d {
+                width: SIZE.width,
+                height: SIZE.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        for _ in 0..8 {
+            renderer.render(&view, SIZE, 1.0 / 60.0);
+            let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        }
+    }
+
     #[test]
     fn status_reports_the_speed_and_the_screens() {
         let served = serving("status");

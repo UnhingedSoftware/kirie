@@ -18,6 +18,7 @@ use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
 
 struct MacOutput {
     web: bool,
+    drawn_at: Option<Instant>,
     format: wgpu::TextureFormat,
     wgpu_surface: Option<wgpu::Surface<'static>>,
     window: Retained<NSWindow>,
@@ -78,6 +79,7 @@ impl MacPlatform {
             };
             outputs.push(MacOutput {
                 web: false,
+                drawn_at: None,
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu_surface,
                 window,
@@ -346,11 +348,20 @@ impl MacPlatform {
         let Some(ctx) = self.outputs.get_mut(index) else {
             return false;
         };
-        if ctx.web || !ctx.configured || !on_screen(&ctx.window) {
+        if ctx.web || !ctx.configured {
             return false;
         }
-        if ctx.first_frame_presented && settled(ctx.renderer.as_deref()) {
-            return false;
+        // A wallpaper sits under every other window, so being occluded is
+        // ordinary rather than exceptional: slow down, never stop. A renderer
+        // that has not been shown yet always gets its frame.
+        let shown = ctx.first_frame_presented;
+        if shown {
+            if settled(ctx.renderer.as_deref()) {
+                return false;
+            }
+            if !on_screen(&ctx.window) && ctx.drawn_at.is_some_and(|at| at.elapsed() < HIDDEN_FRAME) {
+                return false;
+            }
         }
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
             return false;
@@ -405,6 +416,7 @@ impl MacPlatform {
 
         renderer.render(&view, ctx.physical_size, dt * speed);
         queue.present(texture);
+        ctx.drawn_at = Some(now);
 
         if !ctx.first_frame_presented {
             ctx.first_frame_presented = true;
@@ -577,6 +589,8 @@ fn on_battery() -> bool {
 const POWER_POLL: Duration = Duration::from_secs(20);
 
 const IDLE_POLL: Duration = Duration::from_millis(250);
+
+const HIDDEN_FRAME: Duration = Duration::from_secs(1);
 
 const SCREEN_POLL: Duration = Duration::from_secs(2);
 
