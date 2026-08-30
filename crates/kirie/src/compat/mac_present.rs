@@ -32,6 +32,17 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    if let Some(socket) = control_socket(args)
+        && crate::compat::mac_ipc::already_running(&socket)
+    {
+        eprintln!(
+            "another kirie already owns {} — stop it first (pkill -x kirie), or pass a \
+             different --control-socket",
+            socket.display()
+        );
+        return ExitCode::FAILURE;
+    }
+
     kirie_platform::set_battery_fps(args.battery_fps);
 
     let options = PresentOptions {

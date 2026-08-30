@@ -116,6 +116,21 @@ impl Showing {
     }
 }
 
+#[must_use]
+pub fn already_running(socket: &Path) -> bool {
+    let Ok(stream) = UnixStream::connect(socket) else {
+        return false;
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(500)));
+    let mut writer = &stream;
+    if writeln!(writer, "ping").is_err() {
+        return false;
+    }
+    let _ = writer.flush();
+    let mut answer = String::new();
+    BufReader::new(&stream).read_line(&mut answer).is_ok() && answer.trim() == "pong"
+}
+
 pub fn serve(socket: PathBuf, orders: Sender<RenderCommand>, showing: Arc<Showing>, args: CompatArgs) {
     let _ = std::fs::remove_file(&socket);
     let listener = match UnixListener::bind(&socket) {
@@ -250,6 +265,12 @@ fn put_up(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, ar
         return "error\n".to_owned();
     };
     if resolve::refuse_without_assets(&wallpaper).is_some() || wallpaper.unrunnable_reason().is_some() {
+        return "error\n".to_owned();
+    }
+    if matches!(wallpaper, Wallpaper::Web { .. }) {
+        // A web wallpaper is a WKWebView in the window, not something the render
+        // loop can swap in. Say so instead of drawing an empty frame.
+        tracing::warn!(path, "a web wallpaper needs the renderer restarted on macOS");
         return "error\n".to_owned();
     }
 

@@ -147,6 +147,7 @@ impl MacPlatform {
                     if let Some(output) = self.outputs.get_mut(at) {
                         output.renderer = Some(renderer);
                         output.last_frame = None;
+                        output.first_frame_presented = false;
                     }
                 }
                 RenderCommand::Install { screen, renderer, .. } => {
@@ -155,6 +156,7 @@ impl MacPlatform {
                     {
                         output.renderer = Some(renderer);
                         output.last_frame = None;
+                        output.first_frame_presented = false;
                     }
                 }
                 RenderCommand::SetProperty {
@@ -209,6 +211,7 @@ impl MacPlatform {
         if let Some(output) = self.outputs.get_mut(at) {
             output.renderer = Some(renderer);
             output.last_frame = None;
+            output.first_frame_presented = false;
         }
     }
 
