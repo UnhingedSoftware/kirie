@@ -65,6 +65,39 @@ cargo build --release -p kirie
 
 The binary is `target/release/kirie`.
 
+### macOS
+
+```sh
+brew install ffmpeg pkg-config cmake ninja
+cargo build --release --no-default-features --features web-webview
+```
+
+Wallpapers are drawn in one borderless window per screen, at the desktop window
+level, so they sit behind your icons. Web wallpapers use the system WebKit —
+there is nothing to install for them. Scenes need Wallpaper Engine's shared
+assets; point `KIRIE_WE_ASSETS` at a copy, or let
+[haru](https://github.com/UnhingedSoftware/haru) fetch them.
+
+Copy the binary somewhere on your path with `rm` first — overwriting a Mach-O
+in place invalidates its signature and macOS then kills it at launch with no
+message:
+
+```sh
+rm -f ~/.local/bin/kirie && cp target/release/kirie ~/.local/bin/kirie
+```
+
+A **downloaded** binary is quarantined, and releases are not notarized, so
+macOS refuses to run it until the flag is cleared. Something you built yourself
+is unaffected.
+
+```sh
+xattr -d com.apple.quarantine kirie-macos-aarch64
+```
+
+Not there yet: audio-reactive wallpapers render but do not react (no capture),
+and clicks only reach a wallpaper with `--interactive`, since a wallpaper that
+takes clicks takes them from the desktop too.
+
 ### Web wallpapers (optional)
 
 Web (`"type": "web"`) wallpapers need an embedded browser, behind a cargo
