@@ -27,7 +27,8 @@ set -euo pipefail
 VERSION="${FFMPEG_VERSION:-7.1.1}"
 PREFIX="${1:-$HOME/.cache/kirie/ffmpeg-static}"
 BUILD_DIR="${FFMPEG_BUILD_DIR:-/var/tmp/kirie-ffmpeg-build}"
-JOBS="${JOBS:-$(nproc)}"
+# nproc is GNU; macOS answers with sysctl.
+JOBS="${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 log() { printf 'build-ffmpeg: %s\n' "$*"; }
 
