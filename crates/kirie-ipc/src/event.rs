@@ -3,10 +3,13 @@ use crossbeam_channel::Sender;
 use crate::command::{Command, WorkshopRequest};
 use crate::status::StatusSnapshot;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
     Ok,
     Error,
+    /// `error <why>` — a kirie extension; a client that knows only the original
+    /// protocol still reads `error` as the first word.
+    Refused(String),
 }
 
 #[derive(Debug)]

@@ -237,7 +237,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 .ok()
                 .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
             let Some((cmd_tx, build_ctx)) = sc else {
-                return CommandOutcome::Error;
+                return CommandOutcome::Refused("the renderer is not ready yet".to_owned());
             };
             let props: Vec<(String, String)> = state
                 .properties
@@ -278,7 +278,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     .bg = Some(path);
                 return CommandOutcome::Ok;
             }
-            CommandOutcome::Error
+            CommandOutcome::Refused(why_not(&path))
         }
         Command::Preload { path } => {
             if let Some((cmd_tx, build_ctx)) = state
@@ -417,6 +417,22 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 capture,
             });
             CommandOutcome::Ok
+        }
+    }
+}
+
+// The bg failed to build. Say which of the ordinary reasons it was, rather
+// than leaving the caller with a bare `error`.
+fn why_not(path: &std::path::Path) -> String {
+    match super::resolve::classify(&path.to_string_lossy()) {
+        Err(err) => err.to_string(),
+        Ok(wallpaper) => {
+            if let Some(note) = super::resolve::refuse_without_assets(&wallpaper) {
+                return note.replace('\n', " ");
+            }
+            wallpaper
+                .unrunnable_reason()
+                .unwrap_or_else(|| "the renderer could not build it".to_owned())
         }
     }
 }

@@ -214,6 +214,7 @@ fn respond(request: Request, events: &Sender<IpcEvent>) -> Option<Vec<u8>> {
             Some(match (fallible, outcome) {
                 (false, _) | (true, CommandOutcome::Ok) => RESP_OK.to_vec(),
                 (true, CommandOutcome::Error) => RESP_ERROR.to_vec(),
+                (true, CommandOutcome::Refused(why)) => format!("error {why}\n").into_bytes(),
             })
         }
     }
