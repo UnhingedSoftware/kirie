@@ -41,7 +41,7 @@ objc2 = { version = "0.6", optional = true }
 block2 = { version = "0.6", optional = true }
 objc2-app-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "NSApplication", "NSWindow", "NSView", "NSResponder", "NSImage", "NSImageRep", "NSBitmapImageRep", "NSGraphics", "NSScreen", "NSRunningApplication"] }
 objc2-foundation = { version = "0.3", optional = true, default-features = false, features = ["std", "NSDate", "NSRunLoop", "NSString", "NSURL", "NSURLRequest", "NSGeometry", "NSError", "NSData", "NSObjCRuntime"] }
-objc2-web-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKSnapshotConfiguration", "WKNavigation"] }
+objc2-web-kit = { version = "0.3", optional = true, default-features = false, features = ["std", "block2", "objc2-app-kit", "objc2-core-foundation", "WKWebView", "WKWebViewConfiguration", "WKSnapshotConfiguration", "WKNavigation", "WKUserScript", "WKUserContentController"] }
 
 [[bin]]
 name = "kirie-cef-helper"

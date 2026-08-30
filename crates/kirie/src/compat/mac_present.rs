@@ -23,10 +23,6 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         eprintln!("{note}");
         return ExitCode::FAILURE;
     }
-    #[cfg(feature = "web-webview")]
-    if let Wallpaper::Web { dir, file } = &wallpaper {
-        return present_web(dir, file, args);
-    }
     if let Some(reason) = wallpaper.unrunnable_reason() {
         eprintln!("cannot put this on a screen: {reason}");
         return ExitCode::FAILURE;
@@ -52,14 +48,49 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         ..PresentOptions::default()
     };
 
-    let mut platform =
-        match Platform::connect_with(kirie_platform::Backend::Mac, options, factory(wallpaper, args)) {
-            Ok(platform) => platform,
-            Err(err) => {
-                eprintln!("cannot put a wallpaper on this desktop: {err}");
-                return ExitCode::FAILURE;
-            }
-        };
+    let mut platform = match Platform::connect_with(
+        kirie_platform::Backend::Mac,
+        options,
+        factory(wallpaper.clone(), args),
+    ) {
+        Ok(platform) => platform,
+        Err(err) => {
+            eprintln!("cannot put a wallpaper on this desktop: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    #[cfg(feature = "web-webview")]
+    if let Wallpaper::Web { dir, file } = &wallpaper {
+        let url = resolve::web_entry_url(dir, file);
+        let level = crate::compat::mac_ipc::level_of(Sound {
+            volume: args.volume,
+            silent: args.silent,
+        });
+        for screen in platform.screen_names() {
+            let wanted = url.clone();
+            let make: kirie_platform::MakeViewFn = Box::new(move |size: SurfaceSize| {
+                match kirie_web::wk::desktop_view(
+                    &wanted,
+                    kirie_web::WebSize {
+                        width: size.width,
+                        height: size.height,
+                    },
+                    level,
+                ) {
+                    Ok(view) => objc2::rc::Retained::into_super(view),
+                    Err(err) => {
+                        tracing::error!(%err, "cannot open the page");
+                        let mtm = objc2::MainThreadMarker::new().expect("main thread");
+                        objc2_app_kit::NSView::new(mtm)
+                    }
+                }
+            });
+            let _ = platform
+                .orders()
+                .send(kirie_platform::RenderCommand::SetView { screen, make });
+        }
+    }
 
     let showing = crate::compat::mac_ipc::Showing::new(
         &platform.screen_names(),
@@ -89,58 +120,6 @@ pub fn present(args: &CompatArgs) -> ExitCode {
             eprintln!("the wallpaper stopped: {err}");
             ExitCode::FAILURE
         }
-    }
-}
-
-#[cfg(feature = "web-webview")]
-fn present_web(dir: &std::path::Path, file: &str, args: &CompatArgs) -> ExitCode {
-    use kirie_web::WebSize;
-
-    let url = resolve::web_entry_url(dir, file);
-    let roots: Vec<String> = args.screens.iter().map(|screen| screen.name.clone()).collect();
-    let surfaces = match kirie_platform::open_desktop(&roots) {
-        Ok(surfaces) => surfaces,
-        Err(err) => {
-            eprintln!("cannot put a wallpaper on this desktop: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
-
-    let mut views = Vec::with_capacity(surfaces.len());
-    for surface in &surfaces {
-        let size = WebSize {
-            width: surface.size().width,
-            height: surface.size().height,
-        };
-        match kirie_web::wk::desktop_view(&url, size) {
-            Ok(view) => {
-                surface.show(&view);
-                views.push(view);
-            }
-            Err(err) => {
-                eprintln!("{}: cannot open the page: {err}", surface.name());
-                return ExitCode::FAILURE;
-            }
-        }
-    }
-
-    let level = if args.silent {
-        0.0
-    } else {
-        (args.volume as f32 / 128.0).clamp(0.0, 1.0)
-    };
-    tracing::info!(screens = views.len(), url, "presenting a web wallpaper");
-
-    let mut hushed = std::time::Instant::now() - std::time::Duration::from_secs(1);
-    loop {
-        kirie_platform::pump_desktop_events();
-        if hushed.elapsed() >= std::time::Duration::from_millis(500) {
-            for view in &views {
-                kirie_web::wk::hush(view, level);
-            }
-            hushed = std::time::Instant::now();
-        }
-        std::thread::sleep(std::time::Duration::from_millis(8));
     }
 }
 

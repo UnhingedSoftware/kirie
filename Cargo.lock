@@ -2325,6 +2325,8 @@ dependencies = [
  "kirie-steam-helper",
  "kirie-video",
  "kirie-web",
+ "objc2",
+ "objc2-app-kit",
  "pollster",
  "ratatui",
  "serde_json",

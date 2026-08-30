@@ -101,7 +101,15 @@ pub type CaptureFn =
 #[cfg(target_os = "linux")]
 pub type CommandSender = smithay_client_toolkit::reexports::calloop::channel::Sender<RenderCommand>;
 
+#[cfg(target_os = "macos")]
+pub type MakeViewFn = Box<dyn FnOnce(SurfaceSize) -> objc2::rc::Retained<objc2_app_kit::NSView> + Send>;
+
 pub enum RenderCommand {
+    #[cfg(target_os = "macos")]
+    SetView {
+        screen: String,
+        make: MakeViewFn,
+    },
     Build {
         screen: String,
         stash: Option<String>,

@@ -16,6 +16,10 @@ web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview-m
 web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
 vaapi = ["kirie-video/vaapi"]
 
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder"] }
+
 [dependencies]
 zbus = { workspace = true }
 kirie-formats = { workspace = true }

@@ -17,6 +17,7 @@ use crate::gpu::Gpu;
 use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
 
 struct MacOutput {
+    web: bool,
     format: wgpu::TextureFormat,
     wgpu_surface: Option<wgpu::Surface<'static>>,
     window: Retained<NSWindow>,
@@ -76,6 +77,7 @@ impl MacPlatform {
                 }
             };
             outputs.push(MacOutput {
+                web: false,
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu_surface,
                 window,
@@ -134,6 +136,7 @@ impl MacPlatform {
 
         while let Ok(order) = self.incoming.try_recv() {
             match order {
+                RenderCommand::SetView { screen, make } => self.show_view(&screen, make),
                 RenderCommand::Build { screen, build, .. } | RenderCommand::Swap { screen, build, .. } => {
                     self.install(&screen, build)
                 }
@@ -142,6 +145,7 @@ impl MacPlatform {
                     let Some(at) = self.output_at(&screen) else {
                         continue;
                     };
+                    self.take_back(at);
                     let (name, size, format) = self.shape_of(at);
                     let renderer = build_local(&device, &queue, format, &name, (size.width, size.height));
                     if let Some(output) = self.outputs.get_mut(at) {
@@ -200,12 +204,61 @@ impl MacPlatform {
         }
     }
 
+    fn show_view(&mut self, screen: &str, make: crate::renderer::MakeViewFn) {
+        let Some(at) = self.output_at(screen) else {
+            return;
+        };
+        let (name, size, _) = self.shape_of(at);
+        let view = make(size);
+
+        let Some(output) = self.outputs.get_mut(at) else {
+            return;
+        };
+        // The surface owns the layer of the view being replaced, so it goes first.
+        output.renderer = None;
+        output.wgpu_surface = None;
+        output.configured = false;
+        output.web = true;
+        output.window.setContentView(Some(&view));
+        output.window.orderFrontRegardless();
+        tracing::info!(output = %name, "a web page owns this screen now");
+    }
+
+    fn take_back(&mut self, at: usize) {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(output) = self.outputs.get_mut(at) else {
+            return;
+        };
+        if !output.web {
+            return;
+        }
+        let view = objc2_app_kit::NSView::new(mtm);
+        view.setWantsLayer(true);
+        output.window.setContentView(Some(&view));
+        output.web = false;
+
+        let name = output.name.clone();
+        match create_surface(&self.gpu.instance, &self.outputs[at].window) {
+            Ok(surface) => {
+                if let Some(output) = self.outputs.get_mut(at) {
+                    output.wgpu_surface = Some(surface);
+                }
+                self.configure_swapchain(at);
+                tracing::info!(output = %name, "drawing this screen again");
+            }
+            Err(err) => tracing::error!(output = %name, %err, "cannot draw this screen again"),
+        }
+    }
+
     fn install(&mut self, screen: &str, build: crate::renderer::BuildFn) {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
         let Some(at) = self.output_at(screen) else {
             tracing::warn!(screen, "no such screen; ignoring");
             return;
         };
+        self.take_back(at);
         let (name, size, format) = self.shape_of(at);
         let renderer = build(&device, &queue, format, &name, (size.width, size.height));
         if renderer.is_placeholder() {
@@ -293,7 +346,7 @@ impl MacPlatform {
         let Some(ctx) = self.outputs.get_mut(index) else {
             return false;
         };
-        if !ctx.configured || !on_screen(&ctx.window) {
+        if ctx.web || !ctx.configured || !on_screen(&ctx.window) {
             return false;
         }
         if ctx.first_frame_presented && settled(ctx.renderer.as_deref()) {

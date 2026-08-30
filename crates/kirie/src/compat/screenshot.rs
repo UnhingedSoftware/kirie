@@ -297,7 +297,7 @@ pub fn capture(
 
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Sound {
+pub struct Sound {
     pub volume: i64,
     pub silent: bool,
 }

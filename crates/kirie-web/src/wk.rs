@@ -8,7 +8,10 @@ use objc2_app_kit::{
     NSWindowStyleMask,
 };
 use objc2_foundation::{NSDate, NSError, NSPoint, NSRect, NSRunLoop, NSSize, NSString, NSURL, NSURLRequest};
-use objc2_web_kit::{WKSnapshotConfiguration, WKWebView, WKWebViewConfiguration};
+use objc2_web_kit::{
+    WKSnapshotConfiguration, WKUserContentController, WKUserScript, WKUserScriptInjectionTime, WKWebView,
+    WKWebViewConfiguration,
+};
 
 use crate::backend::{FrameBuffer, OffscreenWeb, PixelFormat, WebError, WebSize};
 
@@ -166,22 +169,12 @@ impl WkBackend {
 }
 
 pub fn hush(view: &WKWebView, volume: f32) {
-    let level = volume.clamp(0.0, 1.0);
-    let script = format!(
-        "(function(){{\
-var v={level};\
-var apply=function(){{document.querySelectorAll('video,audio').forEach(function(el){{el.muted=v<=0;el.volume=v;}});}};\
-apply();\
-if(!window.__kirieHush){{window.__kirieHush=new MutationObserver(apply);\
-window.__kirieHush.observe(document.documentElement,{{childList:true,subtree:true}});}}\
-}})()"
-    );
-    let source = NSString::from_str(&script);
+    let source = NSString::from_str(&hush_script(volume));
     // SAFETY: the script string is owned here and outlives the call
     unsafe { view.evaluateJavaScript_completionHandler(&source, None) };
 }
 
-pub fn desktop_view(url: &str, size: WebSize) -> Result<Retained<WKWebView>, WebError> {
+pub fn desktop_view(url: &str, size: WebSize, volume: f32) -> Result<Retained<WKWebView>, WebError> {
     let size = size.clamped();
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| WebError::Init("WKWebView needs the main thread".to_owned()))?;
@@ -189,9 +182,44 @@ pub fn desktop_view(url: &str, size: WebSize) -> Result<Retained<WKWebView>, Web
         NSPoint::new(0.0, 0.0),
         NSSize::new(f64::from(size.width), f64::from(size.height)),
     );
-    let view = make_view(mtm, rect);
+    let view = make_view_with_volume(mtm, rect, volume);
     load(&view, url)?;
     Ok(view)
+}
+
+fn make_view_with_volume(mtm: MainThreadMarker, rect: NSRect, volume: f32) -> Retained<WKWebView> {
+    // SAFETY: AppKit allocations made on the main thread
+    let config = unsafe { WKWebViewConfiguration::new(mtm) };
+    // SAFETY: the script and controller are owned by the configuration afterwards
+    unsafe {
+        let controller = WKUserContentController::new(mtm);
+        let source = NSString::from_str(&hush_script(volume));
+        let script = WKUserScript::initWithSource_injectionTime_forMainFrameOnly(
+            WKUserScript::alloc(mtm),
+            &source,
+            WKUserScriptInjectionTime::AtDocumentStart,
+            false,
+        );
+        controller.addUserScript(&script);
+        config.setUserContentController(&controller);
+    }
+    let body = NSRect::new(NSPoint::new(0.0, 0.0), rect.size);
+    // SAFETY: an AppKit initializer called on the main thread
+    unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), body, &config) }
+}
+
+#[must_use]
+fn hush_script(volume: f32) -> String {
+    let level = volume.clamp(0.0, 1.0);
+    format!(
+        "(function(){{\
+var v={level};\
+var apply=function(){{document.querySelectorAll('video,audio').forEach(function(el){{el.muted=v<=0;el.volume=v;}});}};\
+document.addEventListener('DOMContentLoaded',apply);\
+apply();\
+new MutationObserver(apply).observe(document.documentElement||document,{{childList:true,subtree:true}});\
+}})()"
+    )
 }
 
 fn make_view(mtm: MainThreadMarker, rect: NSRect) -> Retained<WKWebView> {

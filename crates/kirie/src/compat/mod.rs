@@ -4,7 +4,7 @@ pub mod common;
 #[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;
-#[cfg(target_os = "macos")]
+#[cfg(unix)]
 pub mod mac_ipc;
 #[cfg(target_os = "macos")]
 pub mod mac_present;
