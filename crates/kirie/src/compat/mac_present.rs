@@ -32,6 +32,8 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    kirie_platform::set_battery_fps(args.battery_fps);
+
     let options = PresentOptions {
         screen_roots: args.screens.iter().map(|screen| screen.name.clone()).collect(),
         fps: u32::try_from(args.fps).ok().filter(|rate| *rate > 0),

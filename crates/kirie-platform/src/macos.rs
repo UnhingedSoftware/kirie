@@ -34,6 +34,8 @@ pub struct MacPlatform {
     app: Retained<NSApplication>,
     make_renderer: RendererFactory,
     frame_interval: Duration,
+    unplugged: bool,
+    checked_power: Instant,
     orders: std::sync::mpsc::Sender<crate::renderer::RenderCommand>,
     incoming: std::sync::mpsc::Receiver<crate::renderer::RenderCommand>,
     speed: f32,
@@ -93,6 +95,8 @@ impl MacPlatform {
             app,
             make_renderer,
             frame_interval: frame_interval(options.fps),
+            unplugged: on_battery(),
+            checked_power: Instant::now(),
             orders,
             incoming,
             speed: options.playback_speed as f32,
@@ -187,6 +191,13 @@ impl MacPlatform {
         }
     }
 
+    fn pace(&self) -> Duration {
+        match self.unplugged.then(battery_fps).flatten() {
+            Some(fps) => frame_interval(Some(fps)).max(self.frame_interval),
+            None => self.frame_interval,
+        }
+    }
+
     fn install(&mut self, screen: &str, build: crate::renderer::BuildFn) {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
         let Some(at) = self.output_at(screen) else {
@@ -268,18 +279,21 @@ impl MacPlatform {
         }
     }
 
-    fn draw(&mut self, index: usize) {
+    fn draw(&mut self, index: usize) -> bool {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
         let speed = self.speed;
 
         let Some(ctx) = self.outputs.get_mut(index) else {
-            return;
+            return false;
         };
         if !ctx.configured || !on_screen(&ctx.window) {
-            return;
+            return false;
+        }
+        if ctx.first_frame_presented && settled(ctx.renderer.as_deref()) {
+            return false;
         }
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
-            return;
+            return false;
         };
 
         let mut texture = wgpu_surface.get_current_texture();
@@ -289,22 +303,22 @@ impl MacPlatform {
         ) {
             self.configure_swapchain(index);
             let Some(ctx) = self.outputs.get(index) else {
-                return;
+                return false;
             };
             let Some(wgpu_surface) = &ctx.wgpu_surface else {
-                return;
+                return false;
             };
             texture = wgpu_surface.get_current_texture();
         }
 
         let Some(ctx) = self.outputs.get_mut(index) else {
-            return;
+            return false;
         };
         let texture = match texture {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
                 tracing::debug!(output = %ctx.name, status = ?other, "skipping frame");
-                return;
+                return false;
             }
         };
 
@@ -341,6 +355,7 @@ impl MacPlatform {
                 "first frame presented"
             );
         }
+        true
     }
 
     fn pump_events(&self) {
@@ -371,13 +386,20 @@ impl MacPlatform {
                 break;
             }
 
-            for index in 0..self.outputs.len() {
-                self.draw(index);
+            if frame_start.duration_since(self.checked_power) >= POWER_POLL {
+                self.checked_power = frame_start;
+                self.unplugged = on_battery();
             }
 
+            let mut drew = false;
+            for index in 0..self.outputs.len() {
+                drew |= self.draw(index);
+            }
+
+            let pace = if drew { self.pace() } else { IDLE_POLL };
             let elapsed = frame_start.elapsed();
-            if elapsed < self.frame_interval {
-                std::thread::sleep(self.frame_interval - elapsed);
+            if elapsed < pace {
+                std::thread::sleep(pace - elapsed);
             }
         }
 
@@ -471,7 +493,39 @@ fn next_event(app: &NSApplication) -> Option<Retained<NSEvent>> {
     }
 }
 
+static BATTERY_FPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_battery_fps(fps: u32) {
+    BATTERY_FPS.store(fps, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn battery_fps() -> Option<u32> {
+    let fps = BATTERY_FPS.load(std::sync::atomic::Ordering::Relaxed);
+    (fps > 0).then_some(fps)
+}
+
+fn on_battery() -> bool {
+    let asked = std::process::Command::new("pmset")
+        .args(["-g", "ps"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(asked) = asked else { return false };
+    String::from_utf8_lossy(&asked.stdout).contains("Battery Power")
+}
+
+const POWER_POLL: Duration = Duration::from_secs(20);
+
+const IDLE_POLL: Duration = Duration::from_millis(250);
+
 const SCREEN_POLL: Duration = Duration::from_secs(2);
+
+fn settled(renderer: Option<&dyn Renderer>) -> bool {
+    let Some(renderer) = renderer else {
+        return false;
+    };
+    renderer.is_passive() || matches!(renderer.redraw_hint(), crate::RedrawHint::Static)
+}
 
 fn on_screen(window: &NSWindow) -> bool {
     window.occlusionState().contains(NSWindowOcclusionState::Visible)

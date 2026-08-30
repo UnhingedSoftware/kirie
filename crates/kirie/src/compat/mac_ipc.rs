@@ -214,7 +214,11 @@ fn set(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args:
             rebuild_all(orders, showing, args);
             "ok\n".to_owned()
         }
-        "batteryfps" | "noautomute" | "disablemouse" | "nofullscreenpause" => "ok\n".to_owned(),
+        "batteryfps" => {
+            kirie_platform::set_battery_fps(value.trim().parse::<u32>().unwrap_or(0));
+            "ok\n".to_owned()
+        }
+        "noautomute" | "disablemouse" | "nofullscreenpause" => "ok\n".to_owned(),
         _ => "unknown command\n".to_owned(),
     }
 }
