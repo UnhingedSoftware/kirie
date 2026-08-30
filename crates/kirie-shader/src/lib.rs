@@ -246,8 +246,14 @@ void main() {\n\
         assert!(names.contains(&"a_TexCoord"));
     }
 
+    // A tripwire, not a fact: every cached shader on every machine is keyed by
+    // this number, so bumping it throws all of them away. Change it when the
+    // translation changes — and change this line in the same commit.
     #[test]
-    fn translator_version_is_stable() {
-        assert_eq!(TRANSLATOR_VERSION, 3);
+    fn the_translator_version_changes_deliberately() {
+        assert_eq!(
+            TRANSLATOR_VERSION, 4,
+            "translation changed? bump this too — it invalidates every shader cache"
+        );
     }
 }
