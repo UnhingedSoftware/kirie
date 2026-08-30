@@ -119,6 +119,7 @@ pub struct CompatArgs {
     pub fps: i64,
     pub playback_speed: f64,
     pub render_scale: f64,
+    pub focus: (f32, f32),
     pub control_socket: Option<PathBuf>,
     pub audio_device: Option<String>,
     pub no_fullscreen_pause: bool,
@@ -160,6 +161,7 @@ impl Default for CompatArgs {
             fps: 30,
             playback_speed: 1.0,
             render_scale: 1.0,
+            focus: (0.0, 0.0),
             control_socket: None,
             audio_device: None,
             no_fullscreen_pause: false,
@@ -271,6 +273,24 @@ fn scan_int(flag: &str, value: &str) -> Result<i64, ParseError> {
         .map_err(|_| ParseError::single(format!("Invalid numeric value '{value}' for {flag}")))
 }
 
+fn scan_focus(value: &str) -> Result<(f32, f32), ParseError> {
+    let (x, y) = value.split_once(',').unwrap_or((value, "0"));
+    let read = |text: &str| {
+        text.trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|found| found.is_finite())
+            .map(|found| found.clamp(-1.0, 1.0))
+    };
+    match (read(x), read(y)) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        _ => Err(ParseError {
+            message: format!("--focus wants two numbers between -1 and 1, like 0.3,-0.2 (got {value})"),
+            doubled: false,
+        }),
+    }
+}
+
 fn scan_float(flag: &str, value: &str) -> Result<f64, ParseError> {
     value
         .trim()
@@ -320,6 +340,7 @@ fn is_non_repeatable(canonical: &str) -> bool {
             | "--fps"
             | "--playback-speed"
             | "--render-scale"
+            | "--focus"
             | "--control-socket"
             | "--audio-device"
             | "--no-fullscreen-pause"
@@ -557,6 +578,7 @@ fn parse_with(
             "--render-scale" => {
                 out.render_scale = scan_float("--render-scale", &value()?)?;
             }
+            "--focus" => out.focus = scan_focus(&value()?)?,
             "--control-socket" => out.control_socket = Some(PathBuf::from(value()?)),
             "--audio-device" => out.audio_device = Some(value()?),
             "--no-fullscreen-pause" => out.no_fullscreen_pause = true,
@@ -712,6 +734,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "-f" | "--fps" => "--fps",
         "--playback-speed" | "--clock" => "--playback-speed",
         "--render-scale" => "--render-scale",
+        "--focus" => "--focus",
         "--control-socket" => "--control-socket",
         "--audio-device" => "--audio-device",
         "--no-fullscreen-pause" => "--no-fullscreen-pause",

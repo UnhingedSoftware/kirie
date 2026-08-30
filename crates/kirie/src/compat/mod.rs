@@ -5,6 +5,8 @@ pub mod common;
 pub mod ipc_app;
 pub mod list_props;
 #[cfg(target_os = "macos")]
+pub mod mac_ipc;
+#[cfg(target_os = "macos")]
 pub mod mac_present;
 pub mod playlist;
 #[cfg(target_os = "linux")]
@@ -155,6 +157,7 @@ fn init_tracing() {
 #[cfg(not(target_os = "linux"))]
 fn offscreen_only(args: args::CompatArgs) -> ExitCode {
     common::set_render_scale(args.render_scale as f32);
+    kirie_render::set_focus(args.focus.0, args.focus.1);
     common::set_fit_render_to_output(args.fit_render_to_output);
     common::set_object_filter(&args.render_debug);
 

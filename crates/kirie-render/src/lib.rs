@@ -16,7 +16,7 @@ pub use media::{
     TrackMetadata,
 };
 pub use renderer::{ImageOptions, ImageRenderer};
-pub use scaling::{ClampMode, ScalingMode, UvWindow};
+pub use scaling::{ClampMode, ScalingMode, UvWindow, focus, set_focus};
 pub use scene::{
     SceneError, SceneLoadError, SceneOptions, SceneRenderer, load_workshop_scene, start_background_prebake,
 };

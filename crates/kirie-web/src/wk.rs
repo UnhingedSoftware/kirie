@@ -132,7 +132,10 @@ impl WkBackend {
         let waiting = Arc::clone(&self.waiting);
         let handler = RcBlock::new(move |image: *mut NSImage, _error: *mut NSError| {
             if let Some(image) = (!image.is_null())
-                .then(|| unsafe { Retained::retain(image) })
+                .then(|| {
+                    // SAFETY: AppKit hands the block a live autoreleased image
+                    unsafe { Retained::retain(image) }
+                })
                 .flatten()
                 && let Some(frame) = frame_from_image(&image)
                 && let Ok(mut slot) = incoming.lock()
@@ -144,7 +147,9 @@ impl WkBackend {
             }
         });
 
+        // SAFETY: an AppKit allocation made on the main thread
         let config = unsafe { WKSnapshotConfiguration::new(mtm) };
+        // SAFETY: the view, config and block all outlive this call
         unsafe {
             self.view
                 .takeSnapshotWithConfiguration_completionHandler(Some(&config), &handler);
@@ -153,10 +158,27 @@ impl WkBackend {
 
     fn evaluate(&self, script: &str) {
         let source = NSString::from_str(script);
+        // SAFETY: the script string is owned here and outlives the call
         unsafe {
             self.view.evaluateJavaScript_completionHandler(&source, None);
         }
     }
+}
+
+pub fn hush(view: &WKWebView, volume: f32) {
+    let level = volume.clamp(0.0, 1.0);
+    let script = format!(
+        "(function(){{\
+var v={level};\
+var apply=function(){{document.querySelectorAll('video,audio').forEach(function(el){{el.muted=v<=0;el.volume=v;}});}};\
+apply();\
+if(!window.__kirieHush){{window.__kirieHush=new MutationObserver(apply);\
+window.__kirieHush.observe(document.documentElement,{{childList:true,subtree:true}});}}\
+}})()"
+    );
+    let source = NSString::from_str(&script);
+    // SAFETY: the script string is owned here and outlives the call
+    unsafe { view.evaluateJavaScript_completionHandler(&source, None) };
 }
 
 pub fn desktop_view(url: &str, size: WebSize) -> Result<Retained<WKWebView>, WebError> {
@@ -173,12 +195,15 @@ pub fn desktop_view(url: &str, size: WebSize) -> Result<Retained<WKWebView>, Web
 }
 
 fn make_view(mtm: MainThreadMarker, rect: NSRect) -> Retained<WKWebView> {
+    // SAFETY: an AppKit allocation made on the main thread
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     let body = NSRect::new(NSPoint::new(0.0, 0.0), rect.size);
+    // SAFETY: an AppKit initializer called on the main thread
     unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), body, &config) }
 }
 
 fn make_window(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSWindow> {
+    // SAFETY: an AppKit initializer called on the main thread
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
             NSWindow::alloc(mtm),
@@ -188,6 +213,7 @@ fn make_window(mtm: MainThreadMarker, rect: NSRect) -> Retained<NSWindow> {
             false,
         )
     };
+    // SAFETY: the window is owned here and never closed by AppKit itself
     unsafe { window.setReleasedWhenClosed(false) };
     window.setOpaque(true);
     window.setHasShadow(false);

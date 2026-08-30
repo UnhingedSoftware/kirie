@@ -1667,7 +1667,8 @@ impl Renderer for SceneRenderer {
             let mut window = self
                 .options
                 .scaling
-                .uv_window((self.proj_w, self.proj_h), (size.width, size.height));
+                .uv_window((self.proj_w, self.proj_h), (size.width, size.height))
+                .slid(crate::scaling::focus());
             if self.zoom != 1.0 {
                 let (cx, cy) = ((window.u0 + window.u1) * 0.5, (window.v0 + window.v1) * 0.5);
                 let (hw, hh) = (

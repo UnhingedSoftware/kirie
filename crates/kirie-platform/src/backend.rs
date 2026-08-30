@@ -160,6 +160,22 @@ impl Platform {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn orders(&self) -> std::sync::mpsc::Sender<crate::renderer::RenderCommand> {
+        match self {
+            Self::Mac(p) => p.orders(),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn screen_names(&self) -> Vec<String> {
+        match self {
+            Self::Mac(p) => p.screen_names(),
+        }
+    }
+
     pub fn run(&mut self, duration: Option<Duration>) -> Result<(), PlatformError> {
         match self {
             #[cfg(target_os = "linux")]

@@ -104,6 +104,7 @@ impl LazySources {
 
 pub fn dispatch(args: CompatArgs) -> ExitCode {
     set_render_scale(args.render_scale as f32);
+    kirie_render::set_focus(args.focus.0, args.focus.1);
     set_fit_render_to_output(args.fit_render_to_output);
     set_object_filter(&args.render_debug);
 

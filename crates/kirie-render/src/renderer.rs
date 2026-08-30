@@ -299,6 +299,7 @@ impl ImageRenderer {
         self.options
             .scaling
             .uv_window(self.content_size, (size.width, size.height))
+            .slid(crate::scaling::focus())
     }
 }
 

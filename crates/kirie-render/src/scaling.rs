@@ -1,5 +1,28 @@
 use crate::error::RenderError;
 
+static FOCUS_X: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static FOCUS_Y: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn set_focus(x: f32, y: f32) {
+    let keep = |value: f32| {
+        if value.is_finite() {
+            value.clamp(-1.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    FOCUS_X.store(keep(x).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    FOCUS_Y.store(keep(y).to_bits(), std::sync::atomic::Ordering::Relaxed);
+}
+
+#[must_use]
+pub fn focus() -> (f32, f32) {
+    (
+        f32::from_bits(FOCUS_X.load(std::sync::atomic::Ordering::Relaxed)),
+        f32::from_bits(FOCUS_Y.load(std::sync::atomic::Ordering::Relaxed)),
+    )
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScalingMode {
     #[default]
@@ -125,6 +148,23 @@ impl UvWindow {
 
     fn with_v((v0, v1): (f32, f32)) -> Self {
         Self { v0, v1, ..Self::FULL }
+    }
+
+    #[must_use]
+    pub fn slid(self, (x, y): (f32, f32)) -> Self {
+        let room = |low: f32, high: f32, by: f32| {
+            let span = high - low;
+            let free = 1.0 - span;
+            if free <= f32::EPSILON {
+                return (low, high);
+            }
+            let moved = (free / 2.0) * by.clamp(-1.0, 1.0);
+            let low = (low + moved).clamp(0.0, 1.0 - span);
+            (low, low + span)
+        };
+        let (u0, u1) = room(self.u0, self.u1, x);
+        let (v0, v1) = room(self.v0, self.v1, y);
+        Self { u0, u1, v0, v1 }
     }
 
     #[must_use]

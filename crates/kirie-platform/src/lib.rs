@@ -29,9 +29,9 @@ pub use error::PlatformError;
 pub use gpu::{
     attach_pipeline_cache, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature, power_preference,
 };
-pub use renderer::RendererFactory;
 #[cfg(target_os = "linux")]
-pub use renderer::{BuildFn, BuildLocalFn, CommandSender, InitialBuildFn, RenderCommand};
+pub use renderer::CommandSender;
+pub use renderer::{BuildFn, BuildLocalFn, InitialBuildFn, RenderCommand, RendererFactory};
 pub use renderer::{
     CaptureFn, PropertyImpact, RedrawHint, RenderTarget, Renderer, RendererSnapshot, SnapshotFormat,
     SurfaceSize,

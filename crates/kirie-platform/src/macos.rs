@@ -17,6 +17,7 @@ use crate::gpu::Gpu;
 use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
 
 struct MacOutput {
+    format: wgpu::TextureFormat,
     wgpu_surface: Option<wgpu::Surface<'static>>,
     window: Retained<NSWindow>,
     name: String,
@@ -33,6 +34,9 @@ pub struct MacPlatform {
     app: Retained<NSApplication>,
     make_renderer: RendererFactory,
     frame_interval: Duration,
+    orders: std::sync::mpsc::Sender<crate::renderer::RenderCommand>,
+    incoming: std::sync::mpsc::Receiver<crate::renderer::RenderCommand>,
+    speed: f32,
 }
 
 impl MacPlatform {
@@ -70,6 +74,7 @@ impl MacPlatform {
                 }
             };
             outputs.push(MacOutput {
+                format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu_surface,
                 window,
                 name,
@@ -81,12 +86,16 @@ impl MacPlatform {
             });
         }
 
+        let (orders, incoming) = std::sync::mpsc::channel();
         let mut platform = Self {
             outputs,
             gpu,
             app,
             make_renderer,
             frame_interval: frame_interval(options.fps),
+            orders,
+            incoming,
+            speed: options.playback_speed as f32,
         };
         for index in 0..platform.outputs.len() {
             platform.configure_swapchain(index);
@@ -106,6 +115,115 @@ impl MacPlatform {
         self.outputs.len()
     }
 
+    #[must_use]
+    pub fn orders(&self) -> std::sync::mpsc::Sender<crate::renderer::RenderCommand> {
+        self.orders.clone()
+    }
+
+    #[must_use]
+    pub fn screen_names(&self) -> Vec<String> {
+        self.outputs.iter().map(|output| output.name.clone()).collect()
+    }
+
+    fn take_orders(&mut self) {
+        use crate::renderer::RenderCommand;
+
+        while let Ok(order) = self.incoming.try_recv() {
+            match order {
+                RenderCommand::Build { screen, build, .. } | RenderCommand::Swap { screen, build, .. } => {
+                    self.install(&screen, build)
+                }
+                RenderCommand::SwapLocal { screen, build_local } => {
+                    let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
+                    let Some(at) = self.output_at(&screen) else {
+                        continue;
+                    };
+                    let (name, size, format) = self.shape_of(at);
+                    let renderer = build_local(&device, &queue, format, &name, (size.width, size.height));
+                    if let Some(output) = self.outputs.get_mut(at) {
+                        output.renderer = Some(renderer);
+                        output.last_frame = None;
+                    }
+                }
+                RenderCommand::Install { screen, renderer, .. } => {
+                    if let Some(at) = self.output_at(&screen)
+                        && let Some(output) = self.outputs.get_mut(at)
+                    {
+                        output.renderer = Some(renderer);
+                        output.last_frame = None;
+                    }
+                }
+                RenderCommand::SetProperty {
+                    screen,
+                    key,
+                    value,
+                    structural,
+                } => {
+                    let Some(at) = self.output_at(&screen) else {
+                        continue;
+                    };
+                    if let Some(output) = self.outputs.get_mut(at)
+                        && let Some(renderer) = output.renderer.as_mut()
+                        && renderer.set_property(&key, &value) == crate::PropertyImpact::NeedsRebuild
+                    {
+                        structural.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                RenderCommand::Screenshot { screen, capture } => {
+                    let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
+                    let Some(at) = self.output_at(&screen) else {
+                        continue;
+                    };
+                    let (_, size, format) = self.shape_of(at);
+                    if let Some(output) = self.outputs.get_mut(at)
+                        && let Some(renderer) = output.renderer.as_mut()
+                    {
+                        capture(&device, &queue, renderer.as_mut(), size, format);
+                    }
+                }
+                RenderCommand::SetFps(fps) => self.frame_interval = frame_interval(fps),
+                RenderCommand::SetSpeed(speed) => self.speed = speed.max(0.0),
+            }
+        }
+    }
+
+    fn install(&mut self, screen: &str, build: crate::renderer::BuildFn) {
+        let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
+        let Some(at) = self.output_at(screen) else {
+            tracing::warn!(screen, "no such screen; ignoring");
+            return;
+        };
+        let (name, size, format) = self.shape_of(at);
+        let renderer = build(&device, &queue, format, &name, (size.width, size.height));
+        if let Some(output) = self.outputs.get_mut(at) {
+            output.renderer = Some(renderer);
+            output.last_frame = None;
+        }
+    }
+
+    fn output_at(&self, screen: &str) -> Option<usize> {
+        if screen.is_empty() {
+            return (!self.outputs.is_empty()).then_some(0);
+        }
+        self.outputs
+            .iter()
+            .position(|output| output.name == screen)
+            .or_else(|| (!self.outputs.is_empty()).then_some(0))
+    }
+
+    fn shape_of(&self, at: usize) -> (String, SurfaceSize, wgpu::TextureFormat) {
+        self.outputs.get(at).map_or_else(
+            || {
+                (
+                    String::new(),
+                    SurfaceSize { width: 1, height: 1 },
+                    wgpu::TextureFormat::Bgra8UnormSrgb,
+                )
+            },
+            |output| (output.name.clone(), output.physical_size, output.format),
+        )
+    }
+
     fn configure_swapchain(&mut self, index: usize) {
         let Some(ctx) = self.outputs.get_mut(index) else {
             return;
@@ -123,6 +241,7 @@ impl MacPlatform {
         };
         config.present_mode = wgpu::PresentMode::Fifo;
         surface.configure(&self.gpu.device, &config);
+        ctx.format = config.format;
         ctx.configured = true;
     }
 
@@ -151,6 +270,7 @@ impl MacPlatform {
 
     fn draw(&mut self, index: usize) {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
+        let speed = self.speed;
 
         let Some(ctx) = self.outputs.get_mut(index) else {
             return;
@@ -209,7 +329,7 @@ impl MacPlatform {
             .unwrap_or(0.0);
         ctx.last_frame = Some(now);
 
-        renderer.render(&view, ctx.physical_size, dt);
+        renderer.render(&view, ctx.physical_size, dt * speed);
         queue.present(texture);
 
         if !ctx.first_frame_presented {
@@ -238,6 +358,7 @@ impl MacPlatform {
         loop {
             let frame_start = Instant::now();
             self.pump_events();
+            self.take_orders();
 
             if frame_start.duration_since(checked_screens) >= SCREEN_POLL {
                 checked_screens = frame_start;

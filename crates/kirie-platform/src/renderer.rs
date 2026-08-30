@@ -77,16 +77,14 @@ pub enum PropertyImpact {
 
 pub type RendererFactory = Box<dyn FnMut(&RenderTarget<'_>) -> Box<dyn Renderer>>;
 
-#[cfg(target_os = "linux")]
 pub type BuildFn = Box<
     dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str, (u32, u32)) -> Box<dyn Renderer + Send>
         + Send,
 >;
 
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub type InitialBuildFn = Box<dyn FnMut(&str) -> Option<BuildFn>>;
 
-#[cfg(target_os = "linux")]
 pub type BuildLocalFn = Box<
     dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str, (u32, u32)) -> Box<dyn Renderer>
         + Send,
@@ -98,7 +96,6 @@ pub type CaptureFn =
 #[cfg(target_os = "linux")]
 pub type CommandSender = smithay_client_toolkit::reexports::calloop::channel::Sender<RenderCommand>;
 
-#[cfg(target_os = "linux")]
 pub enum RenderCommand {
     Build {
         screen: String,

@@ -295,6 +295,40 @@ pub fn capture(
     Ok(())
 }
 
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Sound {
+    pub volume: i64,
+    pub silent: bool,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn build_presented_renderer(
+    render_target: &RenderTarget,
+    wallpaper: &Wallpaper,
+    scaling: ScalingMode,
+    clamp: ClampMode,
+    size: SurfaceSize,
+    properties: &[(String, String)],
+    sound: Sound,
+) -> Result<Box<dyn Renderer>> {
+    if let Wallpaper::Video { media } = wallpaper {
+        let options = VideoOptions {
+            volume: sound.volume as f64 * 100.0 / 128.0,
+            mute: false,
+            silent: sound.silent,
+            paused: false,
+            scaling: super::common::to_video_scaling(scaling),
+            nv12: false,
+            enable_audio: true,
+        };
+        let (player, _control) = VideoPlayer::open(media, options)
+            .with_context(|| format!("opening video {}", media.display()))?;
+        return Ok(Box::new(kirie_video::VideoRenderer::new(render_target, player)));
+    }
+    build_offscreen_renderer(render_target, wallpaper, scaling, clamp, size, None, properties)
+}
+
 #[cfg_attr(not(feature = "web-cef"), allow(unused_variables))]
 pub(crate) fn build_offscreen_renderer(
     render_target: &RenderTarget,

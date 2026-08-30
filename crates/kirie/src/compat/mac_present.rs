@@ -4,7 +4,7 @@ use kirie_platform::{Platform, PresentOptions, RenderTarget, Renderer, RendererF
 
 use crate::compat::args::CompatArgs;
 use crate::compat::resolve::{self, Wallpaper};
-use crate::compat::screenshot::build_offscreen_renderer;
+use crate::compat::screenshot::{Sound, build_presented_renderer};
 
 pub fn present(args: &CompatArgs) -> ExitCode {
     let Some(background) = background_of(args) else {
@@ -48,6 +48,23 @@ pub fn present(args: &CompatArgs) -> ExitCode {
             }
         };
 
+    let showing = crate::compat::mac_ipc::Showing::new(
+        &platform.screen_names(),
+        Some(std::path::Path::new(&background)),
+        args.playback_speed as f32,
+    );
+    if let Some(socket) = control_socket(args) {
+        let orders = platform.orders();
+        let spoken = args.clone();
+        let held = std::sync::Arc::clone(&showing);
+        let started = std::thread::Builder::new()
+            .name("kirie-control".to_owned())
+            .spawn(move || crate::compat::mac_ipc::serve(socket, orders, held, spoken));
+        if let Err(err) = started {
+            tracing::warn!(%err, "no control socket thread");
+        }
+    }
+
     tracing::info!(screens = platform.surface_count(), "presenting");
     match platform.run(None) {
         Ok(()) => ExitCode::SUCCESS,
@@ -90,11 +107,33 @@ fn present_web(dir: &std::path::Path, file: &str, args: &CompatArgs) -> ExitCode
         }
     }
 
+    let level = if args.silent {
+        0.0
+    } else {
+        (args.volume as f32 / 128.0).clamp(0.0, 1.0)
+    };
     tracing::info!(screens = views.len(), url, "presenting a web wallpaper");
+
+    let mut hushed = std::time::Instant::now() - std::time::Duration::from_secs(1);
     loop {
         kirie_platform::pump_desktop_events();
+        if hushed.elapsed() >= std::time::Duration::from_millis(500) {
+            for view in &views {
+                kirie_web::wk::hush(view, level);
+            }
+            hushed = std::time::Instant::now();
+        }
         std::thread::sleep(std::time::Duration::from_millis(8));
     }
+}
+
+fn control_socket(args: &CompatArgs) -> Option<std::path::PathBuf> {
+    args.control_socket.clone().or_else(|| {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(std::path::PathBuf::from)
+            .or_else(|| Some(std::env::temp_dir()))
+            .map(|dir| dir.join("lwe.sock"))
+    })
 }
 
 fn background_of(args: &CompatArgs) -> Option<String> {
@@ -107,13 +146,17 @@ fn factory(wallpaper: Wallpaper, args: &CompatArgs) -> RendererFactory {
     let scaling = args.window_scaling;
     let clamp = args.window_clamp;
     let properties = args.set_properties.clone();
+    let sound = Sound {
+        volume: args.volume,
+        silent: args.silent,
+    };
 
     Box::new(move |target: &RenderTarget<'_>| {
         let size = SurfaceSize {
             width: target.size.0,
             height: target.size.1,
         };
-        match build_offscreen_renderer(target, &wallpaper, scaling, clamp, size, None, &properties) {
+        match build_presented_renderer(target, &wallpaper, scaling, clamp, size, &properties, sound) {
             Ok(renderer) => renderer,
             Err(err) => {
                 tracing::error!(output = target.output_name, "cannot build the wallpaper: {err:#}");
