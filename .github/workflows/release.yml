@@ -274,15 +274,7 @@ jobs:
     needs: [prepare, test]
     env:
       V: ${{ needs.prepare.outputs.version }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            asset: kirie-macos-aarch64
-          - runner: macos-13
-            asset: kirie-macos-x86_64
-    runs-on: ${{ matrix.runner }}
+    runs-on: macos-latest
     defaults:
       run:
         shell: bash
@@ -291,7 +283,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.asset }}
+          key: kirie-macos-aarch64
 
       # ffmpeg for kirie-video; cmake and ninja because shaderc-sys builds the
       # compiler from source when there is no system libshaderc.
@@ -314,14 +306,14 @@ jobs:
       - name: Stage binary
         run: |
           set -euo pipefail
-          cp target/release/kirie "${{ matrix.asset }}"
-          chmod +x "${{ matrix.asset }}"
-          file "${{ matrix.asset }}"
+          cp target/release/kirie kirie-macos-aarch64
+          chmod +x kirie-macos-aarch64
+          file kirie-macos-aarch64
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: kirie-macos-aarch64
+          path: kirie-macos-aarch64
           if-no-files-found: error
           retention-days: 1
 
@@ -362,7 +354,6 @@ jobs:
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
           | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Needs `brew install ffmpeg`. |
-          | `kirie-macos-x86_64` | the same for Intel Macs. |
 
           EOF
           echo "attaching:"; echo "$files"
