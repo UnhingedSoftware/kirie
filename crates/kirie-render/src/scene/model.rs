@@ -395,11 +395,12 @@ fn compute_model_matrix(origin: [f32; 3], angles: [f32; 3], scale: [f32; 3]) -> 
 }
 
 pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
+    let (width, height) = super::fbo::fit_within(width, height, device.limits().max_texture_dimension_2d);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("kirie-model-depth"),
         size: wgpu::Extent3d {
-            width: width.max(1),
-            height: height.max(1),
+            width,
+            height,
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,

@@ -356,7 +356,11 @@ impl SceneRenderer {
             }
         }
         let scale_dim = |d: u32| ((d as f32 * rs).round() as u32).max(1);
-        let (fbo_w, fbo_h) = (scale_dim(proj_w), scale_dim(proj_h));
+        let (fbo_w, fbo_h) = super::fbo::fit_within(
+            scale_dim(proj_w),
+            scale_dim(proj_h),
+            device.limits().max_texture_dimension_2d,
+        );
         let scene_fbo = Fbo::new(device, "kirie-scene-fbo", fbo_w, fbo_h);
         let scene_snapshot = Fbo::new(device, "kirie-scene-snapshot", fbo_w, fbo_h);
 
