@@ -72,6 +72,10 @@ brew install ffmpeg pkg-config cmake ninja
 cargo build --release --no-default-features --features web-webview
 ```
 
+A build like that links against Homebrew's ffmpeg, so it stops working when
+Homebrew moves to a new major version. Release binaries carry their own
+(`--features portable`), which is why they need nothing installed.
+
 Wallpapers are drawn in one borderless window per screen, at the desktop window
 level, so they sit behind your icons. Web wallpapers use the system WebKit —
 there is nothing to install for them. Scenes need Wallpaper Engine's shared

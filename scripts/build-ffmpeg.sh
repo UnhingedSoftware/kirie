@@ -81,5 +81,6 @@ make -j"$JOBS" >/dev/null
 make install >/dev/null
 printf '%s' "$VERSION" > "$marker"
 
-total=$(find "$PREFIX/lib" -name '*.a' -printf '%s\n' | awk '{s+=$1} END {print s}')
+# BSD find has no -printf, so ask the files themselves.
+total=$(find "$PREFIX/lib" -name '*.a' -exec wc -c {} + | awk 'END {print $1}')
 log "installed to $PREFIX ($(( total / 1048576 )) MB of static libs)"

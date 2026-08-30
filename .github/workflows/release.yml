@@ -282,28 +282,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      # ffmpeg for kirie-video; cmake and ninja because shaderc-sys builds the
-      # compiler from source when there is no system libshaderc.
+      # nasm builds ffmpeg's assembly; cmake and ninja build shaderc. Homebrew's
+      # ffmpeg is deliberately not used: linking against it ties the binary to
+      # whichever version the runner had, and it then refuses to start on a Mac
+      # with a different one.
       - name: Install what the build needs
-        run: brew install ffmpeg pkg-config cmake ninja
-
-      # Link against the version-independent symlink, not the Cellar path a
-      # build script baked in: a cached target directory from an older ffmpeg
-      # otherwise points at a directory this runner no longer has.
-      - name: Point the build at the brewed ffmpeg
-        id: ffmpeg
-        run: |
-          set -euo pipefail
-          prefix="$(brew --prefix ffmpeg)"
-          version="$(brew list --versions ffmpeg | tr ' ' '-')"
-          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
-          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "linking against $prefix ($version)"
+        run: brew install nasm pkg-config cmake ninja
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: kirie-macos-aarch64-${{ steps.ffmpeg.outputs.version }}
+          key: kirie-macos-aarch64
+
+      - name: Build the trimmed static ffmpeg
+        run: ./scripts/build-ffmpeg.sh "$HOME/.cache/kirie/ffmpeg-static"
 
       - name: Set crate version
         run: |
@@ -315,8 +306,23 @@ jobs:
           open("Cargo.toml", "w").write(text)
           PY
 
-      - name: Build (web wallpapers use the system WebKit)
-        run: KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features web-webview
+      # portable: ffmpeg and shaderc linked in, so the binary depends on nothing
+      # a Mac does not already have. web wallpapers use the system WebKit.
+      - name: Build (self-contained)
+        run: |
+          export FFMPEG_DIR="$HOME/.cache/kirie/ffmpeg-static"
+          KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie \
+            --features portable,web-webview
+
+      - name: Check it carries its own ffmpeg
+        run: |
+          set -euo pipefail
+          linked="$(otool -L target/release/kirie)"
+          echo "$linked"
+          if echo "$linked" | grep -qiE "libav|libsw|homebrew"; then
+            echo "::error::the binary still needs Homebrew libraries"; exit 1
+          fi
+          echo "ok: nothing from Homebrew is linked"
 
       - name: Stage binary
         run: |
@@ -368,7 +374,7 @@ jobs:
           | `kirie-linux-x86_64` | scenes + video + images |
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
-          | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Needs `brew install ffmpeg`, and `xattr -d com.apple.quarantine kirie-macos-aarch64` once, since it is not notarized. |
+          | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Self-contained; run `xattr -d com.apple.quarantine kirie-macos-aarch64` once, since it is not notarized. |
 
           EOF
           echo "attaching:"; echo "$files"
