@@ -52,6 +52,10 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         &platform.screen_names(),
         Some(std::path::Path::new(&background)),
         args.playback_speed as f32,
+        Sound {
+            volume: args.volume,
+            silent: args.silent,
+        },
     );
     if let Some(socket) = control_socket(args) {
         let orders = platform.orders();

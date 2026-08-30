@@ -17,11 +17,12 @@ pub struct Showing {
     speed: Mutex<f32>,
     props: Mutex<BTreeMap<String, String>>,
     generation: std::sync::atomic::AtomicU64,
+    sound: Mutex<Sound>,
 }
 
 impl Showing {
     #[must_use]
-    pub fn new(names: &[String], background: Option<&Path>, speed: f32) -> Arc<Self> {
+    pub fn new(names: &[String], background: Option<&Path>, speed: f32, sound: Sound) -> Arc<Self> {
         let mut screens = BTreeMap::new();
         for name in names {
             screens.insert(name.clone(), background.map(Path::to_path_buf));
@@ -31,6 +32,7 @@ impl Showing {
             speed: Mutex::new(speed),
             props: Mutex::new(BTreeMap::new()),
             generation: std::sync::atomic::AtomicU64::new(0),
+            sound: Mutex::new(sound),
         })
     }
 
@@ -92,6 +94,20 @@ impl Showing {
         }
     }
 
+    fn sound(&self) -> Sound {
+        self.sound.lock().map(|held| *held).unwrap_or(Sound {
+            volume: 128,
+            silent: false,
+        })
+    }
+
+    fn properties(&self) -> Vec<(String, String)> {
+        self.props
+            .lock()
+            .map(|props| props.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default()
+    }
+
     fn names(&self) -> Vec<String> {
         self.screens
             .lock()
@@ -118,16 +134,20 @@ pub fn serve(socket: PathBuf, orders: Sender<RenderCommand>, showing: Arc<Showin
 }
 
 fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) {
-    let reader = BufReader::new(stream);
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    if reader.read_line(&mut line).is_err() || line.is_empty() {
+        return;
+    }
+
+    let reply = act(line.trim(), orders, showing, args);
     let mut writer = stream;
-    for line in reader.lines() {
-        let Ok(line) = line else { return };
-        let reply = act(line.trim(), orders, showing, args);
-        if writer.write_all(reply.as_bytes()).is_err() {
-            return;
-        }
+    if writer.write_all(reply.as_bytes()).is_ok() {
         let _ = writer.flush();
     }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 fn act(line: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) -> String {
@@ -146,23 +166,67 @@ fn act(line: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args:
             let _ = orders.send(RenderCommand::SetSpeed(speed));
             "ok\n".to_owned()
         }
-        "set" => set(rest, orders),
+        "set" => set(rest, orders, showing, args),
         "preload" => "ok\n".to_owned(),
-        "volume" | "mute" => "unknown command\n".to_owned(),
+        "volume" => {
+            let wanted = rest.trim().parse::<i64>().unwrap_or(100).clamp(0, 100);
+            if let Ok(mut sound) = showing.sound.lock() {
+                sound.volume = wanted * 128 / 100;
+            }
+            rebuild_all(orders, showing, args);
+            "ok\n".to_owned()
+        }
+        "mute" => {
+            let quiet = matches!(rest.trim(), "1" | "true" | "on" | "yes");
+            if let Ok(mut sound) = showing.sound.lock() {
+                sound.silent = quiet;
+            }
+            rebuild_all(orders, showing, args);
+            "ok\n".to_owned()
+        }
         _ => "unknown command\n".to_owned(),
     }
 }
 
-fn set(rest: &str, orders: &Sender<RenderCommand>) -> String {
+fn set(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) -> String {
     let (key, value) = rest.split_once(' ').unwrap_or((rest, ""));
+    let on = matches!(value.trim(), "1" | "true" | "on" | "yes");
     match key {
         "fps" => {
             let fps = value.trim().parse::<u32>().unwrap_or(0);
             let _ = orders.send(RenderCommand::SetFps((fps > 0).then_some(fps)));
             "ok\n".to_owned()
         }
+        "renderscale" => {
+            let scale = value.trim().parse::<f32>().unwrap_or(1.0);
+            super::common::set_render_scale(scale);
+            rebuild_all(orders, showing, args);
+            "ok\n".to_owned()
+        }
+        "disableparallax" => {
+            super::common::set_disable_parallax(on);
+            rebuild_all(orders, showing, args);
+            "ok\n".to_owned()
+        }
         "batteryfps" | "noautomute" | "disablemouse" | "nofullscreenpause" => "ok\n".to_owned(),
         _ => "unknown command\n".to_owned(),
+    }
+}
+
+fn rebuild_all(orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) {
+    let props = showing.properties();
+    let sound = showing.sound();
+    for name in showing.names() {
+        let Some(path) = showing.wallpaper_on(&name) else {
+            continue;
+        };
+        let Ok(wallpaper) = resolve::classify(&path.to_string_lossy()) else {
+            continue;
+        };
+        let _ = orders.send(RenderCommand::SwapLocal {
+            screen: name,
+            build_local: build_with(wallpaper, args, props.clone(), sound),
+        });
     }
 }
 
@@ -180,7 +244,7 @@ fn put_up(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, ar
     }
 
     for name in showing.meaning(screen) {
-        let build_local = build_for(wallpaper.clone(), args);
+        let build_local = build_with(wallpaper.clone(), args, showing.properties(), showing.sound());
         if orders
             .send(RenderCommand::SwapLocal {
                 screen: name,
@@ -252,6 +316,7 @@ fn rebuild_if_needed(
         return;
     };
     let orders = orders.clone();
+    let sound = showing.sound();
     let showing = Arc::clone(showing);
     let args = args.clone();
     let screen = screen.to_owned();
@@ -269,7 +334,7 @@ fn rebuild_if_needed(
             };
             let _ = orders.send(RenderCommand::SwapLocal {
                 screen,
-                build_local: build_with(wallpaper, &args, props),
+                build_local: build_with(wallpaper, &args, props, sound),
             });
         });
     if let Err(err) = started {
@@ -279,21 +344,14 @@ fn rebuild_if_needed(
 
 const SETTLE: std::time::Duration = std::time::Duration::from_millis(350);
 
-fn build_for(wallpaper: Wallpaper, args: &CompatArgs) -> kirie_platform::BuildLocalFn {
-    build_with(wallpaper, args, args.set_properties.clone())
-}
-
 fn build_with(
     wallpaper: Wallpaper,
     args: &CompatArgs,
     properties: Vec<(String, String)>,
+    sound: Sound,
 ) -> kirie_platform::BuildLocalFn {
     let scaling: ScalingMode = args.window_scaling;
     let clamp: ClampMode = args.window_clamp;
-    let sound = Sound {
-        volume: args.volume,
-        silent: args.silent,
-    };
 
     Box::new(
         move |device: &wgpu::Device,
