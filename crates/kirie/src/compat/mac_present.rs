@@ -45,6 +45,8 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         screen_roots: args.screens.iter().map(|screen| screen.name.clone()).collect(),
         fps: u32::try_from(args.fps).ok().filter(|rate| *rate > 0),
         playback_speed: args.playback_speed,
+        pointer: !args.disable_mouse,
+        take_clicks: args.interactive,
         ..PresentOptions::default()
     };
 

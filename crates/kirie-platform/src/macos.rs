@@ -37,6 +37,7 @@ pub struct MacPlatform {
     app: Retained<NSApplication>,
     make_renderer: RendererFactory,
     frame_interval: Duration,
+    pointer: bool,
     unplugged: bool,
     checked_power: Instant,
     orders: std::sync::mpsc::Sender<crate::renderer::RenderCommand>,
@@ -56,7 +57,9 @@ impl MacPlatform {
 
         let mut windows = Vec::new();
         for (screen, name) in chosen_screens(mtm, &options.screen_roots) {
-            windows.push((desktop_window(mtm, &screen), pixel_size(&screen), name));
+            let window = desktop_window(mtm, &screen);
+            window.setIgnoresMouseEvents(!options.take_clicks);
+            windows.push((window, pixel_size(&screen), name));
         }
         if windows.is_empty() {
             return Err(PlatformError::NoCrtcs);
@@ -101,6 +104,7 @@ impl MacPlatform {
             app,
             make_renderer,
             frame_interval: frame_interval(options.fps),
+            pointer: options.pointer,
             unplugged: on_battery(),
             checked_power: Instant::now(),
             orders,
@@ -208,6 +212,27 @@ impl MacPlatform {
                 RenderCommand::SetFps(fps) => self.frame_interval = frame_interval(fps),
                 RenderCommand::SetSpeed(speed) => self.speed = speed.max(0.0),
             }
+        }
+    }
+
+    // The wallpaper is told where the pointer is even when it does not take
+    // clicks: hover and parallax want the position, not the button.
+    fn follow_pointer(&mut self) {
+        let at = NSEvent::mouseLocation();
+        let held = NSEvent::pressedMouseButtons() & 1 != 0;
+
+        for output in &mut self.outputs {
+            let Some(renderer) = output.renderer.as_mut() else {
+                continue;
+            };
+            let frame = output.window.frame();
+            if frame.size.width <= 0.0 || frame.size.height <= 0.0 {
+                continue;
+            }
+            let x = ((at.x - frame.origin.x) / frame.size.width).clamp(0.0, 1.0);
+            let up = ((at.y - frame.origin.y) / frame.size.height).clamp(0.0, 1.0);
+            renderer.set_pointer(x as f32, (1.0 - up) as f32);
+            renderer.set_pointer_buttons(held);
         }
     }
 
@@ -490,6 +515,10 @@ impl MacPlatform {
             if frame_start.duration_since(self.checked_power) >= POWER_POLL {
                 self.checked_power = frame_start;
                 self.unplugged = on_battery();
+            }
+
+            if self.pointer {
+                self.follow_pointer();
             }
 
             let mut drew = false;

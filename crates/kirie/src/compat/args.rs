@@ -137,6 +137,7 @@ pub struct CompatArgs {
     pub assets_dir: Option<PathBuf>,
     pub disable_particles: bool,
     pub disable_mouse: bool,
+    pub interactive: bool,
     pub disable_parallax: bool,
     pub list_properties: bool,
     pub list_properties_json: bool,
@@ -179,6 +180,7 @@ impl Default for CompatArgs {
             assets_dir: None,
             disable_particles: false,
             disable_mouse: false,
+            interactive: false,
             disable_parallax: false,
             list_properties: false,
             list_properties_json: false,
@@ -220,7 +222,7 @@ pub const HELP_TEXT: &str = concat!(
     "[--fullscreen-pause-ignore-appid VAR]... [[--volume VAR]|[--silent]] ",
     "[--noautomute] [--no-audio-processing] [--screenshot VAR] ",
     "[--screenshot-delay VAR] [--assets-dir VAR] [--disable-particles] ",
-    "[--disable-mouse] [--disable-parallax] [--list-properties] ",
+    "[--disable-mouse] [--interactive] [--disable-parallax] [--list-properties] ",
     "[--list-properties-json] [--set-property VAR]... [--dump-structure] ",
     "[--render-debug VAR]... background id\n",
 );
@@ -354,6 +356,7 @@ fn is_non_repeatable(canonical: &str) -> bool {
             | "--assets-dir"
             | "--disable-particles"
             | "--disable-mouse"
+            | "--interactive"
             | "--disable-parallax"
             | "--fit-render-to-output"
             | "--list-properties"
@@ -610,6 +613,7 @@ fn parse_with(
             }
             "--disable-particles" => out.disable_particles = true,
             "--disable-mouse" => out.disable_mouse = true,
+            "--interactive" => out.interactive = true,
             "--disable-parallax" => out.disable_parallax = true,
             "--fit-render-to-output" => out.fit_render_to_output = true,
             "--list-properties" => out.list_properties = true,
@@ -749,6 +753,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "--assets-dir" => "--assets-dir",
         "--disable-particles" => "--disable-particles",
         "--disable-mouse" => "--disable-mouse",
+        "--interactive" => "--interactive",
         "--disable-parallax" => "--disable-parallax",
         "-l" | "--list-properties" => "--list-properties",
         "--list-properties-json" => "--list-properties-json",

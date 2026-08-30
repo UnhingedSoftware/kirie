@@ -18,6 +18,8 @@ pub struct PresentOptions {
     pub fullscreen_pause_ignore_appids: Vec<String>,
     pub release_hidden_after: Option<Duration>,
     pub activity_paused: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    pub pointer: bool,
+    pub take_clicks: bool,
 }
 
 impl Default for PresentOptions {
@@ -32,6 +34,8 @@ impl Default for PresentOptions {
             fullscreen_pause_ignore_appids: Vec::new(),
             release_hidden_after: None,
             activity_paused: None,
+            pointer: true,
+            take_clicks: false,
         }
     }
 }
