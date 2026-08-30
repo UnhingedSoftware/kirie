@@ -19,6 +19,7 @@ use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
 struct MacOutput {
     web: bool,
     drawn_at: Option<Instant>,
+    due_at: Option<Instant>,
     format: wgpu::TextureFormat,
     wgpu_surface: Option<wgpu::Surface<'static>>,
     window: Retained<NSWindow>,
@@ -80,6 +81,7 @@ impl MacPlatform {
             outputs.push(MacOutput {
                 web: false,
                 drawn_at: None,
+                due_at: None,
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
                 wgpu_surface,
                 window,
@@ -157,6 +159,7 @@ impl MacPlatform {
                     if let Some(output) = self.outputs.get_mut(at) {
                         output.renderer = Some(renderer);
                         output.last_frame = None;
+                        output.due_at = None;
                         output.first_frame_presented = false;
                     }
                 }
@@ -170,6 +173,7 @@ impl MacPlatform {
                     {
                         output.renderer = Some(renderer);
                         output.last_frame = None;
+                        output.due_at = None;
                         output.first_frame_presented = false;
                     }
                 }
@@ -278,6 +282,7 @@ impl MacPlatform {
         if let Some(output) = self.outputs.get_mut(at) {
             output.renderer = Some(renderer);
             output.last_frame = None;
+            output.due_at = None;
             output.first_frame_presented = false;
         }
     }
@@ -367,6 +372,10 @@ impl MacPlatform {
             if settled(ctx.renderer.as_deref()) {
                 return false;
             }
+            // A renderer that asked to be left alone until a moment is left alone.
+            if ctx.due_at.is_some_and(|due| Instant::now() < due) {
+                return false;
+            }
             if !on_screen(&ctx.window) && ctx.drawn_at.is_some_and(|at| at.elapsed() < HIDDEN_FRAME) {
                 return false;
             }
@@ -405,6 +414,7 @@ impl MacPlatform {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
 
+        let fresh = ctx.renderer.is_none();
         let renderer = ctx.renderer.get_or_insert_with(|| {
             (self.make_renderer)(&RenderTarget {
                 device: &device,
@@ -414,6 +424,12 @@ impl MacPlatform {
                 size: (ctx.physical_size.width, ctx.physical_size.height),
             })
         });
+        if fresh && renderer.is_placeholder() {
+            tracing::error!(
+                output = %ctx.name,
+                "the wallpaper could not be built; this screen stays empty"
+            );
+        }
 
         let now = Instant::now();
         let dt = ctx
@@ -423,8 +439,13 @@ impl MacPlatform {
         ctx.last_frame = Some(now);
 
         renderer.render(&view, ctx.physical_size, dt * speed);
+        let asked = renderer.redraw_hint();
         queue.present(texture);
         ctx.drawn_at = Some(now);
+        ctx.due_at = match asked {
+            crate::RedrawHint::After(wait) => Some(now + wait),
+            crate::RedrawHint::Static | crate::RedrawHint::Unknown => None,
+        };
 
         if !ctx.first_frame_presented {
             ctx.first_frame_presented = true;
