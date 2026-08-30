@@ -45,34 +45,9 @@ impl MacPlatform {
         app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
         finish_launching(&app);
 
-        let screens = NSScreen::screens(mtm);
-        let wanted: Vec<(Retained<NSScreen>, String)> = screens
-            .iter()
-            .enumerate()
-            .map(|(index, screen)| {
-                let name = screen_name(&screen, index);
-                (screen, name)
-            })
-            .collect();
-        let asked: Vec<&(Retained<NSScreen>, String)> = wanted
-            .iter()
-            .filter(|(_, name)| {
-                options.screen_roots.is_empty() || options.screen_roots.iter().any(|want| want == name)
-            })
-            .collect();
-        let chosen = if asked.is_empty() {
-            tracing::warn!(
-                asked = ?options.screen_roots,
-                "no screen matched; covering every screen instead"
-            );
-            wanted.iter().collect()
-        } else {
-            asked
-        };
-
         let mut windows = Vec::new();
-        for (screen, name) in chosen {
-            windows.push((desktop_window(mtm, screen), pixel_size(screen), name.clone()));
+        for (screen, name) in chosen_screens(mtm, &options.screen_roots) {
+            windows.push((desktop_window(mtm, &screen), pixel_size(&screen), name));
         }
         if windows.is_empty() {
             return Err(PlatformError::NoCrtcs);
@@ -250,22 +225,9 @@ impl MacPlatform {
 
     fn pump_events(&self) {
         loop {
-            let event = self.next_event();
+            let event = next_event(&self.app);
             let Some(event) = event else { break };
             self.app.sendEvent(&event);
-        }
-    }
-
-    #[allow(unsafe_code)]
-    fn next_event(&self) -> Option<Retained<NSEvent>> {
-        // SAFETY: called on the main thread, which `connect_with` established
-        unsafe {
-            self.app.nextEventMatchingMask_untilDate_inMode_dequeue(
-                NSEventMask::Any,
-                None,
-                NSDefaultRunLoopMode,
-                true,
-            )
         }
     }
 
@@ -299,6 +261,92 @@ impl MacPlatform {
         }
 
         Ok(())
+    }
+}
+
+pub struct DesktopSurface {
+    window: Retained<NSWindow>,
+    name: String,
+    size: SurfaceSize,
+}
+
+impl DesktopSurface {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> SurfaceSize {
+        self.size
+    }
+
+    pub fn show(&self, view: &objc2_app_kit::NSView) {
+        view.setFrame(self.window.contentLayoutRect());
+        self.window.setContentView(Some(view));
+        self.window.orderFrontRegardless();
+    }
+}
+
+pub fn open_desktop(screen_roots: &[String]) -> Result<Vec<DesktopSurface>, PlatformError> {
+    let mtm = MainThreadMarker::new().ok_or(PlatformError::NotMainThread)?;
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    finish_launching(&app);
+
+    let screens = chosen_screens(mtm, screen_roots);
+    if screens.is_empty() {
+        return Err(PlatformError::NoCrtcs);
+    }
+
+    Ok(screens
+        .into_iter()
+        .map(|(screen, name)| DesktopSurface {
+            size: pixel_size(&screen),
+            window: desktop_window(mtm, &screen),
+            name,
+        })
+        .collect())
+}
+
+pub fn pump_desktop_events() {
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    while let Some(event) = next_event(&app) {
+        app.sendEvent(&event);
+    }
+}
+
+fn chosen_screens(mtm: MainThreadMarker, roots: &[String]) -> Vec<(Retained<NSScreen>, String)> {
+    let all: Vec<(Retained<NSScreen>, String)> = NSScreen::screens(mtm)
+        .iter()
+        .enumerate()
+        .map(|(index, screen)| {
+            let name = screen_name(&screen, index);
+            (screen, name)
+        })
+        .collect();
+
+    let asked: Vec<(Retained<NSScreen>, String)> = all
+        .iter()
+        .filter(|(_, name)| roots.is_empty() || roots.iter().any(|want| want == name))
+        .cloned()
+        .collect();
+
+    if asked.is_empty() {
+        tracing::warn!(asked = ?roots, "no screen matched; covering every screen instead");
+        return all;
+    }
+    asked
+}
+
+#[allow(unsafe_code)]
+fn next_event(app: &NSApplication) -> Option<Retained<NSEvent>> {
+    // SAFETY: called on the main thread, which the caller established
+    unsafe {
+        app.nextEventMatchingMask_untilDate_inMode_dequeue(NSEventMask::Any, None, NSDefaultRunLoopMode, true)
     }
 }
 

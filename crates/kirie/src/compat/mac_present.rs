@@ -23,12 +23,9 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         eprintln!("{note}");
         return ExitCode::FAILURE;
     }
-    if matches!(wallpaper, Wallpaper::Web { .. }) {
-        eprintln!(
-            "web wallpapers cannot be shown on the desktop on macOS yet; previewing one works, \
-             putting it up does not"
-        );
-        return ExitCode::FAILURE;
+    #[cfg(feature = "web-webview")]
+    if let Wallpaper::Web { dir, file } = &wallpaper {
+        return present_web(dir, file, args);
     }
     if let Some(reason) = wallpaper.unrunnable_reason() {
         eprintln!("cannot put this on a screen: {reason}");
@@ -58,6 +55,45 @@ pub fn present(args: &CompatArgs) -> ExitCode {
             eprintln!("the wallpaper stopped: {err}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(feature = "web-webview")]
+fn present_web(dir: &std::path::Path, file: &str, args: &CompatArgs) -> ExitCode {
+    use kirie_web::WebSize;
+
+    let url = resolve::web_entry_url(dir, file);
+    let roots: Vec<String> = args.screens.iter().map(|screen| screen.name.clone()).collect();
+    let surfaces = match kirie_platform::open_desktop(&roots) {
+        Ok(surfaces) => surfaces,
+        Err(err) => {
+            eprintln!("cannot put a wallpaper on this desktop: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let mut views = Vec::with_capacity(surfaces.len());
+    for surface in &surfaces {
+        let size = WebSize {
+            width: surface.size().width,
+            height: surface.size().height,
+        };
+        match kirie_web::wk::desktop_view(&url, size) {
+            Ok(view) => {
+                surface.show(&view);
+                views.push(view);
+            }
+            Err(err) => {
+                eprintln!("{}: cannot open the page: {err}", surface.name());
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
+    tracing::info!(screens = views.len(), url, "presenting a web wallpaper");
+    loop {
+        kirie_platform::pump_desktop_events();
+        std::thread::sleep(std::time::Duration::from_millis(8));
     }
 }
 

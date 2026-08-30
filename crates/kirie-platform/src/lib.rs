@@ -6,6 +6,8 @@ mod error;
 mod gpu;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::{DesktopSurface, open_desktop, pump_desktop_events};
 #[cfg(target_os = "linux")]
 mod output;
 #[cfg(target_os = "linux")]

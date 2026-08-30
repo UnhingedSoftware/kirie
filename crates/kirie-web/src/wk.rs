@@ -159,6 +159,19 @@ impl WkBackend {
     }
 }
 
+pub fn desktop_view(url: &str, size: WebSize) -> Result<Retained<WKWebView>, WebError> {
+    let size = size.clamped();
+    let mtm = MainThreadMarker::new()
+        .ok_or_else(|| WebError::Init("WKWebView needs the main thread".to_owned()))?;
+    let rect = NSRect::new(
+        NSPoint::new(0.0, 0.0),
+        NSSize::new(f64::from(size.width), f64::from(size.height)),
+    );
+    let view = make_view(mtm, rect);
+    load(&view, url)?;
+    Ok(view)
+}
+
 fn make_view(mtm: MainThreadMarker, rect: NSRect) -> Retained<WKWebView> {
     let config = unsafe { WKWebViewConfiguration::new(mtm) };
     let body = NSRect::new(NSPoint::new(0.0, 0.0), rect.size);
