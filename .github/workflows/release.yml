@@ -293,8 +293,10 @@ jobs:
         with:
           key: ${{ matrix.asset }}
 
-      - name: Install ffmpeg
-        run: brew install ffmpeg pkg-config
+      # ffmpeg for kirie-video; cmake and ninja because shaderc-sys builds the
+      # compiler from source when there is no system libshaderc.
+      - name: Install what the build needs
+        run: brew install ffmpeg pkg-config cmake ninja
 
       - name: Set crate version
         run: |
