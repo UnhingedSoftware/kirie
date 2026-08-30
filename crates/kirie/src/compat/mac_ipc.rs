@@ -129,8 +129,14 @@ pub fn serve(socket: PathBuf, orders: Sender<RenderCommand>, showing: Arc<Showin
 
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
-        answer(&stream, &orders, &showing, &args);
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            answer(&stream, &orders, &showing, &args);
+        }));
+        if handled.is_err() {
+            tracing::error!("a control command panicked; the socket stays open");
+        }
     }
+    tracing::error!(path = %socket.display(), "the control socket stopped listening");
 }
 
 fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) {

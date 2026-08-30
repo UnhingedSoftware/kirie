@@ -5,7 +5,7 @@ use objc2::rc::Retained;
 use objc2::{MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask, NSScreen,
-    NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSWindow, NSWindowCollectionBehavior, NSWindowOcclusionState, NSWindowStyleMask,
 };
 use objc2_core_graphics::{CGWindowLevelForKey, CGWindowLevelKey};
 use objc2_foundation::NSDefaultRunLoopMode;
@@ -275,7 +275,7 @@ impl MacPlatform {
         let Some(ctx) = self.outputs.get_mut(index) else {
             return;
         };
-        if !ctx.configured {
+        if !ctx.configured || !on_screen(&ctx.window) {
             return;
         }
         let Some(wgpu_surface) = &ctx.wgpu_surface else {
@@ -472,6 +472,10 @@ fn next_event(app: &NSApplication) -> Option<Retained<NSEvent>> {
 }
 
 const SCREEN_POLL: Duration = Duration::from_secs(2);
+
+fn on_screen(window: &NSWindow) -> bool {
+    window.occlusionState().contains(NSWindowOcclusionState::Visible)
+}
 
 fn frame_interval(fps: Option<u32>) -> Duration {
     match fps.filter(|rate| *rate > 0) {
