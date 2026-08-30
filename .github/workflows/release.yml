@@ -281,14 +281,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: kirie-macos-aarch64
 
       # ffmpeg for kirie-video; cmake and ninja because shaderc-sys builds the
       # compiler from source when there is no system libshaderc.
       - name: Install what the build needs
         run: brew install ffmpeg pkg-config cmake ninja
+
+      # Link against the version-independent symlink, not the Cellar path a
+      # build script baked in: a cached target directory from an older ffmpeg
+      # otherwise points at a directory this runner no longer has.
+      - name: Point the build at the brewed ffmpeg
+        id: ffmpeg
+        run: |
+          set -euo pipefail
+          prefix="$(brew --prefix ffmpeg)"
+          version="$(brew list --versions ffmpeg | tr ' ' '-')"
+          echo "FFMPEG_DIR=$prefix" >> "$GITHUB_ENV"
+          echo "PKG_CONFIG_PATH=$prefix/lib/pkgconfig:${PKG_CONFIG_PATH:-}" >> "$GITHUB_ENV"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "linking against $prefix ($version)"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kirie-macos-aarch64-${{ steps.ffmpeg.outputs.version }}
 
       - name: Set crate version
         run: |
