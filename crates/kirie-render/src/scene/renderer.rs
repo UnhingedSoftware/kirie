@@ -1261,7 +1261,7 @@ fn build_object(
                 Geometry::Scene
             }
         } else if i == 0 {
-            if layer_reads_scene {
+            if layer_reads_scene && is_compose_layer(&raw_pass.shader) {
                 Geometry::SceneCopy
             } else {
                 Geometry::Copy
@@ -2866,6 +2866,13 @@ fn samples_scene_by_default(pass: &kirie_scene::material::Pass, samplers: &[Samp
     })
 }
 
+pub(super) fn is_compose_layer(shader: &str) -> bool {
+    shader
+        .rsplit('/')
+        .next()
+        .is_some_and(|name| name.eq_ignore_ascii_case("composelayer"))
+}
+
 pub(super) fn is_scene_rt(name: &str) -> bool {
     name == "_rt_FullFrameBuffer" || name == "_rt_MipMappedFrameBuffer"
 }
@@ -3474,6 +3481,14 @@ mod tests {
     fn an_ordinary_shader_leaves_the_snapshot_alone() {
         let samplers = [sampler(0, None), sampler(1, Some("materials/mask"))];
         assert!(!samples_scene_by_default(&empty_pass(), &samplers));
+    }
+
+    #[test]
+    fn only_the_compose_layer_samples_through_its_own_rect() {
+        assert!(is_compose_layer("composelayer"));
+        assert!(is_compose_layer("util/composelayer"));
+        assert!(!is_compose_layer("genericimage2"));
+        assert!(!is_compose_layer("effects/waterripple"));
     }
 
     #[test]
