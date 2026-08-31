@@ -294,6 +294,12 @@ pub(crate) fn split_screen<'a>(rest: &'a str, names: &[String]) -> (String, &'a 
     if let Some(name) = named {
         return (name.clone(), rest[name.len()..].trim_start());
     }
+    if let Some(at) = rest.find('/')
+        && at > 0
+    {
+        let (screen, path) = rest.split_at(at);
+        return (screen.trim().to_owned(), path);
+    }
     let (screen, path) = rest.split_once(' ').unwrap_or(("", rest));
     (screen.to_owned(), path)
 }
@@ -693,6 +699,23 @@ mod tests {
         let (screen, path) = split_screen("HDMI-1 /wall", &screens);
         assert_eq!(screen, "HDMI-1");
         assert_eq!(path, "/wall");
+    }
+
+    #[test]
+    fn a_screen_we_never_heard_of_keeps_its_spaces() {
+        let (screen, path) = split_screen(
+            "Built-in Retina Display /Users/someone/wall",
+            &names(&["Desktop"]),
+        );
+        assert_eq!(screen, "Built-in Retina Display");
+        assert_eq!(path, "/Users/someone/wall");
+    }
+
+    #[test]
+    fn a_relative_wallpaper_still_splits_at_the_space() {
+        let (screen, path) = split_screen("DP-1 wallpapers", &names(&["DP-1"]));
+        assert_eq!(screen, "DP-1");
+        assert_eq!(path, "wallpapers");
     }
 
     #[test]
