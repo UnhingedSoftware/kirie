@@ -322,6 +322,7 @@ pub fn build_text(
     scene_size: (u32, u32),
     screen_mvp: &Mat4,
     source: &dyn AssetSource,
+    world: ([f32; 2], [f32; 2]),
 ) -> Option<TextGpu> {
     if !(tobj.visible.value && object.base.visible.value) {
         return None;
@@ -362,11 +363,14 @@ pub fn build_text(
     }
     let texture = text::upload(device, queue, &raster);
 
-    let quad_scale = [scale_x / raster_scale, scale_y / raster_scale];
+    let (world_origin, world_scale) = world;
+    let quad_scale = [
+        scale_x * world_scale[0] / raster_scale,
+        scale_y * world_scale[1] / raster_scale,
+    ];
     let sx = raster.width as f32 * quad_scale[0];
     let sy = raster.height as f32 * quad_scale[1];
-    let origin = object.base.origin.value;
-    let quad = scene_space_quad(origin[0], origin[1], sx, sy, scene_size);
+    let quad = scene_space_quad(world_origin[0], world_origin[1], sx, sy, scene_size);
     let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
 
     let color = tobj.color.value;
@@ -438,7 +442,7 @@ pub fn build_text(
             quad_scale,
             raster_scale,
             raster_size: (raster.width, raster.height),
-            origin: [origin[0], origin[1]],
+            origin: [world_origin[0], world_origin[1]],
             scene_size,
             bundled,
         },

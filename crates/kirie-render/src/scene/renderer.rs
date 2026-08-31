@@ -511,6 +511,7 @@ impl SceneRenderer {
                 ObjectKind::Text(tobj) => {
                     let tp = text_pipeline.get_or_insert_with(|| extras::build_text_pipeline(device));
                     let fonts = text_fonts.get_or_insert_with(TextFonts::new);
+                    let world = world_xf(object.base.id, &local_xf);
                     if let Some(tg) = extras::build_text(
                         device,
                         queue,
@@ -521,6 +522,7 @@ impl SceneRenderer {
                         (proj_w, proj_h),
                         &screen_mvp,
                         source,
+                        (world.0, world.1),
                     ) {
                         items.push(SceneItem::Text(Box::new(tg)));
                     }
@@ -3452,6 +3454,38 @@ mod tests {
     fn an_ordinary_shader_leaves_the_snapshot_alone() {
         let samplers = [sampler(0, None), sampler(1, Some("materials/mask"))];
         assert!(!samples_scene_by_default(&empty_pass(), &samplers));
+    }
+
+    #[test]
+    fn a_child_layer_is_placed_through_its_parents() {
+        let locals: HashMap<i64, LocalXf> = [
+            (
+                1,
+                LocalXf {
+                    origin: [1920.0, 1080.0],
+                    scale: [1.0, 1.0],
+                    angle_z: 0.0,
+                    parent: None,
+                },
+            ),
+            (
+                2,
+                LocalXf {
+                    origin: [-3.0, 656.0],
+                    scale: [1.0, 1.0],
+                    angle_z: 0.0,
+                    parent: Some(1),
+                },
+            ),
+        ]
+        .into_iter()
+        .collect();
+
+        let (origin, scale, angle) = world_xf(2, &locals);
+        assert!((origin[0] - 1917.0).abs() < 0.001, "{origin:?}");
+        assert!((origin[1] - 1736.0).abs() < 0.001, "{origin:?}");
+        assert_eq!(scale, [1.0, 1.0]);
+        assert!(angle.abs() < f32::EPSILON);
     }
 
     #[test]
