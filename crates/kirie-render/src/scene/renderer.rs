@@ -1261,7 +1261,11 @@ fn build_object(
                 Geometry::Scene
             }
         } else if i == 0 {
-            Geometry::Copy
+            if layer_reads_scene {
+                Geometry::SceneCopy
+            } else {
+                Geometry::Copy
+            }
         } else {
             Geometry::Pass
         };
@@ -1292,7 +1296,7 @@ fn build_object(
             }
             _ => {
                 let mut verts = match geometry {
-                    Geometry::Scene => scene_quad,
+                    Geometry::Scene | Geometry::SceneCopy => scene_quad,
                     _ => ndc_quad(1.0, 1.0),
                 };
                 if uv_crop != [1.0, 1.0] {
@@ -2675,12 +2679,12 @@ fn draw_image_object(
             _ => ([0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
         };
         let mvp = match pass.geometry {
-            Geometry::Scene | Geometry::Puppet => parallax_mvp,
+            Geometry::Scene | Geometry::Puppet | Geometry::SceneCopy => parallax_mvp,
             Geometry::PuppetCopy => pass.model_matrix,
             Geometry::Copy | Geometry::Pass => matrix::IDENTITY,
         };
         let mvp_inverse = match pass.geometry {
-            Geometry::Scene | Geometry::Puppet => {
+            Geometry::Scene | Geometry::Puppet | Geometry::SceneCopy => {
                 let rot = if object.angle_z != 0.0 {
                     let [cx, cy] = object.scene_center;
                     let t_neg = matrix::translation([-cx, -cy, 0.0]);

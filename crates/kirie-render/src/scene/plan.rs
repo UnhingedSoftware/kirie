@@ -17,6 +17,7 @@ pub enum PassOutput {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Geometry {
     Copy,
+    SceneCopy,
     Pass,
     Scene,
     Puppet,
