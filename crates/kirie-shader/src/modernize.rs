@@ -179,7 +179,44 @@ fn eval_directive(directive: &str, defines: &std::collections::HashMap<String, O
             Some(None) => Tri::Unknown,
         };
     }
+    compare(expr, defines)
+}
+
+fn compare(expr: &str, defines: &std::collections::HashMap<String, Option<i64>>) -> Tri {
+    for op in [">=", "<=", "==", "!=", ">", "<"] {
+        let Some((left, right)) = expr.split_once(op) else {
+            continue;
+        };
+        let (Some(a), Some(b)) = (number(left, defines), number(right, defines)) else {
+            return Tri::Unknown;
+        };
+        return tri(match op {
+            ">=" => a >= b,
+            "<=" => a <= b,
+            "==" => a == b,
+            "!=" => a != b,
+            ">" => a > b,
+            _ => a < b,
+        });
+    }
     Tri::Unknown
+}
+
+fn number(token: &str, defines: &std::collections::HashMap<String, Option<i64>>) -> Option<i64> {
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Ok(n) = token.parse::<i64>() {
+        return Some(n);
+    }
+    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    match defines.get(token) {
+        None => Some(0),
+        Some(value) => *value,
+    }
 }
 
 fn tri(b: bool) -> Tri {
@@ -285,6 +322,51 @@ fn flush_word(word: &mut String, out: &mut String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn defines(pairs: &[(&str, Option<i64>)]) -> std::collections::HashMap<String, Option<i64>> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), *value))
+            .collect()
+    }
+
+    #[test]
+    fn an_undefined_name_compares_as_zero() {
+        let known = defines(&[]);
+        assert!(matches!(
+            eval_directive("#if SHADERVERSION >= 70", &known),
+            Tri::False
+        ));
+    }
+
+    #[test]
+    fn a_known_value_decides_the_branch() {
+        let known = defines(&[("SHADERVERSION", Some(70))]);
+        assert!(matches!(
+            eval_directive("#if SHADERVERSION >= 70", &known),
+            Tri::True
+        ));
+        assert!(matches!(
+            eval_directive("#if SHADERVERSION < 70", &known),
+            Tri::False
+        ));
+    }
+
+    #[test]
+    fn a_value_we_cannot_read_stays_unknown() {
+        let known = defines(&[("SHADERVERSION", None)]);
+        assert!(matches!(
+            eval_directive("#if SHADERVERSION >= 70", &known),
+            Tri::Unknown
+        ));
+    }
+
+    #[test]
+    fn equality_and_inequality_are_read_too() {
+        let known = defines(&[("LIGHTS", Some(2))]);
+        assert!(matches!(eval_directive("#if LIGHTS == 2", &known), Tri::True));
+        assert!(matches!(eval_directive("#if LIGHTS != 2", &known), Tri::False));
+    }
     use crate::preprocess::Assembled;
     use crate::reflect::{Reflection, SamplerSlot};
 

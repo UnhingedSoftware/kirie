@@ -324,7 +324,7 @@ fn corpus_info_every_item_dir_succeeds() {
             continue;
         }
         let readable = std::fs::read(&manifest)
-            .map(|bytes| bytes.iter().any(|byte| *byte == b'{'))
+            .map(|bytes| bytes.contains(&b'{'))
             .unwrap_or(false);
         if !readable {
             continue;

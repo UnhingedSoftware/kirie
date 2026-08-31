@@ -68,7 +68,7 @@ fn corpus_scenes_all_render_non_black() {
         .filter(|p| p.join("scene.pkg").is_file())
         .filter(|p| {
             std::fs::read(p.join("project.json"))
-                .map(|bytes| bytes.iter().any(|byte| *byte == b'{'))
+                .map(|bytes| bytes.contains(&b'{'))
                 .unwrap_or(false)
         })
         .collect();

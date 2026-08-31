@@ -48,6 +48,16 @@ fn header_name(raw: &str) -> String {
 }
 
 fn resolve_includes(src: &str, resolver: &dyn IncludeResolver, depth: usize) -> String {
+    let mut taken = std::collections::BTreeSet::new();
+    include_once(src, resolver, depth, &mut taken)
+}
+
+fn include_once(
+    src: &str,
+    resolver: &dyn IncludeResolver,
+    depth: usize,
+    taken: &mut std::collections::BTreeSet<String>,
+) -> String {
     const MAX_DEPTH: usize = 32;
     let mut out = String::with_capacity(src.len());
     for line in src.lines() {
@@ -56,9 +66,14 @@ fn resolve_includes(src: &str, resolver: &dyn IncludeResolver, depth: usize) -> 
             && let Some(name) = extract_quoted(rest)
         {
             let header = header_name(&name);
+            if taken.contains(&header) {
+                out.push_str(&format!("// {header} was already included\n"));
+                continue;
+            }
             if let Some(content) = (depth < MAX_DEPTH).then(|| resolver.resolve(&header)).flatten() {
+                taken.insert(header.clone());
                 out.push_str(&format!("// begin of include from file {header}\n"));
-                out.push_str(&resolve_includes(&content, resolver, depth + 1));
+                out.push_str(&include_once(&content, resolver, depth + 1, taken));
                 out.push_str(&format!("\n// end of included from file {header}\n"));
                 continue;
             }
