@@ -184,6 +184,7 @@ pub(super) fn build_model(
             &raw_pass,
             (&scene_snapshot.view, fbo_sampler),
             &named,
+            false,
         );
         let g1_bind = build_bind_group(
             device,
@@ -198,6 +199,7 @@ pub(super) fn build_model(
             &raw_pass,
             (&scene_snapshot.view, fbo_sampler),
             &named,
+            false,
         );
 
         let tex_resolution =

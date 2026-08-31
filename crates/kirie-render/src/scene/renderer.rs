@@ -1370,6 +1370,7 @@ fn build_object(
             &raw_pass,
             (&scene_snapshot.view, fbo_sampler),
             &named,
+            true,
         );
         let g1_bind = build_bind_group(
             device,
@@ -1384,6 +1385,7 @@ fn build_object(
             &raw_pass,
             (&scene_snapshot.view, fbo_sampler),
             &named,
+            true,
         );
 
         let img_res = [iw as f32, ih as f32, iw as f32, ih as f32];
@@ -3103,9 +3105,13 @@ pub(super) fn resolve_params(
 ) -> BTreeMap<String, Vec<f32>> {
     let mut out = BTreeMap::new();
     for p in params {
-        let value = pass
-            .constantshadervalues
-            .get(&p.material)
+        let given = pass.constantshadervalues.get(&p.material).or_else(|| {
+            pass.constantshadervalues
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(&p.material))
+                .map(|(_, value)| value)
+        });
+        let value = given
             .map(|us| dynamic_components(&us.value, p))
             .or_else(|| p.default.as_ref().map(default_components));
         if let Some(v) = value {
@@ -3158,6 +3164,7 @@ pub(super) fn build_bind_group(
     pass: &kirie_scene::material::Pass,
     scene: (&wgpu::TextureView, &wgpu::Sampler),
     named: &std::collections::HashMap<&str, (&wgpu::TextureView, &wgpu::Sampler)>,
+    slot_zero_is_the_layer: bool,
 ) -> wgpu::BindGroup {
     enum Slot<'a> {
         Input,
@@ -3179,7 +3186,7 @@ pub(super) fn build_bind_group(
             if name.as_deref().is_some_and(is_scene_rt) {
                 return Slot::Scene;
             }
-            if slot.slot == Some(0) {
+            if slot.slot == Some(0) && (slot_zero_is_the_layer || name.is_none()) {
                 return Slot::Input;
             }
             match name {
