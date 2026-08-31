@@ -503,7 +503,11 @@ fn parse_with(
                 apply_screen_span(&mut out, &mut cursor, raw)?;
             }
             "--bg" => {
-                let resolved = resolve::translate_background(&value()?)?;
+                let wanted = value()?;
+                if wanted.trim().is_empty() {
+                    continue;
+                }
+                let resolved = resolve::translate_background(&wanted)?;
                 out.default_background = Some(resolved.clone());
                 if let Cursor::Screen(idx) = cursor {
                     out.screens[idx].background = Some(resolved);
@@ -793,10 +797,23 @@ pub fn validate_screenshot_ext(path: &OsStr) -> Result<(), ParseError> {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn os(args: &[&str]) -> Vec<OsString> {
         args.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn an_empty_background_is_ignored_not_fatal() {
+        let args = parse(&os(&["kirie", "--bg="])).expect("an empty --bg is not a refusal");
+        assert_eq!(args.default_background, None);
+    }
+
+    #[test]
+    fn a_blank_background_is_ignored_too() {
+        let args = parse(&os(&["kirie", "--bg", "   "])).expect("blank is the same as absent");
+        assert_eq!(args.default_background, None);
     }
 
     #[test]
