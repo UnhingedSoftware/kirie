@@ -1340,7 +1340,10 @@ fn build_object(
             named.insert(name.as_str(), (&fbo.view, fbo_sampler));
         }
 
-        if raw_pass.textures.iter().flatten().any(|n| is_scene_rt(n)) {
+        if raw_pass.textures.iter().flatten().any(|n| is_scene_rt(n))
+            || samples_scene_by_default(&raw_pass, &built_pass.vs_samplers)
+            || samples_scene_by_default(&raw_pass, &built_pass.fs_samplers)
+        {
             reads_scene = true;
         }
 
@@ -2838,6 +2841,19 @@ fn base_layer_name(image: &ImageObject) -> Option<String> {
         .and_then(|slot| slot.clone())
 }
 
+fn samples_scene_by_default(pass: &kirie_scene::material::Pass, samplers: &[SamplerSlot]) -> bool {
+    samplers.iter().any(|slot| {
+        let bound = slot
+            .slot
+            .and_then(|i| pass.textures.get(i as usize))
+            .and_then(Clone::clone);
+        match bound {
+            Some(name) => is_scene_rt(&name),
+            None => slot.default_texture.as_deref().is_some_and(is_scene_rt),
+        }
+    })
+}
+
 pub(super) fn is_scene_rt(name: &str) -> bool {
     name == "_rt_FullFrameBuffer" || name == "_rt_MipMappedFrameBuffer"
 }
@@ -3392,6 +3408,51 @@ mod tests {
             }
         }
         out
+    }
+
+    fn sampler(slot: u32, default_texture: Option<&str>) -> SamplerSlot {
+        SamplerSlot {
+            name: format!("g_Texture{slot}"),
+            slot: Some(slot),
+            texture_binding: 0,
+            sampler_binding: 0,
+            default_texture: default_texture.map(str::to_owned),
+            combo: None,
+        }
+    }
+
+    fn empty_pass() -> kirie_scene::material::Pass {
+        kirie_scene::material::Pass {
+            blending: kirie_scene::material::Blending::Normal,
+            cullmode: kirie_scene::material::CullMode::NoCull,
+            depthtest: kirie_scene::material::DepthMode::Disabled,
+            depthwrite: kirie_scene::material::DepthMode::Disabled,
+            shader: "genericimage3".to_owned(),
+            textures: vec![],
+            usertextures: vec![],
+            combos: Default::default(),
+            constantshadervalues: Default::default(),
+        }
+    }
+
+    #[test]
+    fn a_shader_that_defaults_to_the_frame_buffer_still_reads_the_scene() {
+        let samplers = [sampler(0, None), sampler(4, Some("_rt_FullFrameBuffer"))];
+        assert!(samples_scene_by_default(&empty_pass(), &samplers));
+    }
+
+    #[test]
+    fn a_bound_texture_wins_over_the_shaders_default() {
+        let mut pass = empty_pass();
+        pass.textures = vec![None, None, None, None, Some("materials/leaves".to_owned())];
+        let samplers = [sampler(4, Some("_rt_FullFrameBuffer"))];
+        assert!(!samples_scene_by_default(&pass, &samplers));
+    }
+
+    #[test]
+    fn an_ordinary_shader_leaves_the_snapshot_alone() {
+        let samplers = [sampler(0, None), sampler(1, Some("materials/mask"))];
+        assert!(!samples_scene_by_default(&empty_pass(), &samplers));
     }
 
     #[test]
