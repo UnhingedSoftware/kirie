@@ -2714,7 +2714,12 @@ fn draw_image_object(
             daytime: 0.0,
             brightness: object.brightness,
             alpha: object.alpha,
-            color: object.color,
+            color: [
+                object.color[0],
+                object.color[1],
+                object.color[2],
+                object.color[3] * object.alpha,
+            ],
             ambient,
             skylight,
             pointer,

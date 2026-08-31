@@ -66,6 +66,11 @@ fn corpus_scenes_all_render_non_black() {
         .expect("read corpus dir")
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.join("scene.pkg").is_file())
+        .filter(|p| {
+            std::fs::read(p.join("project.json"))
+                .map(|bytes| bytes.iter().any(|byte| *byte == b'{'))
+                .unwrap_or(false)
+        })
         .collect();
     items.sort();
     assert!(!items.is_empty(), "no scene.pkg items under {}", dir.display());

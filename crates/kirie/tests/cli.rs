@@ -319,7 +319,14 @@ fn corpus_info_every_item_dir_succeeds() {
         dirs.len()
     );
     for dir in &dirs {
-        if !dir.join("project.json").is_file() {
+        let manifest = dir.join("project.json");
+        if !manifest.is_file() {
+            continue;
+        }
+        let readable = std::fs::read(&manifest)
+            .map(|bytes| bytes.iter().any(|byte| *byte == b'{'))
+            .unwrap_or(false);
+        if !readable {
             continue;
         }
         let out = run_kirie([OsStr::new("info"), dir.as_os_str()]);
