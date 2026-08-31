@@ -48,9 +48,47 @@ pub fn depth_stencil_state(
     }
 }
 
+pub fn depth_state_with_attachment(
+    depthtest: DepthMode,
+    depthwrite: DepthMode,
+    format: wgpu::TextureFormat,
+) -> Option<wgpu::DepthStencilState> {
+    depth_stencil_state(depthtest, depthwrite, format).or(Some(wgpu::DepthStencilState {
+        format,
+        depth_write_enabled: Some(false),
+        depth_compare: Some(wgpu::CompareFunction::Always),
+        stencil: wgpu::StencilState::default(),
+        bias: wgpu::DepthBiasState::default(),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pass_with_a_depth_buffer_always_gets_a_depth_state() {
+        let state = depth_state_with_attachment(
+            DepthMode::Disabled,
+            DepthMode::Disabled,
+            wgpu::TextureFormat::Depth24Plus,
+        )
+        .expect("a depth attachment needs a state");
+        assert_eq!(state.depth_write_enabled, Some(false));
+        assert_eq!(state.depth_compare, Some(wgpu::CompareFunction::Always));
+    }
+
+    #[test]
+    fn a_pass_without_depth_testing_still_has_none_of_its_own() {
+        assert!(
+            depth_stencil_state(
+                DepthMode::Disabled,
+                DepthMode::Disabled,
+                wgpu::TextureFormat::Depth24Plus
+            )
+            .is_none()
+        );
+    }
 
     fn comp(src: wgpu::BlendFactor, dst: wgpu::BlendFactor) -> wgpu::BlendComponent {
         wgpu::BlendComponent {

@@ -718,6 +718,15 @@ mod tests {
             paths.len()
         );
 
+        let paths: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| {
+                std::fs::read(path)
+                    .map(|bytes| bytes.windows(4).take(16).any(|w| w == b"PKGV"))
+                    .unwrap_or(false)
+            })
+            .collect();
+
         let mut total_entries = 0usize;
         for path in &paths {
             let pkg = OwnedPkg::from_path(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));

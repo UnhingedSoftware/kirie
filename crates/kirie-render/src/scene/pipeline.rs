@@ -362,7 +362,7 @@ pub fn build_model_pass(
             front_face: wgpu::FrontFace::Ccw,
             ..wgpu::PrimitiveState::default()
         },
-        depth_stencil: blend::depth_stencil_state(pass.depthtest, pass.depthwrite, depth_format),
+        depth_stencil: blend::depth_state_with_attachment(pass.depthtest, pass.depthwrite, depth_format),
         multisample: wgpu::MultisampleState::default(),
         fragment: Some(wgpu::FragmentState {
             module: &fs_shader,

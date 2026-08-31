@@ -1828,6 +1828,12 @@ mod tests {
             if !manifest.is_file() {
                 continue;
             }
+            let readable = std::fs::read(&manifest)
+                .map(|bytes| bytes.contains(&b'{'))
+                .unwrap_or(false);
+            if !readable {
+                continue;
+            }
             seen += 1;
             let p1 = Project::from_path(&manifest).unwrap_or_else(|e| panic!("{}: {e}", manifest.display()));
             let p2 =

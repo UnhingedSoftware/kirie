@@ -97,6 +97,14 @@ impl Model {
 
         let mut meshes = Vec::new();
         for index in 0..mesh_count as usize {
+            if index > 0
+                && !mesh_header_here(data, cur.offset)
+                && let Some(resync) = (1..=MAX_MESH_TRAILER)
+                    .map(|skip| cur.offset + skip)
+                    .find(|at| mesh_header_here(data, *at))
+            {
+                cur.offset = resync;
+            }
             let material_ref = cur.read_cstring("materialRef")?;
             let _reserved = cur.read_i32("mesh reserved word")?;
             let bbox = cur.read_f32x6("bbox")?;
@@ -150,6 +158,31 @@ impl Model {
     pub fn total_indices(&self) -> usize {
         self.meshes.iter().map(|m| m.indices.len()).sum()
     }
+}
+
+const MAX_MESH_TRAILER: usize = 16;
+
+fn mesh_header_here(data: &[u8], at: usize) -> bool {
+    let Some(rest) = data.get(at..) else {
+        return false;
+    };
+    let Some(end) = rest.iter().position(|byte| *byte == 0) else {
+        return false;
+    };
+    if !rest[..end]
+        .iter()
+        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+    {
+        return false;
+    }
+    let header = at + end + 1 + 4 + 24 + 4;
+    let Some(field) = data.get(header..header + 4) else {
+        return false;
+    };
+    let vertex_bytes = i32::from_le_bytes([field[0], field[1], field[2], field[3]]);
+    vertex_bytes > 0
+        && (vertex_bytes as usize).is_multiple_of(VERTEX_STRIDE)
+        && data.len().saturating_sub(header + 4) >= vertex_bytes as usize
 }
 
 fn decode_vertex(chunk: &[u8; VERTEX_STRIDE]) -> Vertex {
@@ -909,6 +942,53 @@ fn decode_puppet_vertex(chunk: &[u8], layout: PuppetLayout) -> PuppetVertex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn synth_two_mesh_model(trailer: usize, material: &str) -> Vec<u8> {
+        let mut b = Vec::new();
+        b.extend_from_slice(b"MDLV0023");
+        b.push(0);
+        b.extend_from_slice(&15i32.to_le_bytes());
+        b.extend_from_slice(&1i32.to_le_bytes());
+        b.extend_from_slice(&2i32.to_le_bytes());
+        for mesh in 0..2 {
+            b.extend_from_slice(material.as_bytes());
+            b.push(0);
+            b.extend_from_slice(&0i32.to_le_bytes());
+            for value in [-1.0f32, -2.0, -3.0, 4.0, 5.0, 6.0] {
+                b.extend_from_slice(&value.to_le_bytes());
+            }
+            b.extend_from_slice(&15i32.to_le_bytes());
+            let verts = mesh + 1;
+            b.extend_from_slice(&((verts * VERTEX_STRIDE) as i32).to_le_bytes());
+            b.resize(b.len() + verts * VERTEX_STRIDE, 0);
+            b.extend_from_slice(&6i32.to_le_bytes());
+            b.extend_from_slice(&[0u8; 6]);
+            b.resize(b.len() + trailer, 0);
+        }
+        b
+    }
+
+    #[test]
+    fn a_mesh_trailer_does_not_derail_the_next_mesh() {
+        let bytes = synth_two_mesh_model(6, "materials/test.json");
+        let model = Model::parse(&bytes).expect("both meshes are read");
+        assert_eq!(model.meshes.len(), 2);
+        assert_eq!(model.meshes[1].vertex_count(), 2);
+    }
+
+    #[test]
+    fn a_material_path_with_a_space_is_still_a_mesh_header() {
+        let bytes = synth_two_mesh_model(6, "materials/little head.json");
+        let model = Model::parse(&bytes).expect("a spaced path is a path");
+        assert_eq!(model.meshes.len(), 2);
+    }
+
+    #[test]
+    fn a_model_with_no_trailer_still_reads() {
+        let bytes = synth_two_mesh_model(0, "materials/test.json");
+        let model = Model::parse(&bytes).expect("meshes back to back");
+        assert_eq!(model.meshes.len(), 2);
+    }
 
     fn synth_model(version: &str, verts: u32, tris: u32) -> Vec<u8> {
         let mut b = Vec::new();

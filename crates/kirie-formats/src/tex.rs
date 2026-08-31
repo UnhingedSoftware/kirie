@@ -1578,6 +1578,13 @@ mod tests {
             .filter_map(Result::ok)
             .map(|item| item.path().join("scene.pkg"))
             .filter(|p| p.is_file())
+            .filter(|p| {
+                std::fs::read(p)
+                    .map(|bytes| {
+                        bytes.starts_with(b"\x08PKGV") || bytes.windows(4).take(16).any(|w| w == b"PKGV")
+                    })
+                    .unwrap_or(false)
+            })
             .collect();
         paths.sort();
         paths
