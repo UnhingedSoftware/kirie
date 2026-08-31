@@ -3191,7 +3191,11 @@ pub(super) fn build_bind_group(
             }
             match name {
                 Some(n) if !n.starts_with("_rt_") && !n.starts_with("_alias_") => {
-                    Slot::Tex(registry.get(&n, source))
+                    Slot::Tex(if slot_zero_is_the_layer {
+                        registry.get(&n, source)
+                    } else {
+                        registry.get_wrapping(&n, source)
+                    })
                 }
                 _ => Slot::Tex(registry.white()),
             }

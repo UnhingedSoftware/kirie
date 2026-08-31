@@ -342,6 +342,37 @@ impl TextureRegistry {
         self.white.clone()
     }
 
+    pub fn get_wrapping(&self, name: &str, source: &dyn AssetSource) -> std::sync::Arc<GpuTexture> {
+        let key = format!("\u{0}wrap:{name}");
+        let slot = self
+            .cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(key)
+            .or_default()
+            .clone();
+        slot.get_or_init(|| {
+            let plain = self.load(name, source)?;
+            Some(std::sync::Arc::new(GpuTexture {
+                sampler: self.device.create_sampler(&wgpu::SamplerDescriptor {
+                    mag_filter: wgpu::FilterMode::Linear,
+                    min_filter: wgpu::FilterMode::Linear,
+                    address_mode_u: wgpu::AddressMode::Repeat,
+                    address_mode_v: wgpu::AddressMode::Repeat,
+                    ..Default::default()
+                }),
+                texture: plain.texture.clone(),
+                view: plain.view.clone(),
+                width: plain.width,
+                height: plain.height,
+                uv_crop: plain.uv_crop,
+                real_size: plain.real_size,
+            }))
+        })
+        .clone()
+        .unwrap_or_else(|| self.get(name, source))
+    }
+
     pub fn get(&self, name: &str, source: &dyn AssetSource) -> std::sync::Arc<GpuTexture> {
         let slot = self
             .cache

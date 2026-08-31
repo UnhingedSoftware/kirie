@@ -381,8 +381,10 @@ jobs:
           # No checkout here, so gh must stay API-only: GH_REPO gives the repo and
           # --target gives create an explicit commit. Update in place if it exists.
           if gh release view "$V" >/dev/null 2>&1; then
-            echo "release $V exists — updating in place (not deleting)"
-            gh release edit "$V" --draft --title "$V" --notes-file RELEASE_NOTES.md
+            state="$(gh release view "$V" --json isDraft,isPrerelease \
+              --jq 'if .isDraft then "--draft" elif .isPrerelease then "--prerelease" else "--latest" end')"
+            echo "release $V exists ($state) — updating in place (not deleting)"
+            gh release edit "$V" $state --title "$V" --notes-file RELEASE_NOTES.md
             # Clear each asset by name first. `--clobber` alone is not enough:
             # a run cancelled mid-upload leaves a half-created asset, and the
             # API then answers 400 for a fresh upload of that name rather than
