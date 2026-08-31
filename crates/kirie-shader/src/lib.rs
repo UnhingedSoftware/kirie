@@ -16,7 +16,7 @@ pub mod translate;
 
 pub use reflect::Reflection;
 
-pub const TRANSLATOR_VERSION: u32 = 4;
+pub const TRANSLATOR_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -253,7 +253,7 @@ void main() {\n\
     #[test]
     fn the_translator_version_changes_deliberately() {
         assert_eq!(
-            TRANSLATOR_VERSION, 4,
+            TRANSLATOR_VERSION, 5,
             "translation changed? bump this too — it invalidates every shader cache"
         );
     }
