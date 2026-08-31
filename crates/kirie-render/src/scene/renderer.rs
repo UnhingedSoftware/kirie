@@ -1047,7 +1047,6 @@ fn build_object(
     if chain.passes.is_empty() {
         return None;
     }
-
     let fullscreen = image.model.as_ref().is_some_and(|m| m.fullscreen);
 
     let puppet = if fullscreen {

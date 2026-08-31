@@ -7,6 +7,7 @@ use thiserror::Error;
 
 pub mod annotation;
 pub mod coerce;
+pub mod hlslmod;
 pub mod matinverse;
 pub mod modernize;
 pub mod preprocess;
