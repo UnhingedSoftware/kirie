@@ -196,7 +196,7 @@ pub fn serve_relaunching(socket: PathBuf, showing: Arc<Showing>) {
             "ping" => "pong\n".to_owned(),
             "status" => showing.report(),
             "bg" => {
-                let (_, path) = rest.split_once(' ').unwrap_or(("", rest));
+                let (_, path) = split_screen(rest, &showing.names());
                 let path = path.trim().to_owned();
                 if path.is_empty() {
                     "error\n".to_owned()
@@ -277,6 +277,25 @@ fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Sho
     if let Some(wallpaper) = restart {
         restart_with(&wallpaper);
     }
+}
+
+pub(crate) fn split_screen<'a>(rest: &'a str, names: &[String]) -> (String, &'a str) {
+    let rest = rest.trim();
+    if rest.starts_with('/') || rest.starts_with("~/") {
+        return (String::new(), rest);
+    }
+    let named = names
+        .iter()
+        .filter(|name| {
+            rest.strip_prefix(name.as_str())
+                .is_some_and(|tail| tail.starts_with(' '))
+        })
+        .max_by_key(|name| name.len());
+    if let Some(name) = named {
+        return (name.clone(), rest[name.len()..].trim_start());
+    }
+    let (screen, path) = rest.split_once(' ').unwrap_or(("", rest));
+    (screen.to_owned(), path)
 }
 
 fn act(
@@ -388,7 +407,8 @@ fn put_up(
     showing: &Arc<Showing>,
     args: &CompatArgs,
 ) -> (String, Option<String>) {
-    let (screen, path) = rest.split_once(' ').unwrap_or(("", rest));
+    let (screen, path) = split_screen(rest, &showing.names());
+    let screen = screen.as_str();
     let path = path.trim();
     if path.is_empty() {
         return ("error\n".to_owned(), None);
@@ -637,6 +657,42 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<OsString> {
         parts.iter().map(|part| OsString::from(*part)).collect()
+    }
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_screen_name_with_spaces_is_taken_whole() {
+        let screens = names(&["Built-in Retina Display", "Desktop"]);
+        let (screen, path) = split_screen("Built-in Retina Display /Users/a/wall", &screens);
+        assert_eq!(screen, "Built-in Retina Display");
+        assert_eq!(path, "/Users/a/wall");
+    }
+
+    #[test]
+    fn a_bare_path_keeps_its_spaces() {
+        let screens = names(&["Desktop"]);
+        let (screen, path) = split_screen("/Users/a/my wallpapers/one", &screens);
+        assert!(screen.is_empty());
+        assert_eq!(path, "/Users/a/my wallpapers/one");
+    }
+
+    #[test]
+    fn the_longest_matching_screen_wins() {
+        let screens = names(&["Display", "Display 2"]);
+        let (screen, path) = split_screen("Display 2 /wall", &screens);
+        assert_eq!(screen, "Display 2");
+        assert_eq!(path, "/wall");
+    }
+
+    #[test]
+    fn an_unknown_screen_still_splits_at_the_first_space() {
+        let screens = names(&["Desktop"]);
+        let (screen, path) = split_screen("HDMI-1 /wall", &screens);
+        assert_eq!(screen, "HDMI-1");
+        assert_eq!(path, "/wall");
     }
 
     #[test]
