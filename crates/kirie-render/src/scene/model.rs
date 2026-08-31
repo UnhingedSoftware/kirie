@@ -17,6 +17,15 @@ use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
 
 pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
+fn padded_indices(indices: &[u16]) -> std::borrow::Cow<'_, [u16]> {
+    if indices.len().is_multiple_of(2) {
+        return std::borrow::Cow::Borrowed(indices);
+    }
+    let mut padded = indices.to_vec();
+    padded.push(*indices.last().unwrap_or(&0));
+    std::borrow::Cow::Owned(padded)
+}
+
 fn clamp_camera(fov: f32, near: f32, far: f32) -> (f32, f32, f32) {
     let fov = if (1.0..=170.0).contains(&fov) { fov } else { 50.0 };
     let near = if near > 0.0 { near } else { 0.1 };
@@ -138,7 +147,8 @@ pub(super) fn build_model(
             &mesh.vertex_data,
             wgpu::BufferUsages::VERTEX,
         );
-        let index_bytes: &[u8] = bytemuck::cast_slice(&mesh.indices);
+        let indices = padded_indices(&mesh.indices);
+        let index_bytes: &[u8] = bytemuck::cast_slice(&indices);
         let index_buffer =
             create_buffer_init(device, "kirie-model-ib", index_bytes, wgpu::BufferUsages::INDEX);
         let index_count = mesh.indices.len() as u32;
@@ -415,6 +425,27 @@ pub(super) fn create_depth_texture(device: &wgpu::Device, width: u32, height: u3
 
 #[cfg(test)]
 mod tests {
+    use super::padded_indices;
+
+    #[test]
+    fn an_even_index_run_is_left_alone() {
+        let indices = [0u16, 1, 2, 3];
+        assert!(matches!(padded_indices(&indices), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn an_odd_index_run_is_padded_to_a_whole_word() {
+        let padded = padded_indices(&[0u16, 1, 2]);
+        assert_eq!(padded.len(), 4);
+        assert_eq!(&padded[..3], &[0, 1, 2]);
+        assert_eq!(padded[3], 2, "the pad repeats a vertex, drawing nothing new");
+    }
+
+    #[test]
+    fn an_empty_run_stays_empty() {
+        assert!(padded_indices(&[]).is_empty());
+    }
+
     use super::*;
 
     #[test]
