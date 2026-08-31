@@ -57,11 +57,7 @@ pub fn build_pass(
     let mut vs = translate(Stage::Vertex, "pass.vert", &vs_src, resolver, &base_inputs)?;
     let mut fs = translate(Stage::Fragment, "pass.frag", &fs_src, resolver, &base_inputs)?;
 
-    let vs_out0 = io_locations(&vs.module, IoDir::Output);
-    let mismatch = io_locations(&fs.module, IoDir::Input)
-        .iter()
-        .any(|loc| !vs_out0.contains(loc));
-    if mismatch {
+    if stages_disagree(&vs.module, &fs.module) {
         let fs_src_stripped = strip_dead_fs_varyings(&vs_src, &fs_src);
         let (vs_src, fs_src) = if has_array_varying(&vs_src) || has_array_varying(&fs_src_stripped) {
             (vs_src.clone(), fs_src_stripped)
@@ -101,16 +97,16 @@ pub fn build_pass(
         }
     }
 
-    let vs_outputs = io_locations(&vs.module, IoDir::Output);
-    for loc in io_locations(&fs.module, IoDir::Input) {
-        if !vs_outputs.contains(&loc) {
-            return Err(PassBuildError::InterfaceMismatch(loc));
+    let vs_outputs = io_shapes(&vs.module, IoDir::Output);
+    let fs_inputs = io_shapes(&fs.module, IoDir::Input);
+    for (loc, width) in &fs_inputs {
+        if vs_outputs.get(loc).is_none_or(|had| had != width) {
+            return Err(PassBuildError::InterfaceMismatch(*loc));
         }
     }
 
     let max_varyings = device.limits().max_inter_stage_shader_variables;
-    let fs_inputs = io_locations(&fs.module, IoDir::Input);
-    if let Some(&loc) = vs_outputs.iter().chain(fs_inputs.iter()).max()
+    if let Some(&loc) = vs_outputs.keys().chain(fs_inputs.keys()).max()
         && loc >= max_varyings
     {
         return Err(PassBuildError::TooManyVaryings(loc, max_varyings));
@@ -289,15 +285,15 @@ pub fn build_model_pass(
     }
     attrs.sort_by_key(|a| a.shader_location);
 
-    let vs_outputs = io_locations(&vs.module, IoDir::Output);
-    for loc in io_locations(&fs.module, IoDir::Input) {
-        if !vs_outputs.contains(&loc) {
-            return Err(PassBuildError::InterfaceMismatch(loc));
+    let vs_outputs = io_shapes(&vs.module, IoDir::Output);
+    let fs_inputs = io_shapes(&fs.module, IoDir::Input);
+    for (loc, width) in &fs_inputs {
+        if vs_outputs.get(loc).is_none_or(|had| had != width) {
+            return Err(PassBuildError::InterfaceMismatch(*loc));
         }
     }
     let max_varyings = device.limits().max_inter_stage_shader_variables;
-    let fs_inputs = io_locations(&fs.module, IoDir::Input);
-    if let Some(&loc) = vs_outputs.iter().chain(fs_inputs.iter()).max()
+    if let Some(&loc) = vs_outputs.keys().chain(fs_inputs.keys()).max()
         && loc >= max_varyings
     {
         return Err(PassBuildError::TooManyVaryings(loc, max_varyings));
@@ -509,20 +505,25 @@ enum IoDir {
     Input,
 }
 
-fn io_locations(module: &naga::Module, dir: IoDir) -> BTreeSet<u32> {
-    let mut locs = BTreeSet::new();
+fn io_shapes(module: &naga::Module, dir: IoDir) -> BTreeMap<u32, u8> {
+    let mut shapes = BTreeMap::new();
     let Some(ep) = module.entry_points.first() else {
-        return locs;
+        return shapes;
+    };
+    let width = |ty: naga::Handle<naga::Type>| match &module.types[ty].inner {
+        naga::TypeInner::Scalar(_) => 1_u8,
+        naga::TypeInner::Vector { size, .. } => *size as u8,
+        _ => 0,
     };
     let mut collect = |binding: Option<&naga::Binding>, ty: naga::Handle<naga::Type>| match binding {
         Some(naga::Binding::Location { location, .. }) => {
-            locs.insert(*location);
+            shapes.insert(*location, width(ty));
         }
         _ => {
             if let naga::TypeInner::Struct { members, .. } = &module.types[ty].inner {
                 for m in members {
                     if let Some(naga::Binding::Location { location, .. }) = &m.binding {
-                        locs.insert(*location);
+                        shapes.insert(*location, width(m.ty));
                     }
                 }
             }
@@ -540,7 +541,14 @@ fn io_locations(module: &naga::Module, dir: IoDir) -> BTreeSet<u32> {
             }
         }
     }
-    locs
+    shapes
+}
+
+fn stages_disagree(vs: &naga::Module, fs: &naga::Module) -> bool {
+    let out = io_shapes(vs, IoDir::Output);
+    io_shapes(fs, IoDir::Input)
+        .iter()
+        .any(|(location, width)| out.get(location).is_none_or(|had| had != width))
 }
 
 fn sanitize_glsl(src: &str, stage: Stage) -> String {
@@ -675,4 +683,48 @@ fn stage_layout(
         label: Some(label),
         entries: &entries,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(stage: naga::ShaderStage, src: &str) -> naga::Module {
+        let mut front = naga::front::glsl::Frontend::default();
+        front
+            .parse(&naga::front::glsl::Options::from(stage), src)
+            .expect("the test shader parses")
+    }
+
+    const VERTEX_WITH_VEC2: &str = "#version 450\nlayout(location = 0) out vec2 v_TexCoord;\nvoid main() { v_TexCoord = vec2(0.0); gl_Position = vec4(0.0); }\n";
+
+    #[test]
+    fn a_narrower_varying_than_the_fragment_wants_is_a_disagreement() {
+        let vs = parse(naga::ShaderStage::Vertex, VERTEX_WITH_VEC2);
+        let fs = parse(
+            naga::ShaderStage::Fragment,
+            "#version 450\nlayout(location = 0) in vec4 v_TexCoord;\nlayout(location = 0) out vec4 o;\nvoid main() { o = v_TexCoord; }\n",
+        );
+        assert!(stages_disagree(&vs, &fs));
+    }
+
+    #[test]
+    fn matching_varyings_agree() {
+        let vs = parse(naga::ShaderStage::Vertex, VERTEX_WITH_VEC2);
+        let fs = parse(
+            naga::ShaderStage::Fragment,
+            "#version 450\nlayout(location = 0) in vec2 v_TexCoord;\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(v_TexCoord, 0.0, 1.0); }\n",
+        );
+        assert!(!stages_disagree(&vs, &fs));
+    }
+
+    #[test]
+    fn a_varying_the_vertex_never_writes_is_a_disagreement() {
+        let vs = parse(naga::ShaderStage::Vertex, VERTEX_WITH_VEC2);
+        let fs = parse(
+            naga::ShaderStage::Fragment,
+            "#version 450\nlayout(location = 3) in vec2 v_Other;\nlayout(location = 0) out vec4 o;\nvoid main() { o = vec4(v_Other, 0.0, 1.0); }\n",
+        );
+        assert!(stages_disagree(&vs, &fs));
+    }
 }
