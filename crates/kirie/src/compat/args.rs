@@ -504,13 +504,12 @@ fn parse_with(
             }
             "--bg" => {
                 let wanted = value()?;
-                if wanted.trim().is_empty() {
-                    continue;
-                }
-                let resolved = resolve::translate_background(&wanted)?;
-                out.default_background = Some(resolved.clone());
-                if let Cursor::Screen(idx) = cursor {
-                    out.screens[idx].background = Some(resolved);
+                if !wanted.trim().is_empty() {
+                    let resolved = resolve::translate_background(&wanted)?;
+                    out.default_background = Some(resolved.clone());
+                    if let Cursor::Screen(idx) = cursor {
+                        out.screens[idx].background = Some(resolved);
+                    }
                 }
             }
             "--playlist" => {
@@ -805,9 +804,10 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_background_is_ignored_not_fatal() {
-        let args = parse(&os(&["kirie", "--bg="])).expect("an empty --bg is not a refusal");
+    fn an_empty_background_is_ignored_and_parsing_moves_on() {
+        let args = parse(&os(&["kirie", "--bg=", "--fps=45"])).expect("an empty --bg is not a refusal");
         assert_eq!(args.default_background, None);
+        assert_eq!(args.fps, 45, "the argument after an empty --bg is still read");
     }
 
     #[test]
