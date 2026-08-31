@@ -281,7 +281,7 @@ fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Sho
 
 pub(crate) fn split_screen<'a>(rest: &'a str, names: &[String]) -> (String, &'a str) {
     let rest = rest.trim();
-    if rest.starts_with('/') || rest.starts_with("~/") {
+    if rest.starts_with('/') || rest.starts_with("~/") || Path::new(rest).exists() {
         return (String::new(), rest);
     }
     let named = names
@@ -417,11 +417,11 @@ fn put_up(
     let screen = screen.as_str();
     let path = path.trim();
     if path.is_empty() {
-        return ("error\n".to_owned(), None);
+        return refused_line(rest.trim(), "no wallpaper was named");
     }
     let wallpaper = match resolve::classify(path) {
         Ok(found) => found,
-        Err(err) => return refused(path, &err.to_string()),
+        Err(err) => return refused_line(rest.trim(), &err.to_string()),
     };
     if let Some(note) = resolve::refuse_without_assets(&wallpaper) {
         return refused(path, &note.replace('\n', " "));
@@ -518,6 +518,14 @@ pub fn level_of(sound: Sound) -> f32 {
 fn refused(path: &str, reason: &str) -> (String, Option<String>) {
     tracing::warn!(path, reason, "cannot put that wallpaper up");
     (format!("error {reason}\n"), None)
+}
+
+fn refused_line(line: &str, reason: &str) -> (String, Option<String>) {
+    tracing::warn!(line, reason, "cannot read what wallpaper was asked for");
+    if line.is_empty() {
+        return (format!("error {reason}\n"), None);
+    }
+    (format!("error {reason} (asked for `bg {line}`)\n"), None)
 }
 
 fn set_property(
@@ -675,6 +683,34 @@ mod tests {
         let (screen, path) = split_screen("Built-in Retina Display /Users/a/wall", &screens);
         assert_eq!(screen, "Built-in Retina Display");
         assert_eq!(path, "/Users/a/wall");
+    }
+
+    #[test]
+    fn a_whole_line_that_is_a_real_path_is_never_split() {
+        let dir = std::env::temp_dir().join("kirie ipc test/one two");
+        let _ = std::fs::create_dir_all(&dir);
+        let line = dir.to_string_lossy().into_owned();
+        let (screen, path) = split_screen(&line, &names(&["one", "two"]));
+        assert!(screen.is_empty(), "{screen}");
+        assert_eq!(path, line);
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join("kirie ipc test"));
+    }
+
+    #[test]
+    fn a_relative_directory_that_exists_is_taken_whole() {
+        let root = std::env::temp_dir().join("kirie-ipc-relative");
+        let _ = std::fs::create_dir_all(root.join("Desktop wall"));
+        let here = std::env::current_dir().ok();
+        if std::env::set_current_dir(&root).is_err() {
+            return;
+        }
+        let (screen, path) = split_screen("Desktop wall", &names(&["Desktop"]));
+        if let Some(here) = here {
+            let _ = std::env::set_current_dir(here);
+        }
+        assert!(screen.is_empty(), "{screen}");
+        assert_eq!(path, "Desktop wall");
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
