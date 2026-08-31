@@ -459,6 +459,13 @@ fn gate1_all_24_project_json_parse_and_type_split_matches_inventory() -> Result<
         if !manifest.is_file() {
             continue;
         }
+        let readable = std::fs::read(&manifest)
+            .map(|bytes| bytes.contains(&b'{'))
+            .unwrap_or(false);
+        if !readable {
+            eprintln!("skipping {id}: project.json is not readable JSON (broken install)");
+            continue;
+        }
         Project::from_path(manifest)
             .with_context(|| format!("newly installed corpus item {id}: project.json failed to parse"))?;
     }

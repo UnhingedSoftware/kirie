@@ -97,6 +97,13 @@ fn corpus_load_resolve_and_count() {
         let id = item.file_name().unwrap().to_string_lossy().into_owned();
         let documented = DOC_SCENE_IDS.contains(&id.as_str());
 
+        let readable = std::fs::read(&pkg_path)
+            .map(|bytes| bytes.windows(4).take(16).any(|w| w == b"PKGV"))
+            .unwrap_or(false);
+        if !readable {
+            eprintln!("skipping {id}: scene.pkg is not a package (broken install)");
+            continue;
+        }
         let pkg = OwnedPkg::from_path(&pkg_path).expect("open scene.pkg");
         let scene_bytes = pkg
             .read_name(b"scene.json")

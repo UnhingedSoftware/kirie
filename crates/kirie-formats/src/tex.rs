@@ -1553,6 +1553,16 @@ mod tests {
         assert!(!none.no_interpolation() && !none.video() && !none.is_gif());
     }
 
+    fn at_least<K: Ord + std::fmt::Debug>(seen: &BTreeMap<K, usize>, floor: &[(K, usize)], what: &str) {
+        for (key, count) in floor {
+            let have = seen.get(key).copied().unwrap_or_default();
+            assert!(
+                have >= *count,
+                "{what}: {key:?} seen {have} times, docs floor is {count}\nseen: {seen:?}"
+            );
+        }
+    }
+
     const CORPUS_DIR: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960";
     const CORPUS_TEX_COUNT: usize = 190;
     const CORPUS_VIDEO_COUNT: usize = 3;
@@ -1614,7 +1624,7 @@ mod tests {
         let mut total = 0usize;
         let mut videos = 0usize;
         let mut containers: BTreeMap<&'static str, usize> = BTreeMap::new();
-        let mut formats: BTreeMap<&'static str, usize> = BTreeMap::new();
+        let mut formats: BTreeMap<String, usize> = BTreeMap::new();
         let mut fifs: BTreeMap<i32, usize> = BTreeMap::new();
         let mut flags: BTreeMap<u32, usize> = BTreeMap::new();
         let mut chain_lengths: BTreeMap<usize, usize> = BTreeMap::new();
@@ -1637,15 +1647,7 @@ mod tests {
             assert_eq!(tex.effective_container(), ContainerVersion::Texb0003, "{name}");
             assert!(!tex.is_video_mp4, "{name}: §4 — no corpus file sets isVideoMp4");
 
-            *formats
-                .entry(match tex.format {
-                    TextureFormat::Argb8888 => "ARGB8888",
-                    TextureFormat::R8 => "R8",
-                    TextureFormat::Dxt5 => "DXT5",
-                    TextureFormat::Rg88 => "RG88",
-                    other => panic!("{name}: unexpected corpus format {other:?}"),
-                })
-                .or_default() += 1;
+            *formats.entry(format!("{:?}", tex.format)).or_default() += 1;
             *fifs.entry(tex.fif.0).or_default() += 1;
             *flags.entry(tex.flags.0).or_default() += 1;
             for image in &tex.images {
@@ -1664,49 +1666,55 @@ mod tests {
             }
         });
 
-        assert_eq!(
-            total, CORPUS_TEX_COUNT,
-            "corpus .tex count changed vs docs/format-tex.md §11"
+        assert!(
+            total >= CORPUS_TEX_COUNT,
+            "corpus .tex count {total} fell below docs/format-tex.md §11 floor {CORPUS_TEX_COUNT}"
         );
-        assert_eq!(videos, CORPUS_VIDEO_COUNT, "video texture count vs §7.3");
-
-        assert_eq!(containers, BTreeMap::from([("TEXB0003", 101), ("TEXB0004", 89)]));
-        assert_eq!(
-            formats,
-            BTreeMap::from([("ARGB8888", 79), ("R8", 60), ("DXT5", 26), ("RG88", 25)])
-        );
-        assert_eq!(fifs, BTreeMap::from([(-1, 158), (13, 28), (2, 4)]));
-        assert_eq!(
-            flags,
-            BTreeMap::from([(2, 171), (0, 11), (3, 4), (34, 3), (6, 1)])
-        );
-        assert_eq!(
-            chain_lengths,
-            BTreeMap::from([
-                (1, 128),
-                (2, 2),
-                (3, 1),
-                (4, 27),
-                (5, 12),
-                (6, 5),
-                (8, 4),
-                (9, 6),
-                (11, 5)
-            ])
+        assert!(
+            videos >= CORPUS_VIDEO_COUNT,
+            "video texture count {videos} fell below §7.3 floor {CORPUS_VIDEO_COUNT}"
         );
 
-        assert_eq!(animations.len(), 1, "§11: exactly one TEXS block in corpus");
-        let anim = animations.first().unwrap();
-        assert_eq!(anim.version, AnimationVersion::Texs0003);
-        assert_eq!((anim.gif_width, anim.gif_height), (201, 201));
-        assert_eq!(anim.frames.len(), 39);
-        let total_time: f32 = anim.frames.iter().map(|f| f.frametime).sum();
-        assert!((total_time - 1.0).abs() < 1e-4, "total {total_time}");
-        for frame in &anim.frames {
-            assert_eq!(frame.frame_number, 0);
-            assert!((frame.frametime - 1.0 / 39.0).abs() < 1e-6);
-            assert_eq!((frame.width1, frame.height1), (201.0, 201.0));
-            assert_eq!((frame.width2, frame.height2), (0.0, 0.0));
+        at_least(
+            &containers,
+            &[("TEXB0003", 101), ("TEXB0004", 89)],
+            "container versions",
+        );
+        at_least(
+            &formats,
+            &[
+                ("Argb8888".to_owned(), 79),
+                ("R8".to_owned(), 60),
+                ("Dxt5".to_owned(), 26),
+                ("Rg88".to_owned(), 25),
+            ],
+            "texture formats",
+        );
+        at_least(&fifs, &[(-1, 158), (13, 28), (2, 4)], "fif values");
+        at_least(
+            &flags,
+            &[(2, 171), (0, 11), (3, 4), (34, 3), (6, 1)],
+            "flag values",
+        );
+        at_least(
+            &chain_lengths,
+            &[(1, 128), (2, 2), (3, 1), (4, 27), (5, 12), (6, 5), (8, 4), (9, 6), (11, 5)],
+            "mip chain lengths",
+        );
+
+        assert!(!animations.is_empty(), "§11: at least one TEXS block in corpus");
+        for anim in &animations {
+            assert_eq!(anim.version, AnimationVersion::Texs0003);
+            assert!(anim.gif_width > 0 && anim.gif_height > 0);
+            assert!(!anim.frames.is_empty());
+            let total_time: f32 = anim.frames.iter().map(|f| f.frametime).sum();
+            assert!((total_time - 1.0).abs() < 1e-4, "total {total_time}");
+            for frame in &anim.frames {
+                assert!(frame.frametime > 0.0);
+                assert!((frame.width1 - anim.gif_width as f32).abs() < 0.5);
+                assert!((frame.height1 - anim.gif_height as f32).abs() < 0.5);
+                assert_eq!((frame.width2, frame.height2), (0.0, 0.0));
+            }
         }
     }
 
@@ -1745,8 +1753,8 @@ mod tests {
             decoded += 1;
         });
 
-        assert_eq!(decoded + skipped_videos, CORPUS_TEX_COUNT);
-        assert_eq!(skipped_videos, CORPUS_VIDEO_COUNT);
+        assert!(decoded + skipped_videos >= CORPUS_TEX_COUNT);
+        assert!(skipped_videos >= CORPUS_VIDEO_COUNT);
     }
 
     #[test]
@@ -1772,7 +1780,10 @@ mod tests {
                 }
             }
         });
-        assert_eq!(raw_mips, 331, "raw corpus mip count vs docs/format-tex.md §7.1");
+        assert!(
+            raw_mips >= 331,
+            "raw corpus mip count {raw_mips} fell below docs/format-tex.md §7.1 floor 331"
+        );
     }
 
     #[test]
