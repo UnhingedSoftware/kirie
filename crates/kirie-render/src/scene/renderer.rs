@@ -1523,6 +1523,7 @@ fn collect_structural_props(scene: &kirie_scene::Scene) -> std::collections::Has
             out.insert(user.name().to_owned());
         }
     }
+    add(&mut out, &scene.general.bloom);
     for o in &scene.objects {
         add(&mut out, &o.base.origin);
         add(&mut out, &o.base.scale);
@@ -3461,6 +3462,18 @@ mod tests {
             combos: Default::default(),
             constantshadervalues: Default::default(),
         }
+    }
+
+    #[test]
+    fn a_bloom_toggle_counts_as_structural() {
+        let Ok(scene) = kirie_scene::Scene::from_value(&serde_json::json!({
+            "camera": { "center": "0 0 0", "eye": "0 0 100", "up": "0 1 0" },
+            "general": { "bloom": { "user": "bloom", "value": false } },
+            "objects": []
+        })) else {
+            panic!("the scene should parse");
+        };
+        assert!(collect_structural_props(&scene).contains("bloom"));
     }
 
     #[test]
