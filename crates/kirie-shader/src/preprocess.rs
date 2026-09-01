@@ -669,7 +669,6 @@ mod tests {
         assert_eq!(screen_position_to_texture_space(source), source);
     }
 
-
     #[test]
     fn include_is_inlined_before_main() {
         let a = run(

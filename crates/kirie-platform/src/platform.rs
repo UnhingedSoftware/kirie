@@ -408,10 +408,12 @@ impl PlatformState {
 
     fn output_index(&self, screen: &str) -> Option<usize> {
         if screen == "*" {
-            (!self.outputs.is_empty()).then_some(0)
-        } else {
-            self.outputs.iter().position(|c| c.name == screen)
+            return (!self.outputs.is_empty()).then_some(0);
         }
+        if let Some(found) = self.outputs.iter().position(|c| c.name == screen) {
+            return Some(found);
+        }
+        (self.outputs.len() == 1).then_some(0)
     }
 
     fn add_output(&mut self, qh: &QueueHandle<Self>, wl_output: wl_output::WlOutput) {

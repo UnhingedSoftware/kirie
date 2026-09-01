@@ -321,9 +321,7 @@ fn parse_bg(cur: &mut Cursor<'_>) -> (String, PathBuf) {
 }
 
 fn looks_like_a_path(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"/")
-        || bytes.starts_with(b"~/")
-        || Path::new(OsStr::from_bytes(bytes)).exists()
+    bytes.starts_with(b"/") || bytes.starts_with(b"~/") || Path::new(OsStr::from_bytes(bytes)).exists()
 }
 
 fn path_of(bytes: &[u8]) -> PathBuf {

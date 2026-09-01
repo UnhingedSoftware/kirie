@@ -258,7 +258,9 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
         Command::Bg { screen, path } => {
             state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let staged: Vec<(String, String)> = std::mem::take(&mut state.staged).into_iter().collect();
-            state.properties = super::saved_props::with_saved(&path, &staged).into_iter().collect();
+            state.properties = super::saved_props::with_saved(&path, &staged)
+                .into_iter()
+                .collect();
             if !staged.is_empty() {
                 let all: Vec<(String, String)> = state
                     .properties

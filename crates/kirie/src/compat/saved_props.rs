@@ -178,7 +178,9 @@ mod tests {
     #[test]
     fn a_workshop_item_is_stored_under_its_id() {
         assert_eq!(
-            name_for(Path::new("/home/a/Steam/steamapps/workshop/content/431960/3299228616")),
+            name_for(Path::new(
+                "/home/a/Steam/steamapps/workshop/content/431960/3299228616"
+            )),
             "3299228616"
         );
     }
@@ -223,8 +225,14 @@ mod tests {
             ("fov".to_owned(), "34".to_owned()),
         ];
         let merged = merge(saved, &[("bloom".to_owned(), "0".to_owned())]);
-        assert!(merged.contains(&("bloom".to_owned(), "0".to_owned())), "{merged:?}");
-        assert!(merged.contains(&("fov".to_owned(), "34".to_owned())), "{merged:?}");
+        assert!(
+            merged.contains(&("bloom".to_owned(), "0".to_owned())),
+            "{merged:?}"
+        );
+        assert!(
+            merged.contains(&("fov".to_owned(), "34".to_owned())),
+            "{merged:?}"
+        );
     }
 
     #[test]
