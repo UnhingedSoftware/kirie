@@ -24,6 +24,13 @@ pub fn translate(
     let flat = crate::hlslmod::rewrite_modulo(&flat);
     let flat = crate::coerce::coerce_shapes(&flat);
     let flat = crate::hlslrelax::relax_hlsl_shapes(&flat);
+    if let Some(dir) = std::env::var_os("KIRIE_SHADER_DUMP_ALL") {
+        let stem = filename.replace(['/', '\\'], "_");
+        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.glsl"));
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(&at, &flat);
+        }
+    }
     let flat = crate::matinverse::shadow_builtin_inverse(&flat);
 
     let naga_diag = match try_naga_glsl(stage, &flat).and_then(validate) {

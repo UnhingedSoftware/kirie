@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
 pub fn relax_hlsl_shapes(source: &str) -> String {
+    if std::env::var_os("KIRIE_NO_RELAX").is_some() {
+        return source.to_owned();
+    }
     let widths = declared_widths(source);
     if widths.is_empty() {
         return source.to_owned();
@@ -47,6 +50,10 @@ fn declared_widths(source: &str) -> HashMap<String, usize> {
                 let Some(name) = words.next() else { continue };
                 (kind, name)
             }
+            "vec2" | "vec3" | "vec4" | "float" => {
+                let Some(name) = words.next() else { continue };
+                (first, name)
+            }
             _ => continue,
         };
         let Some(width) = width_of(kind) else { continue };
@@ -59,6 +66,9 @@ fn declared_widths(source: &str) -> HashMap<String, usize> {
 }
 
 fn narrower_target(line: &str) -> Option<usize> {
+    if let Some(width) = swizzled_target(line) {
+        return Some(width);
+    }
     let text = line.trim_start();
     let mut words = text.split_whitespace();
     let kind = words.next()?;
@@ -75,6 +85,24 @@ fn narrower_target(line: &str) -> Option<usize> {
         return None;
     }
     text.contains('=').then_some(width)
+}
+
+fn swizzled_target(line: &str) -> Option<usize> {
+    let (left, _) = line.split_once('=')?;
+    if left.contains("==") || left.contains('<') || left.contains('>') || left.contains('!') {
+        return None;
+    }
+    let target = left.trim();
+    let (_, swizzle) = target.rsplit_once('.')?;
+    let swizzle = swizzle.trim();
+    let letters = swizzle.len();
+    if letters == 0 || letters > 3 {
+        return None;
+    }
+    swizzle
+        .chars()
+        .all(|c| "xyzwrgba".contains(c))
+        .then_some(letters)
 }
 
 fn truncate_wider(line: &str, width: usize, widths: &HashMap<String, usize>) -> String {
@@ -116,6 +144,19 @@ mod tests {
     use super::*;
 
     const HEADER: &str = "varying vec4 v_TexCoord;\nvarying vec2 v_Offset;\n";
+
+    #[test]
+    fn a_swizzled_target_narrows_a_local() {
+        let source = "vec4 sample_we = fetch();\nout_FragColor.xyz = sample_we * mask;\n";
+        let out = relax_hlsl_shapes(source);
+        assert!(out.contains("sample_we.xyz * mask"), "{out}");
+    }
+
+    #[test]
+    fn a_comparison_is_not_a_target() {
+        let source = "vec4 c = fetch();\nif (c.x == 1.0) { }\n";
+        assert_eq!(relax_hlsl_shapes(source), source);
+    }
 
     #[test]
     fn a_constructor_on_the_line_sets_the_width() {
