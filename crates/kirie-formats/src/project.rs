@@ -680,7 +680,7 @@ fn take_optional_string(raw: &mut Map<String, Value>) -> String {
 
 fn take_textinput_value(raw: &mut Map<String, Value>) -> Result<String, PropertyError> {
     match raw.remove("value") {
-        None => Err(PropertyError::MissingField { field: "value" }),
+        None => Ok(String::new()),
         Some(Value::String(s)) => Ok(s),
         Some(other) => Ok(other.to_string()),
     }
@@ -842,6 +842,27 @@ mod tests {
         match p.general.properties.get(name) {
             Some(PropertyEntry::Property(prop)) => prop,
             other => panic!("property {name:?} is {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_text_input_without_a_value_still_loads() {
+        let raw = serde_json::json!({
+            "type": "textinput",
+            "text": "ui_font",
+            "order": 9090,
+            "condition": "weather_show.value"
+        });
+        let Value::Object(map) = raw else {
+            panic!("the fixture is an object");
+        };
+        let parsed =
+            parse_property_entry(Value::Object(map)).expect("a missing value is not fatal");
+        match parsed {
+            PropertyEntry::Property(p) => {
+                assert_eq!(p.kind, PropertyKind::TextInput { value: String::new() });
+            }
+            other => panic!("expected a property, got {other:?}"),
         }
     }
 
@@ -1418,10 +1439,6 @@ mod tests {
             }
         );
 
-        assert_eq!(
-            prop_err(r#"{"type":"textinput"}"#),
-            PropertyError::MissingField { field: "value" }
-        );
         assert_eq!(
             prop_err(r#"{"type":"scenetexture"}"#),
             PropertyError::MissingField { field: "value" }
