@@ -1,4 +1,7 @@
 pub fn repair_conversion(source: &str, diagnostic: &str) -> Option<String> {
+    if let Some(mended) = repair_not_on_a_float(source, diagnostic) {
+        return Some(mended);
+    }
     let (line_no, want) = first_conversion(diagnostic)?;
     let mut lines: Vec<&str> = source.split_inclusive('\n').collect();
     let at = line_no.checked_sub(1)?;
@@ -7,6 +10,50 @@ pub fn repair_conversion(source: &str, diagnostic: &str) -> Option<String> {
     let held = fixed;
     lines[at] = held.as_str();
     Some(lines.concat())
+}
+
+fn repair_not_on_a_float(source: &str, diagnostic: &str) -> Option<String> {
+    let line_no = diagnostic.lines().find_map(|line| {
+        (line.contains("'!'") && line.contains("wrong operand type") && line.contains("float"))
+            .then(|| numbered_line(line))
+            .flatten()
+    })?;
+    let mut lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let at = line_no.checked_sub(1)?;
+    let line = *lines.get(at)?;
+    let mended = zero_test_for_not(line)?;
+    lines[at] = mended.as_str();
+    Some(lines.concat())
+}
+
+fn zero_test_for_not(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut at = 0;
+    while at < bytes.len() {
+        if bytes[at] != b'!' || bytes.get(at + 1) == Some(&b'=') {
+            at += 1;
+            continue;
+        }
+        let mut start = at + 1;
+        while start < bytes.len() && bytes[start] == b' ' {
+            start += 1;
+        }
+        let mut end = start;
+        while end < bytes.len() && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'_') {
+            end += 1;
+        }
+        if end == start {
+            at += 1;
+            continue;
+        }
+        let name = &line[start..end];
+        return Some(format!(
+            "{}({name} == 0.0 ? 1.0 : 0.0){}",
+            &line[..at],
+            &line[end..]
+        ));
+    }
+    None
 }
 
 fn first_conversion(diagnostic: &str) -> Option<(usize, usize)> {
@@ -97,6 +144,21 @@ mod tests {
     use super::*;
 
     const SOURCE: &str = "void main() {\n    vec2 uv = noiseValue;\n    float m = someVec2;\n}\n";
+
+    #[test]
+    fn a_not_on_a_float_becomes_a_zero_test() {
+        let source = "void main() {\n    float m = pick ? ! horizontal : horizontal;\n}\n";
+        let diagnostic = "shaderc: pass.vert:2: error: '!' :  wrong operand type no operation '!' exists that takes an operand of type  temp highp float";
+        let out = repair_conversion(source, diagnostic).expect("a repair");
+        assert!(out.contains("(horizontal == 0.0 ? 1.0 : 0.0)"), "{out}");
+    }
+
+    #[test]
+    fn a_not_equals_is_never_rewritten() {
+        let source = "void main() {\n    if (a != b) { }\n}\n";
+        let diagnostic = "shaderc: pass.vert:2: error: '!' :  wrong operand type no operation '!' exists that takes an operand of type  temp highp float";
+        assert_eq!(repair_conversion(source, diagnostic), None);
+    }
 
     #[test]
     fn a_float_becomes_the_vector_the_line_wants() {
