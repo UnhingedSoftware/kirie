@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -301,6 +301,35 @@ fn rest_path(cur: &mut Cursor<'_>) -> PathBuf {
     PathBuf::from(OsStr::from_bytes(cur.rest()).to_os_string())
 }
 
+const EVERY_SCREEN: &str = "*";
+
+fn parse_bg(cur: &mut Cursor<'_>) -> (String, PathBuf) {
+    let mut peek = Cursor { ..*cur };
+    let whole = peek.rest();
+    if whole.is_empty() {
+        return (EVERY_SCREEN.to_owned(), PathBuf::new());
+    }
+    if looks_like_a_path(whole) {
+        return (EVERY_SCREEN.to_owned(), path_of(cur.rest()));
+    }
+    let screen = token_string(cur);
+    let path = cur.rest();
+    if path.is_empty() {
+        return (EVERY_SCREEN.to_owned(), PathBuf::from(screen));
+    }
+    (screen, path_of(path))
+}
+
+fn looks_like_a_path(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"/")
+        || bytes.starts_with(b"~/")
+        || Path::new(OsStr::from_bytes(bytes)).exists()
+}
+
+fn path_of(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(OsStr::from_bytes(bytes).to_os_string())
+}
+
 fn parse_workshop(cur: &mut Cursor<'_>) -> Request {
     let Some(verb) = cur.token() else {
         return Request::Unknown;
@@ -379,8 +408,7 @@ pub fn parse_request(line: &[u8]) -> Request {
         b"mute" => Request::Command(Command::Mute(extract_i32(cur.token(), 0) != 0)),
         b"set" => parse_set(&mut cur),
         b"bg" => {
-            let screen = token_string(&mut cur);
-            let path = rest_path(&mut cur);
+            let (screen, path) = parse_bg(&mut cur);
             Request::Command(Command::Bg { screen, path })
         }
         b"preload" => Request::Command(Command::Preload {
@@ -609,8 +637,37 @@ mod tests {
         assert_eq!(
             cmd(b"bg"),
             Command::Bg {
-                screen: String::new(),
+                screen: "*".into(),
                 path: PathBuf::new()
+            }
+        );
+    }
+
+    #[test]
+    fn a_bare_path_is_the_wallpaper_and_not_a_screen() {
+        assert_eq!(
+            cmd(b"bg /home/a/.local/share/Steam/steamapps/workshop/content/431960/123"),
+            Command::Bg {
+                screen: "*".into(),
+                path: PathBuf::from("/home/a/.local/share/Steam/steamapps/workshop/content/431960/123")
+            }
+        );
+        assert_eq!(
+            cmd(b"bg /Users/a/my wallpapers/one"),
+            Command::Bg {
+                screen: "*".into(),
+                path: PathBuf::from("/Users/a/my wallpapers/one")
+            }
+        );
+    }
+
+    #[test]
+    fn a_lone_argument_is_never_a_screen_on_its_own() {
+        assert_eq!(
+            cmd(b"bg 3509243656"),
+            Command::Bg {
+                screen: "*".into(),
+                path: PathBuf::from("3509243656")
             }
         );
     }
