@@ -314,6 +314,17 @@ pub struct TextureRegistry {
     atlases: std::sync::Mutex<HashMap<String, std::sync::Arc<AtlasTexture>>>,
 }
 
+fn blame_once(name: &str) {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SAID.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut seen) = seen.lock()
+        && seen.insert(name.to_owned())
+    {
+        tracing::warn!(texture = name, "texture will not load; drawing white");
+    }
+}
+
 impl TextureRegistry {
     #[must_use]
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Self {
@@ -383,7 +394,10 @@ impl TextureRegistry {
             .clone();
         slot.get_or_init(|| self.load(name, source))
             .clone()
-            .unwrap_or_else(|| self.white.clone())
+            .unwrap_or_else(|| {
+                blame_once(name);
+                self.white.clone()
+            })
     }
 
     pub fn get_sprite_frame0(&self, name: &str, source: &dyn AssetSource) -> std::sync::Arc<GpuTexture> {
