@@ -23,6 +23,7 @@ pub fn translate(
     let flat = preprocess_and_flatten(stage, filename, &modernized);
     let flat = crate::hlslmod::rewrite_modulo(&flat);
     let flat = crate::coerce::coerce_shapes(&flat);
+    let flat = crate::hlslrelax::relax_hlsl_shapes(&flat);
     let flat = crate::matinverse::shadow_builtin_inverse(&flat);
 
     let naga_diag = match try_naga_glsl(stage, &flat).and_then(validate) {
