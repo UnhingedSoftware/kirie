@@ -10,6 +10,7 @@ pub struct RenderTarget<'a> {
     pub format: wgpu::TextureFormat,
     pub output_name: &'a str,
     pub size: (u32, u32),
+    pub position: (i32, i32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,7 +84,14 @@ pub enum PropertyImpact {
 pub type RendererFactory = Box<dyn FnMut(&RenderTarget<'_>) -> Box<dyn Renderer>>;
 
 pub type BuildFn = Box<
-    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str, (u32, u32)) -> Box<dyn Renderer + Send>
+    dyn FnOnce(
+            &wgpu::Device,
+            &wgpu::Queue,
+            wgpu::TextureFormat,
+            &str,
+            (u32, u32),
+            (i32, i32),
+        ) -> Box<dyn Renderer + Send>
         + Send,
 >;
 
@@ -91,7 +99,14 @@ pub type BuildFn = Box<
 pub type InitialBuildFn = Box<dyn FnMut(&str) -> Option<BuildFn>>;
 
 pub type BuildLocalFn = Box<
-    dyn FnOnce(&wgpu::Device, &wgpu::Queue, wgpu::TextureFormat, &str, (u32, u32)) -> Box<dyn Renderer>
+    dyn FnOnce(
+        &wgpu::Device,
+        &wgpu::Queue,
+        wgpu::TextureFormat,
+        &str,
+        (u32, u32),
+        (i32, i32),
+    ) -> Box<dyn Renderer>
         + Send,
 >;
 

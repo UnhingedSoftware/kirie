@@ -54,17 +54,41 @@ pub fn run() {
     window.set_exclusive_zone(-1);
     window.set_namespace("linux-wallpaperengine-webview");
 
+    let wanted = arg("--output");
+    let at = arg("--x")
+        .and_then(|v| v.parse::<i32>().ok())
+        .zip(arg("--y").and_then(|v| v.parse::<i32>().ok()));
     if let Some(display) = gtk::gdk::Display::default()
         && display.n_monitors() > 1
     {
-        for i in 0..display.n_monitors() {
-            if let Some(mon) = display.monitor(i) {
+        let placed = at.and_then(|(x, y)| {
+            (0..display.n_monitors()).find_map(|i| {
+                let mon = display.monitor(i)?;
                 let g = mon.geometry();
-                if g.width() as u32 == width && g.height() as u32 == height {
-                    window.set_monitor(&mon);
-                    break;
-                }
-            }
+                (g.x() == x && g.y() == y).then_some(mon)
+            })
+        });
+        let named = wanted.as_deref().and_then(|name| {
+            (0..display.n_monitors()).find_map(|i| {
+                let mon = display.monitor(i)?;
+                let model = mon.model().map(|m| m.to_string()).unwrap_or_default();
+                model.eq_ignore_ascii_case(name).then_some(mon)
+            })
+        });
+        let picked = placed.or(named).or_else(|| {
+            (0..display.n_monitors()).find_map(|i| {
+                let mon = display.monitor(i)?;
+                let g = mon.geometry();
+                (g.width() as u32 == width && g.height() as u32 == height).then_some(mon)
+            })
+        });
+        if let Some(mon) = picked {
+            tracing::debug!(
+                model = mon.model().map(|m| m.to_string()).unwrap_or_default(),
+                wanted = wanted.as_deref().unwrap_or("<any>"),
+                "webview host picked a monitor"
+            );
+            window.set_monitor(&mon);
         }
     }
 

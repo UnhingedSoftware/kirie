@@ -82,7 +82,12 @@ fn host_command() -> Result<HostCommand, WebError> {
     }
 }
 
-fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin, Receiver<String>), WebError> {
+fn spawn_host(
+    url: &str,
+    size: WebSize,
+    output: Option<&str>,
+    at: Option<(i32, i32)>,
+) -> Result<(Child, ChildStdin, Receiver<String>), WebError> {
     let (host, mut child) = match host_command()? {
         HostCommand::SelfExec(exe) => {
             let mut cmd = Command::new(&exe);
@@ -94,6 +99,12 @@ fn spawn_host(url: &str, size: WebSize) -> Result<(Child, ChildStdin, Receiver<S
             (path, cmd)
         }
     };
+    if let Some(name) = output {
+        child.arg("--output").arg(name);
+    }
+    if let Some((x, y)) = at {
+        child.arg("--x").arg(x.to_string()).arg("--y").arg(y.to_string());
+    }
     let mut child = child
         .arg("--url")
         .arg(url)
@@ -167,6 +178,8 @@ pub struct ViewHostBackend {
     stdout: Receiver<String>,
     url: String,
     size: WebSize,
+    output: Option<String>,
+    at: Option<(i32, i32)>,
     restarts_left: u8,
     restart_after: Instant,
 }
@@ -202,14 +215,25 @@ impl ViewHostBackend {
 
 impl WebBackend for ViewHostBackend {
     fn new(url: &str, size: WebSize) -> Result<Self, WebError> {
+        Self::new_on_output(url, size, None, None)
+    }
+
+    fn new_on_output(
+        url: &str,
+        size: WebSize,
+        output: Option<&str>,
+        at: Option<(i32, i32)>,
+    ) -> Result<Self, WebError> {
         let size = size.clamped();
-        let (child, stdin, stdout) = spawn_host(url, size)?;
+        let (child, stdin, stdout) = spawn_host(url, size, output, at)?;
         Ok(Self {
             child,
             stdin,
             stdout,
             url: url.to_owned(),
             size,
+            output: output.map(str::to_owned),
+            at,
             restarts_left: 3,
             restart_after: Instant::now(),
         })
@@ -223,7 +247,7 @@ impl WebBackend for ViewHostBackend {
             self.restarts_left -= 1;
             self.restart_after = Instant::now() + Duration::from_secs(5);
             tracing::warn!(%status, left = self.restarts_left, "webview host died; restarting");
-            if let Ok((child, stdin, stdout)) = spawn_host(&self.url, self.size) {
+            if let Ok((child, stdin, stdout)) = spawn_host(&self.url, self.size, self.output.as_deref(), self.at) {
                 self.child = child;
                 self.stdin = stdin;
                 self.stdout = stdout;

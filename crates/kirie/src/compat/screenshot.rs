@@ -234,6 +234,7 @@ pub fn capture(
         format,
         output_name: "screenshot",
         size: (capture_size.width, capture_size.height),
+        position: (0, 0),
     };
 
     let mut renderer = build_offscreen_renderer(
@@ -396,7 +397,13 @@ pub(crate) fn build_offscreen_renderer(
                 width: render_target.size.0,
                 height: render_target.size.1,
             };
-            let mut backend = <LiveWebBackend as WebBackend>::new(&url, size)
+            let mut backend =
+                <LiveWebBackend as WebBackend>::new_on_output(
+                    &url,
+                    size,
+                    Some(render_target.output_name),
+                    Some(render_target.position),
+                )
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
 
             let props = super::common::web_props_json(dir, properties);

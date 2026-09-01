@@ -76,6 +76,19 @@ pub trait WebBackend: Send {
     where
         Self: Sized;
 
+    fn new_on_output(
+        url: &str,
+        size: WebSize,
+        output: Option<&str>,
+        at: Option<(i32, i32)>,
+    ) -> Result<Self, WebError>
+    where
+        Self: Sized,
+    {
+        let _ = (output, at);
+        Self::new(url, size)
+    }
+
     fn tick(&mut self, dt: f32);
 
     fn latest_frame(&self) -> Option<WebFrameRef<'_>>;

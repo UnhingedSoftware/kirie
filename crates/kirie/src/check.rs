@@ -379,6 +379,7 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
         format,
         output_name: "check",
         size: (1280, 720),
+        position: (0, 0),
     };
     let options = kirie_render::SceneOptions {
         render_scale: 1.0,

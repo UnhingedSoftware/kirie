@@ -83,6 +83,7 @@ fn bench() -> Result<()> {
         format,
         output_name: "bench",
         size: (size.width, size.height),
+        position: (0, 0),
     };
 
     let build_start = Instant::now();
@@ -237,6 +238,7 @@ pub fn soak(
         format,
         output_name: "soak",
         size: (size.width, size.height),
+        position: (0, 0),
     };
 
     let rss_start = rss_kb().unwrap_or(0);

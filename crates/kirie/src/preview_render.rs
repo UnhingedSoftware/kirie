@@ -126,6 +126,7 @@ fn view_target<'a>(gpu: &'a Headless, size: SurfaceSize) -> RenderTarget<'a> {
         format: FORMAT,
         output_name: "preview",
         size: (size.width, size.height),
+        position: (0, 0),
     }
 }
 

@@ -247,11 +247,12 @@ impl PlatformState {
                 let Some(format) = ctx.format else { return };
                 let name = ctx.name.clone();
                 let size = (ctx.physical_size.width, ctx.physical_size.height);
+                let position = ctx.position;
                 let device = gpu.device.clone();
                 let queue = gpu.queue.clone();
                 let tx = self.cmd_tx.clone();
                 std::thread::spawn(move || {
-                    let renderer = build(&device, &queue, format, &name, size);
+                    let renderer = build(&device, &queue, format, &name, size, position);
                     let _ = tx.send(RenderCommand::Install {
                         screen: name,
                         stash,
@@ -342,7 +343,8 @@ impl PlatformState {
                 );
                 let device = gpu.device.clone();
                 let queue = gpu.queue.clone();
-                let renderer = build_local(&device, &queue, format, &name, size);
+                let position = self.outputs[idx].position;
+                let renderer = build_local(&device, &queue, format, &name, size, position);
                 self.install_renderer(idx, renderer);
             }
             RenderCommand::SetFps(fps) => {
@@ -779,6 +781,7 @@ impl PlatformState {
                 format: texture.texture.format(),
                 output_name: &ctx.name,
                 size: (ctx.physical_size.width, ctx.physical_size.height),
+                position: ctx.position,
             })
         });
 

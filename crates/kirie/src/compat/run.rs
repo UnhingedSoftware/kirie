@@ -327,13 +327,14 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         let audio = ib_sources.audio_for(&spec);
         let properties = ib_properties.clone();
         let controls = ib_controls.clone();
-        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size| {
+        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size, position| {
             let rt = RenderTarget {
                 device,
                 queue,
                 format,
                 output_name: name,
                 size,
+                position,
             };
             build_for_spec(
                 &rt,
@@ -861,7 +862,7 @@ fn build_web(
         width: 1920,
         height: 1080,
     };
-    match <LiveWebBackend as WebBackend>::new(url, size) {
+    match <LiveWebBackend as WebBackend>::new_on_output(url, size, Some(target.output_name), Some(target.position)) {
         Ok(mut backend) => {
             if silent {
                 backend.set_muted(true);
@@ -1082,13 +1083,14 @@ impl BuildContext {
         }
         let ctx = self.clone();
         let spec = target.spec;
-        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size| {
+        let build: kirie_platform::BuildFn = Box::new(move |device, queue, format, name, size, position| {
             let rt = RenderTarget {
                 device,
                 queue,
                 format,
                 output_name: name,
                 size,
+                position,
             };
             build_for_spec(
                 &rt,
@@ -1124,13 +1126,14 @@ impl BuildContext {
         let silent = self.silent;
         let audio = Some(self.sources.audio());
         let media = Some(self.sources.media());
-        let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name, size| {
+        let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name, size, position| {
             let rt = RenderTarget {
                 device,
                 queue,
                 format,
                 output_name: name,
                 size,
+                position,
             };
             build_web(&rt, &url, &dir, silent, &properties, audio, media)
         });

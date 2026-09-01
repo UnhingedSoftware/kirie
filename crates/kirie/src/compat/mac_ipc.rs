@@ -629,13 +629,15 @@ fn build_with(
               queue: &wgpu::Queue,
               format: wgpu::TextureFormat,
               name: &str,
-              size: (u32, u32)| {
+              size: (u32, u32),
+              position: (i32, i32)| {
             let target = RenderTarget {
                 device,
                 queue,
                 format,
                 output_name: name,
                 size,
+                position,
             };
             match build_presented_renderer(&target, &wallpaper, scaling, clamp, &properties, sound) {
                 Ok(renderer) => renderer,
@@ -996,6 +998,7 @@ mod tests {
             FORMAT,
             "Desktop",
             (SIZE.width, SIZE.height),
+            (0, 0),
         );
         assert!(
             !renderer.is_placeholder(),
