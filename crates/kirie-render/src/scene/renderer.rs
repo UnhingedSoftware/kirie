@@ -1406,7 +1406,10 @@ fn build_object(
         };
         for (si, slot) in raw_pass.textures.iter().enumerate().take(8).skip(1) {
             let Some(name) = slot else { continue };
-            tex_resolution[si] = if name.starts_with("_rt_") || name.starts_with("_alias_") {
+            tex_resolution[si] = if name.starts_with("_rt_")
+                || name.starts_with("_alias_")
+                || named.contains_key(name.as_str())
+            {
                 img_res
             } else {
                 tex_res(&registry.get(name, source))

@@ -158,6 +158,7 @@ pub(super) fn build_model(
         let mut named: HashMap<&str, (&wgpu::TextureView, &wgpu::Sampler)> = HashMap::new();
         named.insert("_rt_FullFrameBuffer", (&scene_snapshot.view, fbo_sampler));
         named.insert("_rt_MipMappedFrameBuffer", (&scene_snapshot.view, fbo_sampler));
+        named.insert("previous", (&scene_snapshot.view, fbo_sampler));
         if built
             .fs_samplers
             .iter()
