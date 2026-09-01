@@ -74,6 +74,42 @@ impl AssetSource for CompositeSource<'_> {
     }
 }
 
+#[must_use]
+pub fn scene_entry(pkg: &OwnedPkg, scene_dir: &Path) -> Vec<u8> {
+    let named = std::fs::read(scene_dir.join("project.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .map(std::string::ToString::to_string)
+        })
+        .filter(|file| file.ends_with(".json"))
+        .map(std::string::String::into_bytes)
+        .filter(|name| pkg.read_name(name).is_ok());
+    named.unwrap_or_else(|| b"scene.json".to_vec())
+}
+
+#[must_use]
+pub fn scene_package(scene_dir: &Path) -> std::path::PathBuf {
+    let named = std::fs::read(scene_dir.join("project.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| {
+            value
+                .get("file")
+                .and_then(serde_json::Value::as_str)
+                .map(std::string::ToString::to_string)
+        })
+        .and_then(|file| {
+            let stem = Path::new(&file).file_stem()?.to_string_lossy().into_owned();
+            let path = scene_dir.join(format!("{stem}.pkg"));
+            path.is_file().then_some(path)
+        });
+    named.unwrap_or_else(|| scene_dir.join("scene.pkg"))
+}
+
 pub fn load_workshop_scene(
     target: &RenderTarget<'_>,
     scene_dir: &Path,
@@ -83,7 +119,7 @@ pub fn load_workshop_scene(
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer + Send>, SceneLoadError> {
     kirie_shader::translate::set_cache_dir(Some(scene_dir.join(".kirie-cache")));
-    let pkg_path = scene_dir.join("scene.pkg");
+    let pkg_path = scene_package(scene_dir);
     let pkg = match kirie_bake::map_readonly(&pkg_path) {
         Ok(map) => OwnedPkg::from_external(map),
         Err(_) => OwnedPkg::from_path(&pkg_path),
@@ -131,7 +167,7 @@ pub fn load_workshop_scene(
     } else {
         let scene = {
             let bytes = pkg
-                .read_name(b"scene.json")
+                .read_name(&scene_entry(&pkg, scene_dir))
                 .map_err(|e| SceneLoadError::SceneJson(e.to_string()))?;
             Scene::from_slice(bytes).map_err(|e| SceneLoadError::Parse(e.to_string()))?
         };
@@ -178,7 +214,7 @@ pub fn start_background_prebake(
     let assets_b = assets_a.clone();
 
     let source_fn: kirie_bake::SourceFn = std::sync::Arc::new(move |item: &Path| {
-        let pkg_path = item.join("scene.pkg");
+        let pkg_path = scene_package(item);
         let pkg = kirie_bake::map_readonly(&pkg_path).map_err(|e| kirie_bake::BakeError::Io {
             path: pkg_path.clone(),
             source: e,
@@ -192,7 +228,7 @@ pub fn start_background_prebake(
     });
 
     let content_fn: kirie_bake::ContentFn = std::sync::Arc::new(move |item: &Path, _src: &[u8]| {
-        let pkg_path = item.join("scene.pkg");
+        let pkg_path = scene_package(item);
         let map = kirie_bake::map_readonly(&pkg_path).map_err(|e| kirie_bake::BakeError::Io {
             path: pkg_path.clone(),
             source: e,
@@ -202,7 +238,7 @@ pub fn start_background_prebake(
         kirie_shader::translate::set_cache_dir(Some(item.join(".kirie-cache")));
         let scene = {
             let bytes = pkg
-                .read_name(b"scene.json")
+                .read_name(&scene_entry(&pkg, item))
                 .map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
             Scene::from_slice(bytes).map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?
         };
@@ -236,7 +272,7 @@ pub fn start_background_prebake(
     if let Ok(entries) = std::fs::read_dir(workshop_root) {
         for entry in entries.flatten() {
             let dir = entry.path();
-            if dir.join("scene.pkg").is_file() {
+            if scene_package(&dir).is_file() {
                 baker.enqueue(&dir);
                 queued += 1;
             }

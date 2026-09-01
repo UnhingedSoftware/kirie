@@ -499,7 +499,7 @@ mod tests {
         let assets = std::path::PathBuf::from(
             "/home/aiko/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
         );
-        let pkg = match kirie_formats::pkg::OwnedPkg::from_path(scene_dir.join("scene.pkg")) {
+        let pkg = match kirie_formats::pkg::OwnedPkg::from_path(crate::scene::load::scene_package(scene_dir)) {
             Ok(p) => p,
             Err(_) => {
                 eprintln!("skip: corpus absent");
@@ -526,7 +526,10 @@ mod tests {
             }
         }
 
-        let scene_bytes = pkg.read_name(b"scene.json").expect("scene.json").to_vec();
+        let scene_bytes = pkg
+            .read_name(&crate::scene::load::scene_entry(&pkg, scene_dir))
+            .expect("the scene entry")
+            .to_vec();
         let scene = Scene::from_slice(&scene_bytes).expect("parse scene");
         let model = SceneModel::resolve(scene, &PropertyBag::default());
         let (obj, mo) = model
