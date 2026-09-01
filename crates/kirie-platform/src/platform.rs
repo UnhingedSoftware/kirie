@@ -85,6 +85,21 @@ struct PlatformState {
     _toplevel_manager: Option<ZwlrForeignToplevelManagerV1>,
 }
 
+
+fn pointer_on_output(pointer: (f64, f64), origin: (i32, i32), logical: (u32, u32)) -> (f32, f32) {
+    const CENTRE: (f32, f32) = (0.5, 0.5);
+    let (lw, lh) = logical;
+    if lw == 0 || lh == 0 {
+        return CENTRE;
+    }
+    let nx = (pointer.0 - f64::from(origin.0)) / f64::from(lw);
+    let ny = (pointer.1 - f64::from(origin.1)) / f64::from(lh);
+    if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
+        return CENTRE;
+    }
+    (nx as f32, ny as f32)
+}
+
 impl WaylandPlatform {
     pub fn connect(make_renderer: RendererFactory) -> Result<Self, PlatformError> {
         Self::connect_with(make_renderer, crate::PresentOptions::default())
@@ -794,12 +809,8 @@ impl PlatformState {
         ctx.last_frame = Some(now);
 
         if let Some((gx, gy)) = self.pointer.get() {
-            let (lw, lh) = ctx.logical_size;
-            if lw > 0 && lh > 0 {
-                let nx = ((gx - f64::from(ctx.position.0)) / f64::from(lw)).clamp(0.0, 1.0);
-                let ny = ((gy - f64::from(ctx.position.1)) / f64::from(lh)).clamp(0.0, 1.0);
-                renderer.set_pointer(nx as f32, ny as f32);
-            }
+            let (nx, ny) = pointer_on_output((gx, gy), ctx.position, ctx.logical_size);
+            renderer.set_pointer(nx, ny);
         }
         renderer.set_pointer_buttons(self.buttons.left());
 
@@ -1216,3 +1227,29 @@ delegate_compositor!(PlatformState);
 delegate_output!(PlatformState);
 delegate_layer!(PlatformState);
 delegate_registry!(PlatformState);
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::pointer_on_output;
+
+    #[test]
+    fn a_pointer_on_the_output_maps_to_local_space() {
+        let (x, y) = pointer_on_output((7680.0 + 960.0, 540.0), (7680, 0), (1920, 1080));
+        assert!((x - 0.5).abs() < 1e-6, "{x}");
+        assert!((y - 0.5).abs() < 1e-6, "{y}");
+        let (x, y) = pointer_on_output((7680.0, 0.0), (7680, 0), (1920, 1080));
+        assert_eq!((x, y), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_pointer_on_another_output_stays_neutral() {
+        assert_eq!(pointer_on_output((100.0, 540.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
+        assert_eq!(pointer_on_output((7680.0 + 4000.0, 540.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
+        assert_eq!(pointer_on_output((7680.0 + 10.0, 4000.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
+    }
+
+    #[test]
+    fn an_unconfigured_output_stays_neutral() {
+        assert_eq!(pointer_on_output((10.0, 10.0), (0, 0), (0, 0)), (0.5, 0.5));
+    }
+}
