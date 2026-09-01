@@ -5,6 +5,42 @@ use ffmpeg_next as ffmpeg;
 use ffmpeg_next::format::Pixel;
 use ffmpeg_next::software::scaling;
 
+#[allow(unsafe_code)]
+fn tell_scaler_the_colours(
+    scaler: &mut scaling::Context,
+    space: ffmpeg::color::Space,
+    range: ffmpeg::color::Range,
+    height: u32,
+) {
+    use ffmpeg::color::{Range, Space};
+    use ffmpeg::ffi::{SWS_CS_ITU601, SWS_CS_ITU709, SWS_CS_SMPTE240M, sws_getCoefficients, sws_setColorspaceDetails};
+
+    let table = match space {
+        Space::BT709 => SWS_CS_ITU709,
+        Space::BT470BG | Space::SMPTE170M => SWS_CS_ITU601,
+        Space::SMPTE240M => SWS_CS_SMPTE240M,
+        _ if height >= 720 => SWS_CS_ITU709,
+        _ => SWS_CS_ITU601,
+    };
+    let full = i32::from(range == Range::JPEG);
+
+    // SAFETY: the scaler is live and the coefficient tables belong to ffmpeg.
+    unsafe {
+        let coefficients = sws_getCoefficients(table);
+        let target = sws_getCoefficients(SWS_CS_ITU709);
+        sws_setColorspaceDetails(
+            scaler.as_mut_ptr(),
+            coefficients,
+            full,
+            target,
+            1,
+            0,
+            1 << 16,
+            1 << 16,
+        );
+    }
+}
+
 use crate::error::VideoError;
 use crate::pacing::{LoopTimeline, Timed};
 
@@ -264,7 +300,7 @@ impl Decoder {
             }
         };
         if needs_scaler {
-            converter.scaler = Some(scaling::Context::get(
+            let mut fresh = scaling::Context::get(
                 decoded.format(),
                 width,
                 height,
@@ -272,7 +308,14 @@ impl Decoder {
                 width,
                 height,
                 scaling::Flags::FAST_BILINEAR,
-            )?);
+            )?;
+            tell_scaler_the_colours(
+                &mut fresh,
+                decoded.color_space(),
+                decoded.color_range(),
+                height,
+            );
+            converter.scaler = Some(fresh);
             converter.rgb = ffmpeg::frame::Video::empty();
             if width != self.info.width || height != self.info.height {
                 tracing::info!(
