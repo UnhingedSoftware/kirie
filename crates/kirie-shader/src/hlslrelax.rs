@@ -5,11 +5,16 @@ pub fn relax_hlsl_shapes(source: &str) -> String {
         return source.to_owned();
     }
     let widths = declared_widths(source);
+    let matrices = declared_matrices(source);
     if widths.is_empty() {
         return source.to_owned();
     }
     let mut out = String::with_capacity(source.len());
     for line in source.split_inclusive('\n') {
+        if touches_a_matrix(line, &matrices) {
+            out.push_str(line);
+            continue;
+        }
         match narrower_target(line).or_else(|| narrowest_constructor(line)) {
             Some(width) => out.push_str(&truncate_wider(line, width, &widths)),
             None => out.push_str(line),
@@ -26,6 +31,39 @@ fn narrowest_constructor(line: &str) -> Option<usize> {
         }
     }
     narrowest
+}
+
+fn declared_matrices(source: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for line in source.lines() {
+        let mut words = line.trim_start().split_whitespace();
+        while let Some(word) = words.next() {
+            if matches!(word, "mat2" | "mat3" | "mat4") {
+                if let Some(name) = words.next() {
+                    let name = name.trim_end_matches([';', ',', ')', '(']);
+                    if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                        out.insert(name.to_owned());
+                    }
+                }
+                break;
+            }
+        }
+    }
+    out
+}
+
+fn touches_a_matrix(line: &str, matrices: &std::collections::HashSet<String>) -> bool {
+    if line.contains("mat2") || line.contains("mat3") || line.contains("mat4") {
+        return true;
+    }
+    matrices.iter().any(|name| {
+        line.match_indices(name.as_str()).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let after = line[at + name.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+    })
 }
 
 fn width_of(kind: &str) -> Option<usize> {
@@ -156,6 +194,12 @@ mod tests {
     use super::*;
 
     const HEADER: &str = "varying vec4 v_TexCoord;\nvarying vec2 v_Offset;\n";
+
+    #[test]
+    fn a_line_with_a_matrix_is_left_alone() {
+        let source = "uniform mat4 g_Proj;\nvarying vec4 v_Point;\nout.xyz = (g_Proj * v_Point).xyw;\n";
+        assert_eq!(relax_hlsl_shapes(source), source);
+    }
 
     #[test]
     fn the_name_being_declared_is_never_swizzled() {
