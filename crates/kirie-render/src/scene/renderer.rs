@@ -434,6 +434,12 @@ impl SceneRenderer {
                         let id = object.base.id;
                         cross.insert(format!("_rt_imageLayerComposite_{id}_a"), fbo.view.clone());
                         cross.insert(format!("_rt_imageLayerComposite_{id}_b"), fbo.view.clone());
+                    } else {
+                        tracing::warn!(
+                            id = object.base.id,
+                            front = ?obj.final_front,
+                            "a layer others draw from has no composite of its own"
+                        );
                     }
                     donor_built.insert(oi, obj);
                 }
@@ -2935,6 +2941,17 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     ([ox, oy], [sx, sy], ang)
 }
 
+fn say_once(name: &str, shader: &str) {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SAID.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if let Ok(mut seen) = seen.lock()
+        && seen.insert(name.to_owned())
+    {
+        tracing::warn!(texture = name, shader, "no such render target; drawing white");
+    }
+}
+
 fn named_or_instance<'a>(
     named: &std::collections::HashMap<&str, (&'a wgpu::TextureView, &'a wgpu::Sampler)>,
     name: &str,
@@ -3234,7 +3251,12 @@ pub(super) fn build_bind_group(
                         registry.get_wrapping(&n, source)
                     })
                 }
-                _ => Slot::Tex(registry.white()),
+                other => {
+                    if let Some(name) = other {
+                        say_once(&name, &pass.shader);
+                    }
+                    Slot::Tex(registry.white())
+                }
             }
         })
         .collect();
