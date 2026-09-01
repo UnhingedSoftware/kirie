@@ -1299,6 +1299,9 @@ fn build_object(
                     Geometry::Scene | Geometry::SceneCopy => scene_quad,
                     _ => ndc_quad(1.0, 1.0),
                 };
+                if matches!(geometry, Geometry::SceneCopy) {
+                    take_uv_from_the_screen(&mut verts, scene_size);
+                }
                 if uv_crop != [1.0, 1.0] {
                     apply_uv_crop(&mut verts, uv_crop);
                 }
@@ -2930,6 +2933,17 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
         ang += l.angle_z;
     }
     ([ox, oy], [sx, sy], ang)
+}
+
+fn take_uv_from_the_screen(verts: &mut [[f32; 5]; 4], scene: (u32, u32)) {
+    let (sw, sh) = (scene.0 as f32, scene.1 as f32);
+    if sw <= 0.0 || sh <= 0.0 {
+        return;
+    }
+    for v in verts.iter_mut() {
+        v[3] = v[0] / sw + 0.5;
+        v[4] = 0.5 - v[1] / sh;
+    }
 }
 
 fn scene_space_quad(

@@ -330,6 +330,16 @@ pub(crate) fn build_presented_renderer(
 }
 
 #[cfg_attr(not(feature = "web-cef"), allow(unused_variables))]
+fn wallpaper_path(wallpaper: &Wallpaper) -> Option<&std::path::Path> {
+    match wallpaper {
+        Wallpaper::Scene { dir } => Some(dir),
+        Wallpaper::Video { media } => Some(media),
+        Wallpaper::Image { file } => Some(file),
+        Wallpaper::Web { dir, .. } => Some(dir),
+        Wallpaper::Unsupported { .. } | Wallpaper::Asset => None,
+    }
+}
+
 pub(crate) fn build_offscreen_renderer(
     render_target: &RenderTarget,
     wallpaper: &Wallpaper,
@@ -339,6 +349,8 @@ pub(crate) fn build_offscreen_renderer(
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer>> {
+    let saved = wallpaper_path(wallpaper).map(|bg| super::saved_props::with_saved(bg, properties));
+    let properties: &[(String, String)] = saved.as_deref().unwrap_or(properties);
     let renderer: Box<dyn Renderer> = match wallpaper {
         Wallpaper::Video { media } => {
             let options = VideoOptions {
