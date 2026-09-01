@@ -2935,6 +2935,21 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     ([ox, oy], [sx, sy], ang)
 }
 
+fn named_or_instance<'a>(
+    named: &std::collections::HashMap<&str, (&'a wgpu::TextureView, &'a wgpu::Sampler)>,
+    name: &str,
+) -> Option<(&'a wgpu::TextureView, &'a wgpu::Sampler)> {
+    if let Some(hit) = named.get(name) {
+        return Some(*hit);
+    }
+    named
+        .iter()
+        .filter(|(key, _)| key.starts_with("_rt_") && name.starts_with(**key) && name.len() > key.len())
+        .filter(|(key, _)| name.as_bytes().get(key.len()) == Some(&b'_'))
+        .max_by_key(|(key, _)| key.len())
+        .map(|(_, hit)| *hit)
+}
+
 fn take_uv_from_the_screen(verts: &mut [[f32; 5]; 4], scene: (u32, u32)) {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
     if sw <= 0.0 || sh <= 0.0 {
@@ -3202,8 +3217,8 @@ pub(super) fn build_bind_group(
                 .and_then(|i| pass.textures.get(i as usize))
                 .and_then(|s| s.clone())
                 .or_else(|| slot.default_texture.clone());
-            if let Some(hit) = name.as_deref().and_then(|n| named.get(n)) {
-                return Slot::Named(*hit);
+            if let Some(hit) = name.as_deref().and_then(|n| named_or_instance(named, n)) {
+                return Slot::Named(hit);
             }
             if name.as_deref().is_some_and(is_scene_rt) {
                 return Slot::Scene;
