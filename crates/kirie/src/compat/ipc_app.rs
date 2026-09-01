@@ -257,7 +257,16 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
         }
         Command::Bg { screen, path } => {
             state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            state.properties = std::mem::take(&mut state.staged);
+            let staged: Vec<(String, String)> = std::mem::take(&mut state.staged).into_iter().collect();
+            state.properties = super::saved_props::with_saved(&path, &staged).into_iter().collect();
+            if !staged.is_empty() {
+                let all: Vec<(String, String)> = state
+                    .properties
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                super::saved_props::write(&path, &all);
+            }
             let sc = state
                 .swap
                 .lock()
@@ -321,6 +330,9 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                 return CommandOutcome::Ok;
             }
             state.properties.insert(key.clone(), value.clone());
+            if let Some(showing) = state.screens.get(&screen).and_then(|e| e.bg.clone()) {
+                super::saved_props::remember(&showing, &key, &value);
+            }
             let sc = state
                 .swap
                 .lock()

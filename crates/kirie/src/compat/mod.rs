@@ -14,6 +14,7 @@ pub mod power;
 pub mod resolve;
 #[cfg(target_os = "linux")]
 pub mod run;
+pub mod saved_props;
 pub mod screenshot;
 pub mod signals;
 pub mod steam;

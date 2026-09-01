@@ -883,6 +883,17 @@ fn build_web(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn spec_background(spec: &RunSpec) -> Option<&Path> {
+    match spec {
+        RunSpec::Scene { dir, .. } => Some(dir),
+        RunSpec::Video { media, .. } => Some(media),
+        RunSpec::Image { file, .. } => Some(file),
+        #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+        RunSpec::Web { dir, .. } => Some(dir),
+        RunSpec::Skip => None,
+    }
+}
+
 fn build_for_spec(
     target: &RenderTarget<'_>,
     screen_key: String,
@@ -901,6 +912,8 @@ fn build_for_spec(
         }
     }
     let _trim = TrimOnExit;
+    let saved = spec_background(spec).map(|bg| super::saved_props::with_saved(bg, properties));
+    let properties: &[(String, String)] = saved.as_deref().unwrap_or(properties);
     match spec {
         RunSpec::Video { media, scaling } => {
             let options = VideoOptions {

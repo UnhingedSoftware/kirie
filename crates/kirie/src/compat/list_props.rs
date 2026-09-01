@@ -30,9 +30,10 @@ pub fn run(args: &CompatArgs) -> Result<(), String> {
 }
 
 pub fn properties_json_string(source: &Path, overrides: &BTreeMap<String, String>) -> String {
+    let shown = with_saved(source, overrides);
     match load_source(source) {
         Some(project) => {
-            let array: Vec<Value> = property_views(&project, overrides)
+            let array: Vec<Value> = property_views(&project, &shown)
                 .iter()
                 .map(PropView::to_json)
                 .collect();
@@ -40,6 +41,14 @@ pub fn properties_json_string(source: &Path, overrides: &BTreeMap<String, String
         }
         None => "[]".to_string(),
     }
+}
+
+fn with_saved(source: &Path, overrides: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut shown: BTreeMap<String, String> = super::saved_props::read(source).into_iter().collect();
+    for (key, value) in overrides {
+        shown.insert(key.clone(), value.clone());
+    }
+    shown
 }
 
 pub fn load_source(source: impl AsRef<Path>) -> Option<Project> {
