@@ -46,18 +46,29 @@ pub fn translate(
         Err(e) => e,
     };
 
-    let shaderc_diag = match try_shaderc(stage, filename, &flat).and_then(validate) {
-        Ok(module) => {
-            cache_store_module(&key, &module);
-            return Ok(TranslatedShader {
-                module,
-                reflection,
-                path: TranslatePath::Shaderc,
-                glsl: flat,
-            });
+    let mut mended = flat.clone();
+    let mut shaderc_diag = String::new();
+    for _ in 0..4 {
+        match try_shaderc(stage, filename, &mended).and_then(validate) {
+            Ok(module) => {
+                cache_store_module(&key, &module);
+                return Ok(TranslatedShader {
+                    module,
+                    reflection,
+                    path: TranslatePath::Shaderc,
+                    glsl: mended,
+                });
+            }
+            Err(e) => {
+                let Some(next) = crate::repair::repair_conversion(&mended, &e) else {
+                    shaderc_diag = e;
+                    break;
+                };
+                shaderc_diag = e;
+                mended = next;
+            }
         }
-        Err(e) => e,
-    };
+    }
 
     if let Some(dir) = std::env::var_os("KIRIE_SHADER_DUMP") {
         let stem = filename.replace(['/', '\\'], "_");

@@ -12,12 +12,13 @@ mod hlslrelax;
 pub mod matinverse;
 pub mod modernize;
 pub mod preprocess;
+mod repair;
 pub mod reflect;
 pub mod translate;
 
 pub use reflect::Reflection;
 
-pub const TRANSLATOR_VERSION: u32 = 8;
+pub const TRANSLATOR_VERSION: u32 = 9;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -254,7 +255,7 @@ void main() {\n\
     #[test]
     fn the_translator_version_changes_deliberately() {
         assert_eq!(
-            TRANSLATOR_VERSION, 8,
+            TRANSLATOR_VERSION, 9,
             "translation changed? bump this too — it invalidates every shader cache"
         );
     }
