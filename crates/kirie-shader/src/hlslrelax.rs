@@ -65,6 +65,16 @@ fn declared_widths(source: &str) -> HashMap<String, usize> {
     out
 }
 
+fn declared_name(line: &str) -> Option<String> {
+    let text = line.trim_start();
+    let mut words = text.split_whitespace();
+    let kind = words.next()?;
+    width_of(kind)?;
+    let name = words.next()?.trim_end_matches(['=', ';', ',']);
+    (!name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
+        .then(|| name.to_owned())
+}
+
 fn narrower_target(line: &str) -> Option<usize> {
     if let Some(width) = swizzled_target(line) {
         return Some(width);
@@ -111,6 +121,7 @@ fn truncate_wider(line: &str, width: usize, widths: &HashMap<String, usize>) -> 
         3 => ".xyz",
         _ => return line.to_owned(),
     };
+    let declared_here = declared_name(line);
     let bytes = line.as_bytes();
     let mut out = String::with_capacity(line.len());
     let mut at = 0;
@@ -126,7 +137,8 @@ fn truncate_wider(line: &str, width: usize, widths: &HashMap<String, usize>) -> 
         }
         let word = &line[start..at];
         let already_narrowed = line[at..].starts_with('.') || line[at..].starts_with('(');
-        let wider = widths.get(word).is_some_and(|w| *w > width);
+        let wider = widths.get(word).is_some_and(|w| *w > width)
+            && declared_here.as_deref() != Some(word);
         out.push_str(word);
         if wider && !already_narrowed {
             out.push_str(swizzle);
@@ -144,6 +156,13 @@ mod tests {
     use super::*;
 
     const HEADER: &str = "varying vec4 v_TexCoord;\nvarying vec2 v_Offset;\n";
+
+    #[test]
+    fn the_name_being_declared_is_never_swizzled() {
+        let source = "varying vec4 noise;\nvec2 noise = fract(vec2(1.0));\n";
+        let out = relax_hlsl_shapes(source);
+        assert!(!out.contains("noise.xy ="), "{out}");
+    }
 
     #[test]
     fn a_swizzled_target_narrows_a_local() {
