@@ -40,6 +40,51 @@ pub struct ImageContent {
 }
 
 impl ImageContent {
+    pub fn pad_pages_to_max(&mut self) {
+        let (Some(width), Some(height)) = (
+            self.pages.iter().map(|p| p.width).max(),
+            self.pages.iter().map(|p| p.height).max(),
+        ) else {
+            return;
+        };
+        let sizes: Vec<(u32, u32)> = self.pages.iter().map(|p| (p.width, p.height)).collect();
+        if sizes.iter().all(|size| *size == (width, height)) {
+            return;
+        }
+        for frame in &mut self.frames {
+            let Some((page_width, page_height)) = sizes.get(frame.page).copied() else {
+                continue;
+            };
+            let sx = page_width as f32 / width as f32;
+            let sy = page_height as f32 / height as f32;
+            frame.translation[0] *= sx;
+            frame.translation[1] *= sy;
+            frame.axes[0] *= sx;
+            frame.axes[1] *= sx;
+            frame.axes[2] *= sy;
+            frame.axes[3] *= sy;
+        }
+        let stride = width as usize * 4;
+        for page in &mut self.pages {
+            if (page.width, page.height) == (width, height) {
+                continue;
+            }
+            let mut padded = vec![0_u8; stride * height as usize];
+            let row_bytes = page.width as usize * 4;
+            for row in 0..page.height as usize {
+                let from = row * row_bytes;
+                let to = row * stride;
+                let Some(source) = page.pixels.get(from..from + row_bytes) else {
+                    break;
+                };
+                padded[to..to + row_bytes].copy_from_slice(source);
+            }
+            page.width = width;
+            page.height = height;
+            page.pixels = padded;
+        }
+    }
+
     pub fn from_path(path: &Path) -> Result<Self, RenderError> {
         let is_tex = path
             .extension()
@@ -524,5 +569,52 @@ mod tests {
             ImageContent::from_single_rgba8(0, 4, vec![]),
             Err(RenderError::InvalidDimensions { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod pad_tests {
+    use super::*;
+
+    fn page(width: u32, height: u32, fill: u8) -> ImagePage {
+        ImagePage {
+            width,
+            height,
+            pixels: vec![fill; (width as usize) * (height as usize) * 4],
+        }
+    }
+
+    #[test]
+    fn a_short_page_is_padded_and_its_frame_rescaled() {
+        let mut content = ImageContent {
+            pages: vec![page(4, 4, 1), page(4, 2, 2)],
+            frames: vec![
+                FramePlacement { page: 0, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] },
+                FramePlacement { page: 1, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] },
+            ],
+            sampler: SamplerSpec { nearest: false, clamp_uvs: false },
+            content_width: 4,
+            content_height: 4,
+        };
+        content.pad_pages_to_max();
+        assert_eq!((content.pages[1].width, content.pages[1].height), (4, 4));
+        assert_eq!(content.pages[1].pixels.len(), 4 * 4 * 4);
+        assert!((content.frames[0].translation[1] - 0.5).abs() < 1e-6);
+        assert!((content.frames[1].translation[1] - 0.25).abs() < 1e-6);
+        assert!((content.frames[1].axes[3] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn uniform_pages_are_left_alone() {
+        let mut content = ImageContent {
+            pages: vec![page(4, 4, 1), page(4, 4, 2)],
+            frames: vec![FramePlacement { page: 1, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] }],
+            sampler: SamplerSpec { nearest: false, clamp_uvs: false },
+            content_width: 4,
+            content_height: 4,
+        };
+        let before = content.frames[0];
+        content.pad_pages_to_max();
+        assert_eq!(content.frames[0], before);
     }
 }

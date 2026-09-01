@@ -458,7 +458,7 @@ impl TextureRegistry {
     fn load(&self, name: &str, source: &dyn AssetSource) -> Option<std::sync::Arc<GpuTexture>> {
         let path = format!("materials/{name}.tex");
         let bytes = source.load(&path)?;
-        let content = match ImageContent::from_tex_bytes(&bytes) {
+        let mut content = match ImageContent::from_tex_bytes(&bytes) {
             Ok(c) => c,
             Err(RenderError::VideoTex) => return self.load_video_first_frame(name, &bytes),
             Err(e) => {
@@ -466,6 +466,7 @@ impl TextureRegistry {
                 return None;
             }
         };
+        content.pad_pages_to_max();
         let page = content.pages.first()?;
         let uv_crop = match content.frames.as_slice() {
             [only] => [only.axes[0], only.axes[3]],
@@ -635,14 +636,7 @@ fn atlas_animates(content: &ImageContent) -> Option<bool> {
     if content.frames.len() <= 1 || !content.schedule().is_animated() {
         return None;
     }
-    let multi_page = content.frames.iter().any(|f| f.page != 0);
-    if multi_page {
-        let (w0, h0) = (content.pages[0].width, content.pages[0].height);
-        if content.pages.iter().any(|p| (p.width, p.height) != (w0, h0)) {
-            return None;
-        }
-    }
-    Some(multi_page)
+    Some(content.frames.iter().any(|f| f.page != 0))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -777,7 +771,11 @@ mod tests {
         assert_eq!(atlas_animates(&single), None);
         let zero = content(vec![(4, 4)], vec![(0, 0.0), (0, 0.0)]);
         assert_eq!(atlas_animates(&zero), None);
+    }
+
+    #[test]
+    fn pages_of_different_sizes_still_animate() {
         let mismatched = content(vec![(4, 4), (8, 8)], vec![(0, 0.1), (1, 0.1)]);
-        assert_eq!(atlas_animates(&mismatched), None);
+        assert_eq!(atlas_animates(&mismatched), Some(true));
     }
 }
