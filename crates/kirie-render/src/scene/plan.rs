@@ -194,7 +194,7 @@ pub fn plan_image(
     }
     let passthrough = image.model.as_ref().is_some_and(|m| m.passthrough);
     let effects = effect_passes(image);
-    if passthrough && effects.is_empty() {
+    if passthrough && effects.is_empty() && !offscreen_donor {
         return ImagePlan::default();
     }
     let mut passes = base_passes(image);

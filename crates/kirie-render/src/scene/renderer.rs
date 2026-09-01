@@ -1052,6 +1052,14 @@ fn build_object(
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .map(|v| kirie_scene::material::Material::from_value(&v));
     let chain = plan::plan_image(image, true, offscreen_donor, color_blend.as_ref());
+    if std::env::var_os("KIRIE_SLOT_DEBUG").is_some() {
+        tracing::info!(
+            id = object.base.id,
+            passes = chain.passes.len(),
+            shaders = ?chain.passes.iter().map(|p| p.pass.shader.clone()).collect::<Vec<_>>(),
+            "plan"
+        );
+    }
     if chain.passes.is_empty() {
         return None;
     }
@@ -3237,6 +3245,10 @@ pub(super) fn build_bind_group(
                 .and_then(|i| pass.textures.get(i as usize))
                 .and_then(|s| s.clone())
                 .or_else(|| slot.default_texture.clone());
+            let loud = std::env::var_os("KIRIE_SLOT_DEBUG").is_some();
+            if loud {
+                tracing::info!(shader = %pass.shader, slot = ?slot.slot, sampler = %slot.name, name = ?name, "slot");
+            }
             if let Some(hit) = name.as_deref().and_then(|n| named_or_instance(named, n)) {
                 return Slot::Named(hit);
             }
