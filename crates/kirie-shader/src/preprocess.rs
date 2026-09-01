@@ -32,6 +32,18 @@ pub const PRELUDE_MACROS: &str = r#"precision highp float;
 #define GLSL 1
 "#;
 
+const SCREEN_POSITION: &str = "v_ScreenPos = gl_Position.xyw;";
+
+fn screen_position_to_texture_space(source: &str) -> String {
+    if !source.contains(SCREEN_POSITION) {
+        return source.to_owned();
+    }
+    source.replace(
+        SCREEN_POSITION,
+        "v_ScreenPos = gl_Position.xyw; v_ScreenPos.y = -v_ScreenPos.y;",
+    )
+}
+
 const LIGHTING_V1_STUB: &str = "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir, vec3 specularTint, vec3 baseReflectance, float roughness, float metallic) { return vec3(0.0); }\n";
 
 #[derive(Debug, Clone)]
@@ -274,6 +286,7 @@ pub fn preprocess(
     }
 
     let expanded = booleanize_combo_conditions(&expanded, &active);
+    let expanded = screen_position_to_texture_space(&expanded);
     let body = expanded.replace("gl_FragColor", "out_FragColor");
     let body = if unused_io.is_empty() {
         body
@@ -644,6 +657,18 @@ mod tests {
             .collect();
         preprocess(stage, "unit", src, &MapResolver(map), &ShaderInputs::default()).unwrap()
     }
+    #[test]
+    fn a_screen_position_is_flipped_into_texture_space() {
+        let out = screen_position_to_texture_space("	v_ScreenPos = gl_Position.xyw;\n");
+        assert!(out.contains("v_ScreenPos.y = -v_ScreenPos.y;"), "{out}");
+    }
+
+    #[test]
+    fn a_shader_without_a_screen_position_is_left_alone() {
+        let source = "void main() { gl_Position = vec4(0.0); }";
+        assert_eq!(screen_position_to_texture_space(source), source);
+    }
+
 
     #[test]
     fn include_is_inlined_before_main() {
