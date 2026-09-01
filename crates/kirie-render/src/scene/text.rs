@@ -104,6 +104,49 @@ fn family_hint(font: &str) -> Option<String> {
     (!stem.is_empty()).then(|| stem.to_owned())
 }
 
+#[must_use]
+pub fn without_markup(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find('<') {
+        let (before, from) = rest.split_at(at);
+        out.push_str(before);
+        let Some(end) = from.find('>') else {
+            out.push_str(from);
+            return unescape(&out);
+        };
+        let tag = &from[1..end];
+        let name = tag
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '=' || c == '/')
+            .next()
+            .unwrap_or("");
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric()) {
+            out.push('<');
+            rest = &from[1..];
+            continue;
+        }
+        if name.eq_ignore_ascii_case("br") {
+            out.push('\n');
+        }
+        rest = &from[end + 1..];
+    }
+    out.push_str(rest);
+    unescape(&out)
+}
+
+fn unescape(text: &str) -> String {
+    if !text.contains('&') {
+        return text.to_owned();
+    }
+    text.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+}
+
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn rasterize(
@@ -117,6 +160,11 @@ pub fn rasterize(
     padding: f32,
     bundled_family: Option<&str>,
 ) -> Option<TextRaster> {
+    if text.is_empty() {
+        return None;
+    }
+    let plain = without_markup(text);
+    let text = plain.as_str();
     if text.is_empty() {
         return None;
     }
@@ -287,6 +335,25 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, raster: &TextRaster) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn markup_is_read_as_text_not_shown() {
+        assert_eq!(without_markup("<u>Notepad Settings:</u>"), "Notepad Settings:");
+        assert_eq!(without_markup("a<br>b"), "a\nb");
+        assert_eq!(without_markup("<sup style=\"x\">hi</sup>"), "hi");
+    }
+
+    #[test]
+    fn ordinary_angle_brackets_survive() {
+        assert_eq!(without_markup("a < b > c"), "a < b > c");
+        assert_eq!(without_markup("5 <3"), "5 <3");
+    }
+
+    #[test]
+    fn entities_come_back_as_characters() {
+        assert_eq!(without_markup("Tom &amp; Jerry"), "Tom & Jerry");
+        assert_eq!(without_markup("&lt;tag&gt;"), "<tag>");
+    }
 
     #[test]
     fn multiline_line_count_matches_newlines() {
