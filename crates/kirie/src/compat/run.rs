@@ -401,7 +401,15 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let power_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut power_handle: Option<std::thread::JoinHandle<()>> = None;
 
-    let exit = match Platform::connect_with(kirie_platform::Backend::from_env(), present, factory) {
+    let asked_window = args.window.filter(|_| window_mode).map(|w| kirie_platform::X11Mode::Window {
+        width: u32::try_from(w.w.max(1)).unwrap_or(1),
+        height: u32::try_from(w.h.max(1)).unwrap_or(1),
+    });
+    let connected = match asked_window {
+        Some(mode) => Platform::connect_x11(mode, factory),
+        None => Platform::connect_with(kirie_platform::Backend::from_env(), present, factory),
+    };
+    let exit = match connected {
         Ok(mut platform) => {
             if platform.output_count() > 0 && platform.surface_count() == 0 {
                 crate::compat::autopin::recover_from_bad_pin();
