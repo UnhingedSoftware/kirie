@@ -129,6 +129,33 @@ fn handle_register(state: &mut AppState, reg: Register) {
     }
 }
 
+fn remember_background(state: &mut AppState, screen: &str, path: PathBuf) {
+    if screen == "*" {
+        if state.screens.is_empty() {
+            state.screens.insert(
+                screen.to_owned(),
+                ScreenEntry {
+                    bg: Some(path),
+                    control: None,
+                },
+            );
+            return;
+        }
+        for entry in state.screens.values_mut() {
+            entry.bg = Some(path.clone());
+        }
+        return;
+    }
+    state
+        .screens
+        .entry(screen.to_owned())
+        .or_insert_with(|| ScreenEntry {
+            bg: None,
+            control: None,
+        })
+        .bg = Some(path);
+}
+
 fn handle_event(state: &mut AppState, event: IpcEvent) {
     match event {
         IpcEvent::Status { reply } => {
@@ -252,14 +279,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     key: path.to_string_lossy().into_owned(),
                     build,
                 });
-                state
-                    .screens
-                    .entry(screen)
-                    .or_insert_with(|| ScreenEntry {
-                        bg: None,
-                        control: None,
-                    })
-                    .bg = Some(path);
+                remember_background(state, &screen, path);
                 return CommandOutcome::Ok;
             }
             #[cfg(any(feature = "web-cef", feature = "web-webview"))]
@@ -268,14 +288,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     screen: screen.clone(),
                     build_local,
                 });
-                state
-                    .screens
-                    .entry(screen)
-                    .or_insert_with(|| ScreenEntry {
-                        bg: None,
-                        control: None,
-                    })
-                    .bg = Some(path);
+                remember_background(state, &screen, path);
                 return CommandOutcome::Ok;
             }
             CommandOutcome::Refused(why_not(&path))
