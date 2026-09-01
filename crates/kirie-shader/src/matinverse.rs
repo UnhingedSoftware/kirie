@@ -53,7 +53,7 @@ const MAT4: &str = "mat4 inverse(mat4 m) {
 
 #[must_use]
 pub fn shadow_builtin_inverse(source: &str) -> String {
-    if !mentions_inverse(source) {
+    if !mentions_inverse(source) || has_builtin_inverse(source) {
         return source.to_owned();
     }
 
@@ -73,6 +73,19 @@ pub fn shadow_builtin_inverse(source: &str) -> String {
     out.push_str(&injected);
     out.push_str(&source[at..]);
     out
+}
+
+fn has_builtin_inverse(source: &str) -> bool {
+    source.lines().take(4).any(|line| {
+        let text = line.trim_start();
+        let Some(rest) = text.strip_prefix("#version") else {
+            return false;
+        };
+        rest.split_whitespace()
+            .next()
+            .and_then(|n| n.parse::<u32>().ok())
+            .is_some_and(|version| version >= 140)
+    })
 }
 
 fn mentions_inverse(source: &str) -> bool {
@@ -107,7 +120,22 @@ fn defines_inverse(source: &str, dimension: usize) -> bool {
     })
 }
 
+fn after_the_precision_block(source: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut last = None;
+    for line in source.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_start().starts_with("precision ") {
+            last = Some(at);
+        }
+    }
+    last
+}
+
 fn after_leading_directives(source: &str) -> usize {
+    if let Some(at) = after_the_precision_block(source) {
+        return at;
+    }
     let mut at = 0;
     for line in source.split_inclusive('\n') {
         let text = line.trim_start();
@@ -131,6 +159,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_modern_shader_keeps_the_builtin_inverse() {
+        let source = "#version 450\nprecision highp float;\nvoid main() { mat3 m = inverse(mat3(1.0)); }\n";
+        assert_eq!(shadow_builtin_inverse(source), source);
+    }
+
+    #[test]
+    fn an_old_shader_still_gets_the_shim() {
+        let source = "#version 120\nvoid main() { mat3 m = inverse(mat3(1.0)); }\n";
+        assert!(shadow_builtin_inverse(source).contains("mat3 inverse(mat3 m)"));
+    }
+
+    #[test]
     fn a_shader_without_inverse_is_left_alone() {
         let source = "#version 450\nvoid main() { gl_Position = vec4(0.0); }\n";
         assert_eq!(shadow_builtin_inverse(source), source);
@@ -138,7 +178,7 @@ mod tests {
 
     #[test]
     fn a_call_gets_every_overload_the_shader_lacks() {
-        let source = "#version 450\nvoid main() { mat4 m = inverse(mvp); }\n";
+        let source = "#version 120\nvoid main() { mat4 m = inverse(mvp); }\n";
         let out = shadow_builtin_inverse(source);
         assert!(out.contains("mat2 inverse(mat2 m)"));
         assert!(out.contains("mat3 inverse(mat3 m)"));
@@ -147,7 +187,7 @@ mod tests {
 
     #[test]
     fn an_overload_the_shader_defines_is_not_duplicated() {
-        let source = "#version 450\nmat3 inverse(mat3 m) { return m; }\nvoid main() { inverse(x); }\n";
+        let source = "#version 120\nmat3 inverse(mat3 m) { return m; }\nvoid main() { inverse(x); }\n";
         let out = shadow_builtin_inverse(source);
         assert_eq!(out.matches("mat3 inverse(mat3").count(), 1);
         assert!(out.contains("mat4 inverse(mat4 m)"));
@@ -155,7 +195,7 @@ mod tests {
 
     #[test]
     fn the_definitions_land_after_the_leading_directives() {
-        let source = "#version 450\n#extension GL_ARB_x : enable\nvoid main() { inverse(m); }\n";
+        let source = "#version 120\n#extension GL_ARB_x : enable\nvoid main() { inverse(m); }\n";
         let out = shadow_builtin_inverse(source);
         let extension = out.find("#extension").unwrap_or(usize::MAX);
         let injected = out.find("mat2 inverse").unwrap_or(0);

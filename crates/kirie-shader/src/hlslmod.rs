@@ -194,7 +194,22 @@ fn is_word(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+fn after_the_precision_block(source: &str) -> Option<usize> {
+    let mut at = 0;
+    let mut last = None;
+    for line in source.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_start().starts_with("precision ") {
+            last = Some(at);
+        }
+    }
+    last
+}
+
 fn after_leading_directives(source: &str) -> usize {
+    if let Some(at) = after_the_precision_block(source) {
+        return at;
+    }
     let mut at = 0;
     for line in source.split_inclusive('\n') {
         let text = line.trim_start();

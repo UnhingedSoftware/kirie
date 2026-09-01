@@ -5,6 +5,7 @@ use crate::reflect::{Parameter, Reflection, SamplerSlot, VertexAttribute};
 use crate::{IncludeResolver, ShaderInputs, Stage, TranslateError};
 
 pub const PRELUDE_MACROS: &str = r#"precision highp float;
+precision highp int;
 #define mul(x, y) ((y) * (x))
 #define max(x, y) max (y, x)
 #define lerp mix

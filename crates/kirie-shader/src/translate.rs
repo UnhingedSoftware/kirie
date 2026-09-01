@@ -51,6 +51,14 @@ pub fn translate(
         Err(e) => e,
     };
 
+    if let Some(dir) = std::env::var_os("KIRIE_SHADER_DUMP") {
+        let stem = filename.replace(['/', '\\'], "_");
+        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.glsl"));
+        if std::fs::create_dir_all(&dir).is_ok() {
+            let _ = std::fs::write(&at, &flat);
+        }
+    }
+
     Err(TranslateError::Compile {
         file: filename.to_string(),
         naga: naga_diag,
