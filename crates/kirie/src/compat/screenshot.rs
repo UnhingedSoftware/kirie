@@ -241,7 +241,6 @@ pub fn capture(
         wallpaper,
         scaling,
         clamp,
-        capture_size,
         audio,
         properties,
     )?;
@@ -308,7 +307,6 @@ pub(crate) fn build_presented_renderer(
     wallpaper: &Wallpaper,
     scaling: ScalingMode,
     clamp: ClampMode,
-    size: SurfaceSize,
     properties: &[(String, String)],
     sound: Sound,
 ) -> Result<Box<dyn Renderer>> {
@@ -326,7 +324,7 @@ pub(crate) fn build_presented_renderer(
             .with_context(|| format!("opening video {}", media.display()))?;
         return Ok(Box::new(kirie_video::VideoRenderer::new(render_target, player)));
     }
-    build_offscreen_renderer(render_target, wallpaper, scaling, clamp, size, None, properties)
+    build_offscreen_renderer(render_target, wallpaper, scaling, clamp, None, properties)
 }
 
 #[cfg_attr(not(feature = "web-cef"), allow(unused_variables))]
@@ -345,7 +343,6 @@ pub(crate) fn build_offscreen_renderer(
     wallpaper: &Wallpaper,
     scaling: ScalingMode,
     clamp: ClampMode,
-    capture_size: SurfaceSize,
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer>> {
@@ -396,8 +393,8 @@ pub(crate) fn build_offscreen_renderer(
             use kirie_web::{WebBackend, WebRenderer, WebSize};
             let url = super::resolve::web_entry_url(dir, file);
             let size = WebSize {
-                width: capture_size.width,
-                height: capture_size.height,
+                width: render_target.size.0,
+                height: render_target.size.1,
             };
             let mut backend = <LiveWebBackend as WebBackend>::new(&url, size)
                 .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;

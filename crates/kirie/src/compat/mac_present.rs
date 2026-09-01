@@ -154,7 +154,7 @@ fn factory(wallpaper: Wallpaper, args: &CompatArgs) -> RendererFactory {
             width: target.size.0,
             height: target.size.1,
         };
-        match build_presented_renderer(target, &wallpaper, scaling, clamp, size, &properties, sound) {
+        match build_presented_renderer(target, &wallpaper, scaling, clamp, &properties, sound) {
             Ok(renderer) => renderer,
             Err(err) => {
                 tracing::error!(output = target.output_name, "cannot build the wallpaper: {err:#}");

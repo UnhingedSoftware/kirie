@@ -26,7 +26,7 @@ impl Engine {
         let wallpaper = classify(background)?;
         let size = size_for(&wallpaper, background, edge);
         let (target, view) = make_target(&gpu.device, size);
-        let renderer = build(&gpu, &view_target(&gpu, size), &wallpaper, size, &[])?;
+        let renderer = build(&gpu, &view_target(&gpu, size), &wallpaper, &[])?;
         settle();
 
         Ok(Self {
@@ -61,7 +61,6 @@ impl Engine {
             &self.gpu,
             &view_target(&self.gpu, size),
             &wallpaper,
-            size,
             properties,
         )?;
         settle();
@@ -147,7 +146,6 @@ fn build(
     gpu: &Headless,
     target: &RenderTarget<'_>,
     wallpaper: &Wallpaper,
-    size: SurfaceSize,
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer>> {
     let _ = gpu;
@@ -156,7 +154,6 @@ fn build(
         wallpaper,
         ScalingMode::default(),
         ClampMode::default(),
-        size,
         None,
         properties,
     )

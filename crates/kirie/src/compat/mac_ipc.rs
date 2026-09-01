@@ -637,11 +637,7 @@ fn build_with(
                 output_name: name,
                 size,
             };
-            let surface = SurfaceSize {
-                width: size.0,
-                height: size.1,
-            };
-            match build_presented_renderer(&target, &wallpaper, scaling, clamp, surface, &properties, sound) {
+            match build_presented_renderer(&target, &wallpaper, scaling, clamp, &properties, sound) {
                 Ok(renderer) => renderer,
                 Err(err) => {
                     tracing::error!(screen = name, "cannot build the wallpaper: {err:#}");

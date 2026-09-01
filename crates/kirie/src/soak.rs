@@ -87,7 +87,7 @@ fn bench() -> Result<()> {
 
     let build_start = Instant::now();
     let mut renderer =
-        build_offscreen_renderer(&rt, &wp, ScalingMode::Default, ClampMode::Clamp, size, None, &[])?;
+        build_offscreen_renderer(&rt, &wp, ScalingMode::Default, ClampMode::Clamp, None, &[])?;
     let build_ms = build_start.elapsed().as_secs_f64() * 1e3;
 
     for _ in 0..15 {
@@ -255,7 +255,6 @@ pub fn soak(
             wp,
             ScalingMode::Default,
             ClampMode::Clamp,
-            size,
             None,
             &[],
         ) {
