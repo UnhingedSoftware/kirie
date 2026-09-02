@@ -310,6 +310,25 @@ pub fn build_text_pipeline(device: &wgpu::Device) -> TextPipeline {
     TextPipeline { pipeline, bgl }
 }
 
+
+fn authored_box_fit(
+    size: [f32; 2],
+    scale_x: [f32; 2],
+    scale_y: [f32; 2],
+    drawn: [f32; 2],
+) -> Option<f32> {
+    let wide = size[0] * scale_x[0] * scale_x[1];
+    let tall = size[1] * scale_y[0] * scale_y[1];
+    if size[0] <= 0.0 || size[1] <= 0.0 || wide <= 0.0 || tall <= 0.0 {
+        return None;
+    }
+    if drawn[0] <= 0.0 || drawn[1] <= 0.0 {
+        return None;
+    }
+    let fit = (wide / drawn[0]).min(tall / drawn[1]);
+    (fit.is_finite() && fit > 0.0).then_some(fit)
+}
+
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn build_text(
@@ -368,8 +387,17 @@ pub fn build_text(
         scale_x * world_scale[0] / raster_scale,
         scale_y * world_scale[1] / raster_scale,
     ];
-    let sx = raster.width as f32 * quad_scale[0];
-    let sy = raster.height as f32 * quad_scale[1];
+    let mut sx = raster.width as f32 * quad_scale[0];
+    let mut sy = raster.height as f32 * quad_scale[1];
+    if let Some(fit) = authored_box_fit(
+        tobj.size,
+        [scale_x, world_scale[0]],
+        [scale_y, world_scale[1]],
+        [sx, sy],
+    ) {
+        sx *= fit;
+        sy *= fit;
+    }
     let quad = scene_space_quad(world_origin[0], world_origin[1], sx, sy, scene_size);
     let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
 
@@ -558,5 +586,31 @@ mod tests {
         let q = scene_space_quad(0.0, 0.0, 100.0, 40.0, (1920, 1080));
         assert!(q[0][1] > q[1][1], "TL (v=0) above BL (v=1)");
         assert!(q[2][1] > q[3][1], "TR (v=0) above BR (v=1)");
+    }
+
+    #[test]
+    fn text_is_contained_by_its_authored_box() {
+        let fit = authored_box_fit([350.0, 113.0], [1.0, 1.0], [1.0, 1.0], [700.0, 113.0])
+            .expect("a fit");
+        assert!((fit - 0.5).abs() < 1e-6, "width must bound the fit: {fit}");
+    }
+
+    #[test]
+    fn a_short_raster_never_overflows_its_box_width() {
+        let fit = authored_box_fit([164.0, 177.0], [0.5, 1.0], [0.5, 1.0], [40.0, 40.0])
+            .expect("a fit");
+        assert!(40.0 * fit <= 164.0 * 0.5 + 1e-3, "width {}", 40.0 * fit);
+        assert!(40.0 * fit <= 177.0 * 0.5 + 1e-3, "height {}", 40.0 * fit);
+    }
+
+    #[test]
+    fn text_without_an_authored_box_is_left_alone() {
+        assert_eq!(authored_box_fit([0.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]), None);
+        assert_eq!(authored_box_fit([100.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]), None);
+    }
+
+    #[test]
+    fn a_degenerate_raster_is_left_alone() {
+        assert_eq!(authored_box_fit([100.0, 50.0], [1.0, 1.0], [1.0, 1.0], [0.0, 0.0]), None);
     }
 }
