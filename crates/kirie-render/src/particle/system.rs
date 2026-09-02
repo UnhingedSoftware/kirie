@@ -71,11 +71,7 @@ impl ParticleSim {
             .map(|(i, s)| Operator::compile(s, 0x9E37_79B9u32.wrapping_mul(i as u32 + 1), &mut rng))
             .collect();
 
-        let mut control_points: Vec<Vec3> = system
-            .controlpoints
-            .iter()
-            .map(|cp| super::math::flip_y(cp.offset))
-            .collect();
+        let mut control_points: Vec<Vec3> = system.controlpoints.iter().map(|cp| super::math::flip_y(cp.offset)).collect();
         if control_points.is_empty() {
             control_points.push([0.0, 0.0, 0.0]);
         }

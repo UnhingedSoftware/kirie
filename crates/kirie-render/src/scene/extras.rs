@@ -223,7 +223,7 @@ fn particle_material(
 fn particle_model_matrix(object: &Object, pobj: &ParticleObject, scene_size: (u32, u32)) -> Mat4 {
     let (sw, sh) = (scene_size.0 as f32, scene_size.1 as f32);
     let o = object.base.origin.value;
-    let t = matrix::translation([o[0] - sw / 2.0, sh / 2.0 - o[1], o[2]]);
+    let t = matrix::translation([o[0] - sw / 2.0, o[1] - sh / 2.0, o[2]]);
     let a = pobj.angles.value;
     let rz = matrix::rotation_z(-a[2]);
     let ry = matrix::rotation_y(a[1]);
@@ -531,6 +531,17 @@ mod tests {
         assert_eq!(q[1], [-960.0, -465.0, 0.0]);
         assert_eq!(q[2], [-760.0, -415.0, 0.0]);
         assert_eq!(q[3], [-760.0, -465.0, 0.0]);
+    }
+
+    #[test]
+    fn particles_share_the_image_y_up_convention() {
+        let scene = (1920u32, 1080u32);
+        let oy = 900.0_f32;
+        let quad = scene_space_quad(0.0, oy, 10.0, 10.0, scene);
+        let quad_cy = (quad[0][1] + quad[1][1]) / 2.0;
+        let particle_cy = oy - scene.1 as f32 / 2.0;
+        assert_eq!(quad_cy, particle_cy);
+        assert!(particle_cy > 0.0, "a high origin sits above the centre");
     }
 
     #[test]
