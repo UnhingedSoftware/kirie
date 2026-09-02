@@ -26,7 +26,11 @@ pub fn translate(
     let flat = crate::hlslrelax::relax_hlsl_shapes(&flat);
     if let Some(dir) = std::env::var_os("KIRIE_SHADER_DUMP_ALL") {
         let stem = filename.replace(['/', '\\'], "_");
-        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.glsl"));
+        let mut mark = 0_u64;
+        for byte in flat.bytes() {
+            mark = mark.wrapping_mul(0x100_0000_01b3) ^ u64::from(byte);
+        }
+        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.{mark:016x}.glsl"));
         if std::fs::create_dir_all(&dir).is_ok() {
             let _ = std::fs::write(&at, &flat);
         }
@@ -48,7 +52,7 @@ pub fn translate(
 
     let mut mended = flat.clone();
     let mut shaderc_diag = String::new();
-    for _ in 0..4 {
+    for _ in 0..64 {
         match try_shaderc(stage, filename, &mended).and_then(validate) {
             Ok(module) => {
                 cache_store_module(&key, &module);
@@ -72,9 +76,13 @@ pub fn translate(
 
     if let Some(dir) = std::env::var_os("KIRIE_SHADER_DUMP") {
         let stem = filename.replace(['/', '\\'], "_");
-        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.glsl"));
+        let mut mark = 0_u64;
+        for byte in mended.bytes() {
+            mark = mark.wrapping_mul(0x100_0000_01b3) ^ u64::from(byte);
+        }
+        let at = std::path::Path::new(&dir).join(format!("{stem}.{stage:?}.{mark:016x}.glsl"));
         if std::fs::create_dir_all(&dir).is_ok() {
-            let _ = std::fs::write(&at, &flat);
+            let _ = std::fs::write(&at, &mended);
         }
     }
 

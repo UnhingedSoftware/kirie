@@ -25,7 +25,7 @@ pub fn modernize(_stage: Stage, assembled: Assembled) -> (String, Reflection) {
         mut reflection,
     } = assembled;
 
-    let renamed = rename_reserved(&source);
+    let renamed = drop_stray_endifs(&rename_reserved(&source));
 
     let defines = collect_defines(&renamed);
 
@@ -149,6 +149,24 @@ fn collect_defines(src: &str) -> std::collections::HashMap<String, Option<i64>> 
         }
         let body = rest[name_end..].split("//").next().unwrap_or("").trim();
         out.insert(name.to_string(), body.parse::<i64>().ok());
+    }
+    out
+}
+
+fn drop_stray_endifs(source: &str) -> String {
+    let mut depth = 0_i32;
+    let mut out = String::with_capacity(source.len());
+    for line in source.split_inclusive('\n') {
+        let directive = line.trim_start();
+        if directive.starts_with("#if") {
+            depth += 1;
+        } else if directive.starts_with("#endif") {
+            if depth == 0 {
+                continue;
+            }
+            depth -= 1;
+        }
+        out.push_str(line);
     }
     out
 }
