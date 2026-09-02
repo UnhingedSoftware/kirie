@@ -402,10 +402,13 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
     let power_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut power_handle: Option<std::thread::JoinHandle<()>> = None;
 
-    let asked_window = args.window.filter(|_| window_mode).map(|w| kirie_platform::X11Mode::Window {
-        width: u32::try_from(w.w.max(1)).unwrap_or(1),
-        height: u32::try_from(w.h.max(1)).unwrap_or(1),
-    });
+    let asked_window = args
+        .window
+        .filter(|_| window_mode)
+        .map(|w| kirie_platform::X11Mode::Window {
+            width: u32::try_from(w.w.max(1)).unwrap_or(1),
+            height: u32::try_from(w.h.max(1)).unwrap_or(1),
+        });
     let connected = match asked_window {
         Some(mode) => Platform::connect_x11(mode, factory),
         None => Platform::connect_with(kirie_platform::Backend::from_env(), present, factory),
@@ -862,7 +865,12 @@ fn build_web(
         width: 1920,
         height: 1080,
     };
-    match <LiveWebBackend as WebBackend>::new_on_output(url, size, Some(target.output_name), Some(target.position)) {
+    match <LiveWebBackend as WebBackend>::new_on_output(
+        url,
+        size,
+        Some(target.output_name),
+        Some(target.position),
+    ) {
         Ok(mut backend) => {
             if silent {
                 backend.set_muted(true);
@@ -1126,17 +1134,18 @@ impl BuildContext {
         let silent = self.silent;
         let audio = Some(self.sources.audio());
         let media = Some(self.sources.media());
-        let build: kirie_platform::BuildLocalFn = Box::new(move |device, queue, format, name, size, position| {
-            let rt = RenderTarget {
-                device,
-                queue,
-                format,
-                output_name: name,
-                size,
-                position,
-            };
-            build_web(&rt, &url, &dir, silent, &properties, audio, media)
-        });
+        let build: kirie_platform::BuildLocalFn =
+            Box::new(move |device, queue, format, name, size, position| {
+                let rt = RenderTarget {
+                    device,
+                    queue,
+                    format,
+                    output_name: name,
+                    size,
+                    position,
+                };
+                build_web(&rt, &url, &dir, silent, &properties, audio, media)
+            });
         Some(build)
     }
 }

@@ -500,7 +500,8 @@ mod tests {
         let assets = std::path::PathBuf::from(
             "/home/aiko/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
         );
-        let pkg = match kirie_formats::pkg::OwnedPkg::from_path(crate::scene::load::scene_package(scene_dir)) {
+        let pkg = match kirie_formats::pkg::OwnedPkg::from_path(crate::scene::load::scene_package(scene_dir))
+        {
             Ok(p) => p,
             Err(_) => {
                 eprintln!("skip: corpus absent");

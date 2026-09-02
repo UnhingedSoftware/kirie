@@ -237,14 +237,8 @@ pub fn capture(
         position: (0, 0),
     };
 
-    let mut renderer = build_offscreen_renderer(
-        &render_target,
-        wallpaper,
-        scaling,
-        clamp,
-        audio,
-        properties,
-    )?;
+    let mut renderer =
+        build_offscreen_renderer(&render_target, wallpaper, scaling, clamp, audio, properties)?;
 
     let deadline = Instant::now() + capture_budget(wallpaper);
     let dt = 1.0 / 60.0;
@@ -397,14 +391,13 @@ pub(crate) fn build_offscreen_renderer(
                 width: render_target.size.0,
                 height: render_target.size.1,
             };
-            let mut backend =
-                <LiveWebBackend as WebBackend>::new_on_output(
-                    &url,
-                    size,
-                    Some(render_target.output_name),
-                    Some(render_target.position),
-                )
-                .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
+            let mut backend = <LiveWebBackend as WebBackend>::new_on_output(
+                &url,
+                size,
+                Some(render_target.output_name),
+                Some(render_target.position),
+            )
+            .map_err(|e| anyhow!("starting web backend for {url}: {e}"))?;
 
             let props = super::common::web_props_json(dir, properties);
             if props != "{}" {

@@ -13,7 +13,9 @@ fn tell_scaler_the_colours(
     height: u32,
 ) {
     use ffmpeg::color::{Range, Space};
-    use ffmpeg::ffi::{SWS_CS_ITU601, SWS_CS_ITU709, SWS_CS_SMPTE240M, sws_getCoefficients, sws_setColorspaceDetails};
+    use ffmpeg::ffi::{
+        SWS_CS_ITU601, SWS_CS_ITU709, SWS_CS_SMPTE240M, sws_getCoefficients, sws_setColorspaceDetails,
+    };
 
     let table = match space {
         Space::BT709 => SWS_CS_ITU709,
@@ -309,12 +311,7 @@ impl Decoder {
                 height,
                 scaling::Flags::FAST_BILINEAR,
             )?;
-            tell_scaler_the_colours(
-                &mut fresh,
-                decoded.color_space(),
-                decoded.color_range(),
-                height,
-            );
+            tell_scaler_the_colours(&mut fresh, decoded.color_space(), decoded.color_range(), height);
             converter.scaler = Some(fresh);
             converter.rgb = ffmpeg::frame::Video::empty();
             if width != self.info.width || height != self.info.height {

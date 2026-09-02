@@ -589,10 +589,23 @@ mod pad_tests {
         let mut content = ImageContent {
             pages: vec![page(4, 4, 1), page(4, 2, 2)],
             frames: vec![
-                FramePlacement { page: 0, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] },
-                FramePlacement { page: 1, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] },
+                FramePlacement {
+                    page: 0,
+                    duration: 0.1,
+                    translation: [0.5, 0.5],
+                    axes: [1.0, 0.0, 0.0, 1.0],
+                },
+                FramePlacement {
+                    page: 1,
+                    duration: 0.1,
+                    translation: [0.5, 0.5],
+                    axes: [1.0, 0.0, 0.0, 1.0],
+                },
             ],
-            sampler: SamplerSpec { nearest: false, clamp_uvs: false },
+            sampler: SamplerSpec {
+                nearest: false,
+                clamp_uvs: false,
+            },
             content_width: 4,
             content_height: 4,
         };
@@ -608,8 +621,16 @@ mod pad_tests {
     fn uniform_pages_are_left_alone() {
         let mut content = ImageContent {
             pages: vec![page(4, 4, 1), page(4, 4, 2)],
-            frames: vec![FramePlacement { page: 1, duration: 0.1, translation: [0.5, 0.5], axes: [1.0, 0.0, 0.0, 1.0] }],
-            sampler: SamplerSpec { nearest: false, clamp_uvs: false },
+            frames: vec![FramePlacement {
+                page: 1,
+                duration: 0.1,
+                translation: [0.5, 0.5],
+                axes: [1.0, 0.0, 0.0, 1.0],
+            }],
+            sampler: SamplerSpec {
+                nearest: false,
+                clamp_uvs: false,
+            },
             content_width: 4,
             content_height: 4,
         };

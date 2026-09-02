@@ -856,8 +856,7 @@ mod tests {
         let Value::Object(map) = raw else {
             panic!("the fixture is an object");
         };
-        let parsed =
-            parse_property_entry(Value::Object(map)).expect("a missing value is not fatal");
+        let parsed = parse_property_entry(Value::Object(map)).expect("a missing value is not fatal");
         match parsed {
             PropertyEntry::Property(p) => {
                 assert_eq!(p.kind, PropertyKind::TextInput { value: String::new() });

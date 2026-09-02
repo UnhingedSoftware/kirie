@@ -57,12 +57,7 @@ impl Engine {
         }
 
         self.renderer = build_placeholder();
-        self.renderer = build(
-            &self.gpu,
-            &view_target(&self.gpu, size),
-            &wallpaper,
-            properties,
-        )?;
+        self.renderer = build(&self.gpu, &view_target(&self.gpu, size), &wallpaper, properties)?;
         settle();
         Ok(())
     }

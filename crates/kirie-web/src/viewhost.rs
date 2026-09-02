@@ -247,7 +247,9 @@ impl WebBackend for ViewHostBackend {
             self.restarts_left -= 1;
             self.restart_after = Instant::now() + Duration::from_secs(5);
             tracing::warn!(%status, left = self.restarts_left, "webview host died; restarting");
-            if let Ok((child, stdin, stdout)) = spawn_host(&self.url, self.size, self.output.as_deref(), self.at) {
+            if let Ok((child, stdin, stdout)) =
+                spawn_host(&self.url, self.size, self.output.as_deref(), self.at)
+            {
                 self.child = child;
                 self.stdin = stdin;
                 self.stdout = stdout;

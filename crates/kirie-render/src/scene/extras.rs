@@ -310,13 +310,7 @@ pub fn build_text_pipeline(device: &wgpu::Device) -> TextPipeline {
     TextPipeline { pipeline, bgl }
 }
 
-
-fn authored_box_fit(
-    size: [f32; 2],
-    scale_x: [f32; 2],
-    scale_y: [f32; 2],
-    drawn: [f32; 2],
-) -> Option<f32> {
+fn authored_box_fit(size: [f32; 2], scale_x: [f32; 2], scale_y: [f32; 2], drawn: [f32; 2]) -> Option<f32> {
     let wide = size[0] * scale_x[0] * scale_x[1];
     let tall = size[1] * scale_y[0] * scale_y[1];
     if size[0] <= 0.0 || size[1] <= 0.0 || wide <= 0.0 || tall <= 0.0 {
@@ -590,27 +584,34 @@ mod tests {
 
     #[test]
     fn text_is_contained_by_its_authored_box() {
-        let fit = authored_box_fit([350.0, 113.0], [1.0, 1.0], [1.0, 1.0], [700.0, 113.0])
-            .expect("a fit");
+        let fit = authored_box_fit([350.0, 113.0], [1.0, 1.0], [1.0, 1.0], [700.0, 113.0]).expect("a fit");
         assert!((fit - 0.5).abs() < 1e-6, "width must bound the fit: {fit}");
     }
 
     #[test]
     fn a_short_raster_never_overflows_its_box_width() {
-        let fit = authored_box_fit([164.0, 177.0], [0.5, 1.0], [0.5, 1.0], [40.0, 40.0])
-            .expect("a fit");
+        let fit = authored_box_fit([164.0, 177.0], [0.5, 1.0], [0.5, 1.0], [40.0, 40.0]).expect("a fit");
         assert!(40.0 * fit <= 164.0 * 0.5 + 1e-3, "width {}", 40.0 * fit);
         assert!(40.0 * fit <= 177.0 * 0.5 + 1e-3, "height {}", 40.0 * fit);
     }
 
     #[test]
     fn text_without_an_authored_box_is_left_alone() {
-        assert_eq!(authored_box_fit([0.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]), None);
-        assert_eq!(authored_box_fit([100.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]), None);
+        assert_eq!(
+            authored_box_fit([0.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]),
+            None
+        );
+        assert_eq!(
+            authored_box_fit([100.0, 0.0], [1.0, 1.0], [1.0, 1.0], [43.0, 43.0]),
+            None
+        );
     }
 
     #[test]
     fn a_degenerate_raster_is_left_alone() {
-        assert_eq!(authored_box_fit([100.0, 50.0], [1.0, 1.0], [1.0, 1.0], [0.0, 0.0]), None);
+        assert_eq!(
+            authored_box_fit([100.0, 50.0], [1.0, 1.0], [1.0, 1.0], [0.0, 0.0]),
+            None
+        );
     }
 }

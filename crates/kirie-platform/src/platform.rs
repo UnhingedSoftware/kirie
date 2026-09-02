@@ -85,7 +85,6 @@ struct PlatformState {
     _toplevel_manager: Option<ZwlrForeignToplevelManagerV1>,
 }
 
-
 fn pointer_on_output(pointer: (f64, f64), origin: (i32, i32), logical: (u32, u32)) -> (f32, f32) {
     const CENTRE: (f32, f32) = (0.5, 0.5);
     let (lw, lh) = logical;
@@ -1243,9 +1242,18 @@ mod pointer_tests {
 
     #[test]
     fn a_pointer_on_another_output_stays_neutral() {
-        assert_eq!(pointer_on_output((100.0, 540.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
-        assert_eq!(pointer_on_output((7680.0 + 4000.0, 540.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
-        assert_eq!(pointer_on_output((7680.0 + 10.0, 4000.0), (7680, 0), (1920, 1080)), (0.5, 0.5));
+        assert_eq!(
+            pointer_on_output((100.0, 540.0), (7680, 0), (1920, 1080)),
+            (0.5, 0.5)
+        );
+        assert_eq!(
+            pointer_on_output((7680.0 + 4000.0, 540.0), (7680, 0), (1920, 1080)),
+            (0.5, 0.5)
+        );
+        assert_eq!(
+            pointer_on_output((7680.0 + 10.0, 4000.0), (7680, 0), (1920, 1080)),
+            (0.5, 0.5)
+        );
     }
 
     #[test]

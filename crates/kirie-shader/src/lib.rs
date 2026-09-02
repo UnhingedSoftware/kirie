@@ -12,8 +12,8 @@ mod hlslrelax;
 pub mod matinverse;
 pub mod modernize;
 pub mod preprocess;
-mod repair;
 pub mod reflect;
+mod repair;
 pub mod translate;
 
 pub use reflect::Reflection;

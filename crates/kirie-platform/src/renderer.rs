@@ -100,13 +100,13 @@ pub type InitialBuildFn = Box<dyn FnMut(&str) -> Option<BuildFn>>;
 
 pub type BuildLocalFn = Box<
     dyn FnOnce(
-        &wgpu::Device,
-        &wgpu::Queue,
-        wgpu::TextureFormat,
-        &str,
-        (u32, u32),
-        (i32, i32),
-    ) -> Box<dyn Renderer>
+            &wgpu::Device,
+            &wgpu::Queue,
+            wgpu::TextureFormat,
+            &str,
+            (u32, u32),
+            (i32, i32),
+        ) -> Box<dyn Renderer>
         + Send,
 >;
 
