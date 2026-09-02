@@ -911,6 +911,7 @@ fn spec_background(spec: &RunSpec) -> Option<&Path> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_for_spec(
     target: &RenderTarget<'_>,
     screen_key: String,
