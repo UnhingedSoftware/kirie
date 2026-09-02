@@ -8,6 +8,9 @@ use crate::scene::{Camera, General, Scene};
 use crate::user::{ConstantValues, UserRef, UserSetting};
 
 pub fn resolve_us<T: Resolvable + Clone>(us: &mut UserSetting<T>, bag: &PropertyBag) {
+    if let Some(sb) = &mut us.script {
+        resolve_script_properties(&mut sb.properties, bag);
+    }
     match &us.user {
         Some(UserRef::Name(name)) => {
             if let Some(v) = bag.get(name) {
@@ -104,9 +107,6 @@ impl Object {
                 resolve_us(&mut t.color, bag);
                 resolve_us(&mut t.alpha, bag);
                 resolve_us(&mut t.visible, bag);
-                if let Some(sb) = &mut t.text.script {
-                    resolve_script_properties(&mut sb.properties, bag);
-                }
             }
             ObjectKind::Sound(_)
             | ObjectKind::Model(_)
@@ -313,5 +313,53 @@ fn load_particle_assets(p: &mut ParticleObject, source: &dyn AssetSource, proble
         && let Some(value) = load_json(source, &mat_path, problems)
     {
         p.system.resolved_material = Some(Material::from_value(&value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::property::PropertyValue;
+    use crate::user::ScriptBinding;
+
+    fn scripted_scale() -> UserSetting<f32> {
+        let mut properties = serde_json::Map::new();
+        properties.insert(
+            "minvalue".to_owned(),
+            serde_json::json!({ "user": "newproperty44", "value": 0.8 }),
+        );
+        properties.insert(
+            "maxvalue".to_owned(),
+            serde_json::json!({ "user": "newproperty46", "value": 1.2 }),
+        );
+        UserSetting {
+            value: 1.0,
+            user: None,
+            script: Some(ScriptBinding {
+                source: "export function update() {}".to_owned(),
+                properties,
+            }),
+        }
+    }
+
+    #[test]
+    fn a_scripted_setting_takes_its_user_bound_properties() {
+        let mut bag = PropertyBag::default();
+        bag.insert("newproperty44", PropertyValue::Number(1.0));
+        bag.insert("newproperty46", PropertyValue::Number(1.0));
+        let mut us = scripted_scale();
+        resolve_us(&mut us, &bag);
+        let props = &us.script.as_ref().expect("a script").properties;
+        assert_eq!(props["minvalue"], serde_json::json!(1.0));
+        assert_eq!(props["maxvalue"], serde_json::json!(1.0));
+    }
+
+    #[test]
+    fn a_scripted_setting_keeps_its_fallback_when_unbound() {
+        let bag = PropertyBag::default();
+        let mut us = scripted_scale();
+        resolve_us(&mut us, &bag);
+        let props = &us.script.as_ref().expect("a script").properties;
+        assert_eq!(props["minvalue"], serde_json::json!(0.8));
     }
 }
