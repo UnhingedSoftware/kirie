@@ -25,6 +25,7 @@ pub enum PropTarget {
     Volume,
     PointSize,
     Font,
+    MaxWidth,
 }
 
 impl PropTarget {
@@ -43,6 +44,7 @@ impl PropTarget {
             "volume" => Self::Volume,
             "pointsize" => Self::PointSize,
             "font" => Self::Font,
+            "maxwidth" => Self::MaxWidth,
             _ => return None,
         })
     }
@@ -197,6 +199,12 @@ impl ScriptHost {
                     });
                     collect(&mut pending, id, "visible", &txt.visible.script, || {
                         ScriptValue::Bool(txt.visible.value)
+                    });
+                    collect(&mut pending, id, "pointsize", &txt.pointsize.script, || {
+                        ScriptValue::Float(f64::from(txt.pointsize.value))
+                    });
+                    collect(&mut pending, id, "maxwidth", &txt.maxwidth.script, || {
+                        ScriptValue::Float(f64::from(txt.maxwidth.value))
                     });
                     collect_effect_constants(&mut pending, id, &txt.effects);
                 }
@@ -675,7 +683,8 @@ impl ScriptHost {
                     layer.font = Some(s.clone());
                 }
             }
-            PropTarget::Brightness | PropTarget::ParticleRate | PropTarget::Volume => {}
+            PropTarget::Brightness | PropTarget::ParticleRate | PropTarget::Volume | PropTarget::MaxWidth => {
+            }
         }
     }
 }

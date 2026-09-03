@@ -2132,7 +2132,7 @@ impl Renderer for SceneRenderer {
             for u in &updates {
                 if !matches!(
                     u.target,
-                    PropTarget::Text | PropTarget::PointSize | PropTarget::Font
+                    PropTarget::Text | PropTarget::PointSize | PropTarget::Font | PropTarget::MaxWidth
                 ) {
                     continue;
                 }
@@ -2156,6 +2156,11 @@ impl Renderer for SceneRenderer {
                                         self.rebuild.as_ref().map_or(&no_assets, |c| &c.source);
                                     tg.set_font(&self.device, &self.queue, tp, fonts, source, s);
                                 }
+                                (PropTarget::MaxWidth, v) => {
+                                    if let Some(w) = as_f32(v) {
+                                        tg.set_max_width(&self.device, &self.queue, tp, fonts, w);
+                                    }
+                                }
                                 _ => {}
                             }
                         }
@@ -2177,6 +2182,9 @@ impl Renderer for SceneRenderer {
                                 }
                                 (PropTarget::Font, kirie_script::ScriptValue::Str(s)) => {
                                     text.rebuild.set_font(s, fonts, &ctx.source)
+                                }
+                                (PropTarget::MaxWidth, v) => {
+                                    as_f32(v).is_some_and(|w| text.rebuild.set_max_width(w))
                                 }
                                 _ => false,
                             };
@@ -3155,7 +3163,8 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                 | PropTarget::ParticleRate
                 | PropTarget::Volume
                 | PropTarget::PointSize
-                | PropTarget::Font => {}
+                | PropTarget::Font
+                | PropTarget::MaxWidth => {}
             }
         }
     }
@@ -3210,7 +3219,8 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
             | PropTarget::ParallaxDepth
             | PropTarget::Volume
             | PropTarget::PointSize
-            | PropTarget::Font => {}
+            | PropTarget::Font
+            | PropTarget::MaxWidth => {}
         }
     }
 }
