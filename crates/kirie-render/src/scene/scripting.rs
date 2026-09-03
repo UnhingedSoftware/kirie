@@ -21,6 +21,7 @@ pub enum PropTarget {
     Scale,
     Angles,
     ParallaxDepth,
+    Volume,
 }
 
 impl PropTarget {
@@ -36,6 +37,7 @@ impl PropTarget {
             "scale" => Self::Scale,
             "angles" => Self::Angles,
             "parallaxDepth" => Self::ParallaxDepth,
+            "volume" => Self::Volume,
             _ => return None,
         })
     }
@@ -161,24 +163,7 @@ impl ScriptHost {
                     collect(&mut pending, id, "visible", &img.visible.script, || {
                         ScriptValue::Bool(img.visible.value)
                     });
-                    for (ei, eff) in img.effects.iter().enumerate() {
-                        for ov in &eff.passes {
-                            for (cname, us) in &ov.constantshadervalues {
-                                let Some(b) = &us.script else { continue };
-                                pending.push(Pending {
-                                    prop: ScriptedProp {
-                                        key: format!("fx{ei}{cname}_{id}"),
-                                        object_id: id,
-                                        target: PropTarget::Color,
-                                        effect_constant: Some((ei, cname.clone())),
-                                    },
-                                    source: b.source.clone(),
-                                    initial: dynamic_to_script(&us.value),
-                                    script_props: flatten_props(&b.properties),
-                                });
-                            }
-                        }
-                    }
+                    collect_effect_constants(&mut pending, id, &img.effects);
                 }
                 ObjectKind::Particle(pobj) => {
                     collect(
@@ -201,6 +186,12 @@ impl ScriptHost {
                     });
                     collect(&mut pending, id, "visible", &txt.visible.script, || {
                         ScriptValue::Bool(txt.visible.value)
+                    });
+                    collect_effect_constants(&mut pending, id, &txt.effects);
+                }
+                ObjectKind::Sound(snd) => {
+                    collect(&mut pending, id, "volume", &snd.volume.script, || {
+                        ScriptValue::Float(f64::from(snd.volume.value))
                     });
                 }
                 _ => {}
@@ -626,7 +617,7 @@ impl ScriptHost {
                     layer.parallax_depth = Some(v[0]);
                 }
             }
-            PropTarget::Brightness | PropTarget::ParticleRate => {}
+            PropTarget::Brightness | PropTarget::ParticleRate | PropTarget::Volume => {}
         }
     }
 }
@@ -797,6 +788,27 @@ struct Pending {
     source: String,
     initial: ScriptValue,
     script_props: Value,
+}
+
+fn collect_effect_constants(pending: &mut Vec<Pending>, id: i64, effects: &[kirie_scene::object::Effect]) {
+    for (ei, eff) in effects.iter().enumerate() {
+        for ov in &eff.passes {
+            for (cname, us) in &ov.constantshadervalues {
+                let Some(b) = &us.script else { continue };
+                pending.push(Pending {
+                    prop: ScriptedProp {
+                        key: format!("fx{ei}{cname}_{id}"),
+                        object_id: id,
+                        target: PropTarget::Color,
+                        effect_constant: Some((ei, cname.clone())),
+                    },
+                    source: b.source.clone(),
+                    initial: dynamic_to_script(&us.value),
+                    script_props: flatten_props(&b.properties),
+                });
+            }
+        }
+    }
 }
 
 fn collect(

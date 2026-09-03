@@ -2610,7 +2610,8 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                 | PropTarget::Origin
                 | PropTarget::Scale
                 | PropTarget::Angles
-                | PropTarget::ParticleRate => {}
+                | PropTarget::ParticleRate
+                | PropTarget::Volume => {}
             }
         }
     }
@@ -2662,7 +2663,8 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
             PropTarget::Brightness
             | PropTarget::Text
             | PropTarget::ParticleRate
-            | PropTarget::ParallaxDepth => {}
+            | PropTarget::ParallaxDepth
+            | PropTarget::Volume => {}
         }
     }
 }
