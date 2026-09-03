@@ -58,9 +58,8 @@ impl TextRebuild {
             &self.current,
             &self.font,
             self.raster_px,
-            [self.box_w, 0.0],
+            self.box_w,
             &self.halign,
-            &self.valign,
             self.padding,
             self.bundled.as_deref(),
         )
@@ -144,11 +143,7 @@ pub fn text_layout(
         TextRasterScale::Engine => 1.0,
     };
     let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
-    let box_scale = if tobj.limitwidth {
-        raster_scale / world_scale[0]
-    } else {
-        0.0
-    };
+    let box_scale = if tobj.limitwidth { raster_scale } else { 0.0 };
     let rebuild = TextRebuild {
         current: tobj.text.value.clone(),
         font: tobj.font.clone(),

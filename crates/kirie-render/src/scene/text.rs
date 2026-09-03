@@ -127,10 +127,10 @@ fn h_align(s: &str) -> Align {
     }
 }
 
-fn v_align_factor(s: &str) -> f32 {
+fn h_align_factor(s: &str) -> f32 {
     match s {
-        "top" => 0.0,
-        "bottom" => 1.0,
+        "left" => 0.0,
+        "right" => 1.0,
         _ => 0.5,
     }
 }
@@ -200,9 +200,8 @@ pub fn rasterize(
     text: &str,
     font: &str,
     point_size: f32,
-    box_size: [f32; 2],
+    max_width: f32,
     horizontalalign: &str,
-    verticalalign: &str,
     padding: f32,
     bundled_family: Option<&str>,
 ) -> Option<TextRaster> {
@@ -217,9 +216,7 @@ pub fn rasterize(
     let point_size = point_size.max(1.0);
     let pad = padding.max(0.0);
 
-    let has_box_w = box_size[0] > 1.0;
-    let has_box_h = box_size[1] > 1.0;
-    let inner_w = has_box_w.then(|| (box_size[0] - 2.0 * pad).max(1.0));
+    let wrap_w = (max_width > 1.0).then_some(max_width);
 
     let hint = family_hint(font);
     let family_name = bundled_family.or(hint.as_deref());
@@ -232,8 +229,8 @@ pub fn rasterize(
         let fs = &mut fonts.font_system;
         let mut buffer = Buffer::new(fs, Metrics::new(point_size, point_size));
         buffer.set_hinting(Hinting::Enabled);
-        buffer.set_size(inner_w, None);
-        buffer.set_wrap(if has_box_w { Wrap::WordOrGlyph } else { Wrap::None });
+        buffer.set_size(wrap_w, None);
+        buffer.set_wrap(if wrap_w.is_some() { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(h_align(horizontalalign)));
         buffer.shape_until_scroll(fs, false);
         buffer
@@ -259,28 +256,13 @@ pub fn rasterize(
         return None;
     }
 
-    let out_w = ceil_clamp(if has_box_w {
-        box_size[0]
-    } else {
-        text_w + 2.0 * pad
-    });
-    let box_h = ceil_clamp(if has_box_h {
-        box_size[1]
-    } else {
-        text_h + 2.0 * pad
-    });
-    let out_h = (box_h + HEADROOM).min(MAX_EDGE);
+    let out_w = ceil_clamp(text_w + 2.0 * pad);
+    let out_h = (ceil_clamp(text_h + 2.0 * pad) + HEADROOM).min(MAX_EDGE);
 
-    let inset = if has_box_w { 0.0 } else { pad };
-    let x_off = pad.round() as i32;
-    let avail = box_h as f32 - 2.0 * pad - text_h;
-    let box_top = HEADROOM as f32
-        + pad
-        + if avail > 0.0 {
-            avail * v_align_factor(verticalalign)
-        } else {
-            0.0
-        };
+    let inset = pad;
+    let slack = wrap_w.map_or(0.0, |w| (w - text_w).max(0.0));
+    let x_off = (pad - slack * h_align_factor(horizontalalign)).round() as i32;
+    let box_top = HEADROOM as f32 + pad;
     let y_off = (box_top + line.ascent).trunc() as i32 - first_baseline.trunc() as i32;
     let anchor_box = [box_top, (line_count as f32 - 1.0) * line.height + line.ascent];
 
@@ -431,9 +413,8 @@ mod tests {
             "line one\nline two\nline three",
             "",
             32.0,
-            [0.0, 0.0],
+            0.0,
             "left",
-            "top",
             0.0,
             None,
         )
@@ -450,15 +431,14 @@ mod tests {
             return;
         }
         let one =
-            rasterize(&mut fonts, "Hg", "", 40.0, [0.0, 0.0], "left", "top", 0.0, None).expect("rasterizes");
+            rasterize(&mut fonts, "Hg", "", 40.0, 0.0, "left", 0.0, None).expect("rasterizes");
         let two = rasterize(
             &mut fonts,
             "Hg\nHg",
             "",
             40.0,
-            [0.0, 0.0],
+            0.0,
             "left",
-            "top",
             0.0,
             None,
         )
@@ -478,8 +458,7 @@ mod tests {
             "Hello",
             "",
             24.0,
-            [0.0, 0.0],
-            "center",
+            0.0,
             "center",
             0.0,
             None,
@@ -494,22 +473,22 @@ mod tests {
     }
 
     #[test]
-    fn box_size_sets_bitmap_dims() {
+    fn max_width_wraps_words_but_padding_does_not_narrow_it() {
         let mut fonts = TextFonts::new();
-        let r = rasterize(
-            &mut fonts,
-            "x",
-            "",
-            16.0,
-            [200.0, 120.0],
-            "center",
-            "center",
-            0.0,
-            None,
-        )
-        .expect("rasterizes");
-        assert_eq!(r.width, 200);
-        assert_eq!(r.height, 120 + HEADROOM);
+        if fonts.face_count() == 0 {
+            return;
+        }
+        let one = rasterize(&mut fonts, "ab cd", "", 16.0, 0.0, "center", 0.0, None).expect("rasterizes");
+        assert_eq!(one.line_count, 1);
+        let limit = one.width as f32 + 1.0;
+        let padded = rasterize(&mut fonts, "ab cd", "", 16.0, limit, "center", 10.0, None).expect("rasterizes");
+        assert_eq!(padded.line_count, 1, "padding is drawn around the box, not taken from it");
+        assert!(padded.width.abs_diff(one.width + 20) <= 1);
+        assert_eq!(padded.inset, 10.0);
+        let wrapped =
+            rasterize(&mut fonts, "ab cd", "", 16.0, limit * 0.75, "center", 0.0, None).expect("rasterizes");
+        assert_eq!(wrapped.line_count, 2);
+        assert!(wrapped.width < one.width, "the bitmap hugs the wrapped lines, not the limit");
     }
 
     #[test]
@@ -521,8 +500,7 @@ mod tests {
                 "",
                 "any",
                 32.0,
-                [0.0, 0.0],
-                "center",
+                0.0,
                 "center",
                 0.0,
                 None

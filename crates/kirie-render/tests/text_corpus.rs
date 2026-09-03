@@ -304,9 +304,8 @@ fn text_corpus_renders_real_glyphs() {
                 &tobj.text.value,
                 &tobj.font,
                 tobj.pointsize.value,
-                tobj.size,
+                if tobj.limitwidth { tobj.maxwidth.value } else { 0.0 },
                 &tobj.horizontalalign,
-                &tobj.verticalalign,
                 tobj.padding as f32,
                 None,
             ) else {
