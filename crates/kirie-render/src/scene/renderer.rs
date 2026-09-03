@@ -98,6 +98,7 @@ struct ObjectGpu {
     offscreen_donor: bool,
     parallax_depth: [f32; 2],
     scene_center: [f32; 2],
+    local_to_scene: Mat4,
     angle_z: f32,
     final_front: Option<usize>,
     atlas: Option<Arc<super::texture::AtlasTexture>>,
@@ -1313,9 +1314,6 @@ fn build_object(
                     Geometry::Scene | Geometry::SceneCopy => scene_quad,
                     _ => ndc_quad(1.0, 1.0),
                 };
-                if matches!(geometry, Geometry::SceneCopy) {
-                    take_uv_from_the_screen(&mut verts, scene_size);
-                }
                 if uv_crop != [1.0, 1.0] {
                     apply_uv_crop(&mut verts, uv_crop);
                 }
@@ -1493,6 +1491,7 @@ fn build_object(
             origin[0] - scene_size.0 as f32 / 2.0,
             origin[1] - scene_size.1 as f32 / 2.0,
         ],
+        local_to_scene: local_to_scene(origin, (iw, ih), [scale[0], scale[1]], angle_z, scene_size),
         angle_z: world_angle_z,
         atlas: layer_atlas,
         image_size: (iw, ih),
@@ -2708,6 +2707,10 @@ fn draw_image_object(
             Geometry::PuppetCopy => pass.model_matrix,
             Geometry::Copy | Geometry::Pass => matrix::IDENTITY,
         };
+        let effect_mvp = match pass.geometry {
+            Geometry::Copy | Geometry::Pass => matrix::mul(&parallax_mvp, &object.local_to_scene),
+            _ => mvp,
+        };
         let mvp_inverse = match pass.geometry {
             Geometry::Scene | Geometry::Puppet | Geometry::SceneCopy => {
                 let rot = if object.angle_z != 0.0 {
@@ -2751,6 +2754,7 @@ fn draw_image_object(
             pointer_last,
             texel_size: texel,
             mvp,
+            effect_mvp,
             mvp_inverse,
             model: pass.model_matrix,
             view_projection: matrix::IDENTITY,
@@ -2980,15 +2984,24 @@ fn named_or_instance<'a>(
         .map(|(_, hit)| *hit)
 }
 
-fn take_uv_from_the_screen(verts: &mut [[f32; 5]; 4], scene: (u32, u32)) {
-    let (sw, sh) = (scene.0 as f32, scene.1 as f32);
-    if sw <= 0.0 || sh <= 0.0 {
-        return;
-    }
-    for v in verts.iter_mut() {
-        v[3] = v[0] / sw + 0.5;
-        v[4] = 0.5 - v[1] / sh;
-    }
+fn local_to_scene(
+    origin: [f32; 2],
+    size: (u32, u32),
+    scale: [f32; 2],
+    angle_z: f32,
+    scene: (u32, u32),
+) -> Mat4 {
+    let center = matrix::translation([
+        origin[0] - scene.0 as f32 / 2.0,
+        origin[1] - scene.1 as f32 / 2.0,
+        0.0,
+    ]);
+    let half = matrix::scale([
+        size.0 as f32 / 2.0 * scale[0],
+        size.1 as f32 / 2.0 * scale[1],
+        1.0,
+    ]);
+    matrix::mul(&center, &matrix::mul(&matrix::rotation_z(-angle_z), &half))
 }
 
 fn scene_space_quad(
@@ -3562,6 +3575,27 @@ mod tests {
     fn an_ordinary_shader_leaves_the_snapshot_alone() {
         let samplers = [sampler(0, None), sampler(1, Some("materials/mask"))];
         assert!(!samples_scene_by_default(&empty_pass(), &samplers));
+    }
+
+    #[test]
+    fn the_effect_quad_lands_on_the_layer_quad() {
+        let (origin, size, scale, angle, scene) =
+            ([1263.985, 1976.601], (512, 512), [5.7, 5.7], 0.35, (2560, 1600));
+        let m = local_to_scene(origin, size, scale, angle, scene);
+        let quad = scene_space_quad(origin, size, scale, angle, scene);
+        for (ndc, expected) in [
+            ([-1.0, 1.0], quad[0]),
+            ([-1.0, -1.0], quad[1]),
+            ([1.0, 1.0], quad[2]),
+            ([1.0, -1.0], quad[3]),
+        ] {
+            let x = m[0] * ndc[0] + m[4] * ndc[1] + m[12];
+            let y = m[1] * ndc[0] + m[5] * ndc[1] + m[13];
+            assert!(
+                (x - expected[0]).abs() < 1e-2 && (y - expected[1]).abs() < 1e-2,
+                "{ndc:?} -> {x},{y} vs {expected:?}"
+            );
+        }
     }
 
     #[test]

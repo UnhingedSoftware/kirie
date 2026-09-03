@@ -371,6 +371,7 @@ pub(super) fn draw_model(
             pointer_last,
             texel_size: texel,
             mvp,
+            effect_mvp: mvp,
             mvp_inverse: None,
             model: model_matrix,
             view_projection,

@@ -159,6 +159,7 @@ pub struct Builtins {
     pub pointer_last: [f32; 2],
     pub texel_size: [f32; 2],
     pub mvp: Mat4,
+    pub effect_mvp: Mat4,
     pub mvp_inverse: Option<Mat4>,
     pub model: Mat4,
     pub view_projection: Mat4,
@@ -185,6 +186,7 @@ impl Default for Builtins {
             pointer_last: [0.5, 0.5],
             texel_size: [0.0, 0.0],
             mvp: IDENTITY,
+            effect_mvp: IDENTITY,
             mvp_inverse: None,
             model: IDENTITY,
             view_projection: IDENTITY,
@@ -232,7 +234,8 @@ impl Builtins {
             }
             "g_Texture0Translation" => set(buf, &self.texture0_translation),
             "g_Texture0Rotation" => set(buf, &self.texture0_rotation),
-            "g_ModelViewProjectionMatrix" | "g_EffectModelViewProjectionMatrix" => set(buf, &self.mvp),
+            "g_ModelViewProjectionMatrix" => set(buf, &self.mvp),
+            "g_EffectModelViewProjectionMatrix" => set(buf, &self.effect_mvp),
             "g_ModelViewProjectionMatrixInverse" => match self.mvp_inverse {
                 Some(m) => set(buf, &m),
                 None => set(buf, &super::matrix::inverse(&self.mvp)),
