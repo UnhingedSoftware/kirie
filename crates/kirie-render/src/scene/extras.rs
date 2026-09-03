@@ -55,6 +55,10 @@ struct TextRebuild {
     origin: [f32; 2],
     scene_size: (u32, u32),
     bundled: Option<String>,
+    box_scale: f32,
+    tint: [f32; 3],
+    alpha: f32,
+    color_alpha: f32,
 }
 
 impl TextGpu {
@@ -101,6 +105,34 @@ impl TextGpu {
         });
     }
 
+    pub fn set_tint(&mut self, queue: &wgpu::Queue, color: Option<[f32; 3]>, alpha: Option<f32>) {
+        let rb = &mut self.rebuild;
+        if let Some(c) = color {
+            rb.tint = c;
+        }
+        if let Some(a) = alpha {
+            rb.alpha = a;
+        }
+        let data = [rb.tint[0], rb.tint[1], rb.tint[2], rb.alpha * rb.color_alpha];
+        queue.write_buffer(&self.ubo, 64, bytemuck::cast_slice(&data));
+    }
+
+    pub fn set_max_width(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tp: &TextPipeline,
+        fonts: &mut TextFonts,
+        maxwidth: f32,
+    ) {
+        let w = maxwidth * self.rebuild.box_scale;
+        if (w - self.rebuild.box_w).abs() < f32::EPSILON {
+            return;
+        }
+        self.rebuild.box_w = w;
+        self.rerasterize(device, queue, tp, fonts);
+    }
+
     pub fn retext(
         &mut self,
         device: &wgpu::Device,
@@ -113,6 +145,16 @@ impl TextGpu {
             return;
         }
         self.rebuild.current = new_text.to_owned();
+        self.rerasterize(device, queue, tp, fonts);
+    }
+
+    fn rerasterize(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tp: &TextPipeline,
+        fonts: &mut TextFonts,
+    ) {
         let rb = &self.rebuild;
         let Some(raster) = text::rasterize(
             fonts,
@@ -354,11 +396,12 @@ pub fn build_text(
     }
     let raster_scale = ((scale_x + scale_y) * 0.5).clamp(0.05, 32.0);
     let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
-    let box_w = if tobj.limitwidth {
-        tobj.maxwidth * raster_scale / scale_x
+    let box_scale = if tobj.limitwidth {
+        raster_scale / scale_x
     } else {
         0.0
     };
+    let box_w = tobj.maxwidth.value * box_scale;
     let padding = if tobj.limitwidth {
         tobj.padding as f32 * raster_scale
     } else {
@@ -411,7 +454,7 @@ pub fn build_text(
     let ubo = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label: Some("kirie-scene-text-ubo"),
         contents: &data,
-        usage: wgpu::BufferUsages::UNIFORM,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("kirie-scene-text-bg"),
@@ -472,6 +515,10 @@ pub fn build_text(
             origin: [world_origin[0], world_origin[1]],
             scene_size,
             bundled,
+            box_scale,
+            tint: [color[0], color[1], color[2]],
+            alpha: tobj.alpha.value,
+            color_alpha: color[3],
         },
         ubo,
     })

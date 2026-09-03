@@ -116,6 +116,7 @@ pub struct ScriptHost {
     user_props_dirty: bool,
     last_tick: std::time::Instant,
     tz_offset_secs: f64,
+    overrides: Vec<(String, ScriptValue)>,
 }
 
 impl ScriptHost {
@@ -284,6 +285,7 @@ impl ScriptHost {
             user_props_dirty: false,
             last_tick: std::time::Instant::now(),
             tz_offset_secs: local_utc_offset_secs(),
+            overrides: Vec::new(),
         })
     }
 
@@ -375,7 +377,8 @@ impl ScriptHost {
             self.scene_dirty = false;
         }
 
-        let output = match self.engine.tick_reuse(frame, Vec::new()) {
+        let overrides = std::mem::take(&mut self.overrides);
+        let output = match self.engine.tick_reuse(frame, overrides) {
             Ok((o, frame)) => {
                 self.frame = Some(frame);
                 o
@@ -403,6 +406,13 @@ impl ScriptHost {
 
     pub fn take_created(&mut self) -> Vec<(i64, String)> {
         std::mem::take(&mut self.created)
+    }
+
+    pub fn note_animation(&mut self, updates: &[PropUpdate], overrides: &[(String, ScriptValue)]) {
+        for u in updates {
+            self.record_layer(u.object_id, u.target, &u.value);
+        }
+        self.overrides.extend_from_slice(overrides);
     }
 
     fn process_output(&mut self, output: TickOutput) -> Vec<PropUpdate> {
@@ -1024,7 +1034,17 @@ fn day_fraction(unix_secs: f64, tz_offset_secs: f64) -> f64 {
     ((unix_secs + tz_offset_secs) / 86_400.0).rem_euclid(1.0)
 }
 
-fn local_utc_offset_secs() -> f64 {
+#[must_use]
+pub fn time_of_day_now(tz_offset_secs: f64) -> f64 {
+    day_fraction(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64()),
+        tz_offset_secs,
+    )
+}
+
+pub fn local_utc_offset_secs() -> f64 {
     std::process::Command::new("date")
         .arg("+%z")
         .output()

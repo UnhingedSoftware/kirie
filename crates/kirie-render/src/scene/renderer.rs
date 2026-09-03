@@ -15,6 +15,7 @@ use kirie_shader::{IncludeResolver, reflect::SamplerSlot};
 use crate::particle::SpriteInstance;
 use crate::scaling::{ClampMode, ScalingMode};
 
+use super::animation::{AnimOutput, PropertyAnimator};
 use super::extras::{self, ParticleGpu, TextGpu, TextPipeline};
 use super::fbo::{FBO_FORMAT, Fbo};
 use super::matrix::{self, Mat4};
@@ -187,6 +188,8 @@ pub struct SceneRenderer {
     blit_srgb: bool,
     audio: Option<Arc<AudioCapture>>,
     script: Option<ScriptHost>,
+    animator: Option<PropertyAnimator>,
+    tz_offset_secs: f64,
     camera: kirie_scene::scene::Camera,
     bag: kirie_scene::PropertyBag,
     general: kirie_scene::scene::General,
@@ -592,6 +595,14 @@ impl SceneRenderer {
             build_blit(device, target.format, &scene_fbo, &fbo_sampler);
 
         let mut script = ScriptHost::build(model, (proj_w, proj_h), user_props);
+        let animator = PropertyAnimator::build(model);
+        let tz_offset_secs = if animator.is_some() {
+            super::scripting::local_utc_offset_secs()
+        } else {
+            0.0
+        };
+        let zoom = model.scene.general.zoom.value;
+        let zoom = if zoom > 0.0 { zoom } else { 1.0 };
 
         if let Some(host) = script.as_mut() {
             for item in &mut items {
@@ -664,7 +675,7 @@ impl SceneRenderer {
             pointer_left: false,
             locals: local_xf,
             media,
-            zoom: 1.0,
+            zoom,
             parallax_disp: [0.0, 0.0],
             runtime_layers: std::collections::HashMap::new(),
             runtime_templates,
@@ -697,6 +708,8 @@ impl SceneRenderer {
             blit_srgb: target.format.is_srgb(),
             audio,
             script,
+            animator,
+            tz_offset_secs,
             camera: scene.camera.clone(),
             model_depth,
             parent_by_id,
@@ -933,6 +946,47 @@ impl SceneRenderer {
         }
     }
 
+    fn apply_animation_side_effects(
+        &mut self,
+        effect: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
+        particle: Vec<(i64, String, f32)>,
+        zoom: Option<f32>,
+        text_width: Vec<(i64, f32)>,
+    ) {
+        for (layer_id, effect_idx, name, value) in effect {
+            apply_material_op(&mut self.items, layer_id, effect_idx, &name, &value);
+        }
+        for (id, name, v) in particle {
+            for item in &mut self.items {
+                if let SceneItem::Particle(pg) = item
+                    && pg.id == id
+                {
+                    pg.sim.set_instance_scalar(&name, v);
+                }
+            }
+        }
+        if let Some(z) = zoom
+            && z > 0.0
+            && (z - self.zoom).abs() > f32::EPSILON
+        {
+            self.zoom = z;
+            self.window_for = None;
+        }
+        if !text_width.is_empty()
+            && let (Some(tp), Some(fonts)) = (self.text_pipeline.as_ref(), self.text_fonts.as_mut())
+        {
+            for (id, w) in text_width {
+                for item in &mut self.items {
+                    if let SceneItem::Text(tg) = item
+                        && tg.id == id
+                    {
+                        tg.set_max_width(&self.device, &self.queue, tp, fonts, w);
+                    }
+                }
+            }
+        }
+    }
+
     fn apply_script_scene_ops(&mut self) {
         let Some(script) = self.script.as_mut() else {
             return;
@@ -982,35 +1036,7 @@ impl SceneRenderer {
             }
         }
         for (layer_id, effect_idx, name, value) in script.take_material_ops() {
-            let dynv = match &value {
-                kirie_script::ScriptValue::Float(f) => kirie_scene::value::DynamicValue::Float(*f),
-                kirie_script::ScriptValue::Int(i) => kirie_scene::value::DynamicValue::Int(*i),
-                kirie_script::ScriptValue::Vec2(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
-                kirie_script::ScriptValue::Vec3(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
-                kirie_script::ScriptValue::Vec4(v) => kirie_scene::value::DynamicValue::Vec(v.to_vec()),
-                _ => continue,
-            };
-            for item in &mut self.items {
-                let SceneItem::Image(o) = item else { continue };
-                if o.id != layer_id {
-                    continue;
-                }
-                for pass in &mut o.passes {
-                    if pass.effect_index != Some(effect_idx) {
-                        continue;
-                    }
-                    pass.material_pass.constantshadervalues.insert(
-                        name.clone(),
-                        kirie_scene::user::UserSetting {
-                            value: dynv.clone(),
-                            user: None,
-                            script: None,
-                        },
-                    );
-                    pass.vs_params = resolve_params(&pass.params_vs, &pass.material_pass);
-                    pass.fs_params = resolve_params(&pass.params_fs, &pass.material_pass);
-                }
-            }
+            apply_material_op(&mut self.items, layer_id, effect_idx, &name, &value);
         }
         let scene_ops = script.take_scene_ops();
         for op in script.take_particle_ops() {
@@ -1744,7 +1770,18 @@ impl Renderer for SceneRenderer {
             [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
         };
         let media_state = self.media.as_ref().map(|m| m.latest());
-        let updates = match &mut self.script {
+        let anim = match self.animator.as_mut() {
+            Some(a) => {
+                let out = a.tick(dt, super::scripting::time_of_day_now(self.tz_offset_secs) as f32);
+                if let Some(script) = self.script.as_mut() {
+                    script.note_animation(&out.updates, &out.overrides);
+                }
+                out
+            }
+            None => AnimOutput::default(),
+        };
+        let mut updates = anim.updates;
+        updates.extend(match &mut self.script {
             Some(script) => script.tick(
                 dt,
                 spectrum.as_deref(),
@@ -1754,7 +1791,8 @@ impl Renderer for SceneRenderer {
                 media_state.as_deref(),
             ),
             None => Vec::new(),
-        };
+        });
+        self.apply_animation_side_effects(anim.effect, anim.particle, anim.zoom, anim.text_width);
         self.apply_script_scene_ops();
         if !updates.is_empty() {
             for u in &updates {
@@ -1767,6 +1805,20 @@ impl Renderer for SceneRenderer {
             apply_runtime_updates(&mut self.runtime_layers, &updates);
             apply_script_updates(&mut self.items, &updates);
             self.apply_image_transforms(&updates);
+            for u in &updates {
+                let (color, alpha) = match u.target {
+                    PropTarget::Color => (as_rgb(&u.value), None),
+                    PropTarget::Alpha => (None, as_f32(&u.value)),
+                    _ => continue,
+                };
+                for item in &mut self.items {
+                    if let SceneItem::Text(tg) = item
+                        && tg.id == u.object_id
+                    {
+                        tg.set_tint(&self.queue, color, alpha);
+                    }
+                }
+            }
         }
 
         if let (Some(host), Some(tp), Some(fonts)) = (
@@ -2625,6 +2677,40 @@ fn fs(i: VOut) -> @location(0) vec4<f32> {
         multiview_mask: None,
         cache: None,
     })
+}
+
+fn apply_material_op(
+    items: &mut [SceneItem],
+    layer_id: i64,
+    effect_idx: usize,
+    name: &str,
+    value: &kirie_script::ScriptValue,
+) {
+    let dynv = match value {
+        kirie_script::ScriptValue::Float(f) => DynamicValue::Float(*f),
+        kirie_script::ScriptValue::Int(i) => DynamicValue::Int(*i),
+        kirie_script::ScriptValue::Vec2(v) => DynamicValue::Vec(v.to_vec()),
+        kirie_script::ScriptValue::Vec3(v) => DynamicValue::Vec(v.to_vec()),
+        kirie_script::ScriptValue::Vec4(v) => DynamicValue::Vec(v.to_vec()),
+        _ => return,
+    };
+    for item in items {
+        let SceneItem::Image(o) = item else { continue };
+        if o.id != layer_id {
+            continue;
+        }
+        for pass in &mut o.passes {
+            if pass.effect_index != Some(effect_idx) {
+                continue;
+            }
+            pass.material_pass.constantshadervalues.insert(
+                name.to_owned(),
+                kirie_scene::user::UserSetting::literal(dynv.clone()),
+            );
+            pass.vs_params = resolve_params(&pass.params_vs, &pass.material_pass);
+            pass.fs_params = resolve_params(&pass.params_fs, &pass.material_pass);
+        }
+    }
 }
 
 fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {

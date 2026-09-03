@@ -6,6 +6,7 @@ pub mod matrix;
 pub mod plan;
 pub mod uniforms;
 
+pub mod animation;
 mod bundle;
 pub mod fbo;
 pub mod load;
