@@ -107,7 +107,11 @@ impl Model {
             }
             let material_ref = cur.read_cstring("materialRef")?;
             let _reserved = cur.read_i32("mesh reserved word")?;
-            let bbox = cur.read_f32x6("bbox")?;
+            let bbox = if header_has_bbox(&version) {
+                cur.read_f32x6("bbox")?
+            } else {
+                [0.0; 6]
+            };
             let flags = cur.read_i32("flags")?;
 
             let vertex_bytes = cur.read_i32("vertexBytes")?;
@@ -292,10 +296,14 @@ struct PuppetLayout {
     uv: usize,
 }
 
+fn header_has_bbox(version: &str) -> bool {
+    version.as_bytes() != b"MDLV0016"
+}
+
 impl PuppetLayout {
     const fn for_version(version: &str) -> Option<Self> {
         match version.as_bytes() {
-            b"MDLV0021" | b"MDLV0023" => Some(Self {
+            b"MDLV0019" | b"MDLV0021" | b"MDLV0023" => Some(Self {
                 stride: PUPPET_VERTEX_STRIDE,
                 position: PUPPET_POSITION_OFFSET,
                 normal: PUPPET_NORMAL_OFFSET,
@@ -305,7 +313,7 @@ impl PuppetLayout {
                 bone_weights: PUPPET_BONE_WEIGHT_OFFSET,
                 uv: PUPPET_UV_OFFSET,
             }),
-            b"MDLV0013" => Some(Self {
+            b"MDLV0013" | b"MDLV0016" => Some(Self {
                 stride: PUPPET_LEGACY_VERTEX_STRIDE,
                 position: PUPPET_POSITION_OFFSET,
                 normal: PUPPET_LEGACY_NORMAL_OFFSET,
@@ -323,7 +331,7 @@ impl PuppetLayout {
 #[derive(Debug, Error)]
 pub enum PuppetError {
     #[error(
-        "unsupported puppet model header {header:?} (expected \"MDLV0013\", \"MDLV0021\" or \"MDLV0023\")"
+        "unsupported puppet model header {header:?} (expected \"MDLV0013\", \"MDLV0016\", \"MDLV0019\", \"MDLV0021\" or \"MDLV0023\")"
     )]
     BadMagic { header: String },
 
