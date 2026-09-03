@@ -621,7 +621,7 @@ impl SceneRenderer {
                         (proj_w, proj_h),
                         &screen_mvp,
                         source,
-                        (world.0, world.1),
+                        world,
                     ) {
                         items.push(SceneItem::Text(Box::new(tg)));
                     }
@@ -903,7 +903,7 @@ impl SceneRenderer {
             let world = world_xf(id, &self.locals);
             match item {
                 SceneItem::Image(o) => retransform(o, &self.queue, world, (sw, sh)),
-                SceneItem::Text(tg) => tg.set_transform(&self.device, world.0, world.1),
+                SceneItem::Text(tg) => tg.set_transform(&self.device, world),
                 _ => {}
             }
         }
@@ -1135,7 +1135,7 @@ impl SceneRenderer {
                 (self.proj_w, self.proj_h),
                 &self.screen_mvp,
                 source,
-                (world.0, world.1),
+                world,
             ) {
                 self.items.push(SceneItem::Text(Box::new(tg)));
                 self.runtime_seq += 1;
@@ -3483,7 +3483,7 @@ struct LocalXf {
     parent: Option<i64>,
 }
 
-type WorldXf = ([f32; 2], [f32; 2], f32);
+type WorldXf = extras::WorldXf;
 
 fn transform_affected(id: i64, dirty: &[i64], locals: &HashMap<i64, LocalXf>) -> bool {
     let mut cur = Some(id);

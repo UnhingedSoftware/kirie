@@ -109,11 +109,14 @@ struct TextQuad {
     anchor_box: [f32; 2],
     inset: f32,
     origin: [f32; 2],
+    angle_z: f32,
     scene_size: (u32, u32),
     tint: [f32; 3],
     alpha: f32,
     color_alpha: f32,
 }
+
+pub type WorldXf = ([f32; 2], [f32; 2], f32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextRasterScale {
@@ -186,9 +189,10 @@ impl TextGpu {
         &self.rebuild.current
     }
 
-    pub fn set_transform(&mut self, device: &wgpu::Device, origin: [f32; 2], scale: [f32; 2]) {
-        self.quad.origin = origin;
-        self.quad.quad_scale = self.rebuild.quad_scale(scale);
+    pub fn set_transform(&mut self, device: &wgpu::Device, world: WorldXf) {
+        self.quad.origin = world.0;
+        self.quad.quad_scale = self.rebuild.quad_scale(world.1);
+        self.quad.angle_z = world.2;
         self.rebuild_quad(device);
     }
 
@@ -208,7 +212,12 @@ impl TextGpu {
             &self.rebuild.halign,
             &self.rebuild.valign,
         );
-        let quad = scene_space_quad(cx, cy, sx, sy, q.scene_size);
+        let quad = rotated_about_origin(
+            scene_space_quad(cx, cy, sx, sy, q.scene_size),
+            q.origin,
+            q.angle_z,
+            q.scene_size,
+        );
         let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let mut verts = Vec::with_capacity(4 * 20);
         for (p, uv) in quad.iter().zip(uvs.iter()) {
@@ -501,11 +510,17 @@ pub fn build_text(
     scene_size: (u32, u32),
     screen_mvp: &Mat4,
     source: &dyn AssetSource,
-    world: ([f32; 2], [f32; 2]),
+    world: WorldXf,
 ) -> Option<TextGpu> {
     let visible = tobj.visible.value && object.base.visible.value;
-    let (rebuild, raster) = text_layout(fonts, tobj, source, world, TextRasterScale::Screen)?;
-    let (world_origin, world_scale) = world;
+    let (world_origin, world_scale, _) = world;
+    let (rebuild, raster) = text_layout(
+        fonts,
+        tobj,
+        source,
+        (world_origin, world_scale),
+        TextRasterScale::Screen,
+    )?;
     let blank = !raster.any_coverage;
     let texture = text::upload(device, queue, &raster);
 
@@ -524,7 +539,12 @@ pub fn build_text(
         &tobj.horizontalalign,
         &tobj.verticalalign,
     );
-    let quad = scene_space_quad(cx, cy, sx, sy, scene_size);
+    let quad = rotated_about_origin(
+        scene_space_quad(cx, cy, sx, sy, scene_size),
+        world_origin,
+        world.2,
+        scene_size,
+    );
     let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
 
     let color = tobj.color.value;
@@ -588,6 +608,7 @@ pub fn build_text(
             anchor_box: raster.anchor_box,
             inset: raster.inset,
             origin: [world_origin[0], world_origin[1]],
+            angle_z: world.2,
             scene_size,
             tint: [color[0], color[1], color[2]],
             alpha: tobj.alpha.value,
@@ -647,6 +668,26 @@ fn anchored_center(
     [x, y]
 }
 
+fn rotated_about_origin(
+    mut quad: [[f32; 3]; 4],
+    origin: [f32; 2],
+    angle_z: f32,
+    scene: (u32, u32),
+) -> [[f32; 3]; 4] {
+    if angle_z == 0.0 {
+        return quad;
+    }
+    let px = origin[0] - scene.0 as f32 / 2.0;
+    let py = origin[1] - scene.1 as f32 / 2.0;
+    let (s, c) = (-angle_z).sin_cos();
+    for p in &mut quad {
+        let (dx, dy) = (p[0] - px, p[1] - py);
+        p[0] = px + dx * c - dy * s;
+        p[1] = py + dx * s + dy * c;
+    }
+    quad
+}
+
 fn scene_space_quad(ox: f32, oy: f32, sx: f32, sy: f32, scene: (u32, u32)) -> [[f32; 3]; 4] {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
     let left = (ox - sw / 2.0 - sx / 2.0 + 0.5).floor();
@@ -699,6 +740,22 @@ mod tests {
         assert_eq!(q[1], [-960.0, -465.0, 0.0]);
         assert_eq!(q[2], [-760.0, -415.0, 0.0]);
         assert_eq!(q[3], [-760.0, -465.0, 0.0]);
+    }
+
+    #[test]
+    fn text_quad_rotates_about_the_layer_origin() {
+        let scene = (1920, 1080);
+        let flat = scene_space_quad(1100.0, 540.0, 200.0, 50.0, scene);
+        assert_eq!(rotated_about_origin(flat, [1000.0, 540.0], 0.0, scene), flat);
+        let q = rotated_about_origin(flat, [1000.0, 540.0], 90f32.to_radians(), scene);
+        let cx = (q[0][0] + q[3][0]) / 2.0;
+        let cy = (q[0][1] + q[3][1]) / 2.0;
+        assert!((cx - 40.0).abs() < 1e-3, "centre x {cx}");
+        assert!((cy + 100.0).abs() < 1e-3, "centre y {cy}");
+        let w = ((q[2][0] - q[0][0]).powi(2) + (q[2][1] - q[0][1]).powi(2)).sqrt();
+        let h = ((q[1][0] - q[0][0]).powi(2) + (q[1][1] - q[0][1]).powi(2)).sqrt();
+        assert!((w - 200.0).abs() < 1e-3 && (h - 50.0).abs() < 1e-3);
+        assert!((q[2][0] - q[0][0]).abs() < 1e-3, "the top edge now runs vertically");
     }
 
     #[test]
