@@ -1882,6 +1882,7 @@ impl Renderer for SceneRenderer {
         for item in &mut self.items {
             if let SceneItem::Image(object) = item
                 && object.offscreen_donor
+                && !object.reads_scene
             {
                 draw_image_object(
                     &mut encoder,
@@ -1905,10 +1906,11 @@ impl Renderer for SceneRenderer {
 
         for item in &mut self.items {
             match item {
+                SceneItem::Image(object) if object.offscreen_donor && !object.reads_scene => {}
                 SceneItem::Image(object)
-                    if object.offscreen_donor
-                        || !object.visible
-                        || !ancestors_visible(parent_by_id, visible_by_id, object.parent) => {}
+                    if !object.offscreen_donor
+                        && (!object.visible
+                            || !ancestors_visible(parent_by_id, visible_by_id, object.parent)) => {}
                 SceneItem::Image(object) => {
                     if object.reads_scene
                         && let Some(snap_tex) = snap_tex
