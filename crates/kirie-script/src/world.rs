@@ -842,6 +842,7 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             path: obj.get("path").ok()?,
             workshop_id: obj.get::<_, Option<String>>("workshopId").ok().flatten(),
             text: obj.get::<_, Option<String>>("text").ok().flatten(),
+            config: obj.get::<_, Option<String>>("config").ok().flatten(),
         }),
         "sortLayer" => Some(SceneOp::SortLayer {
             layer_id: obj.get::<_, f64>("id").ok()? as i64,

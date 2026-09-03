@@ -1101,6 +1101,46 @@ impl SceneRenderer {
             });
             self.runtime_seq += 1;
         }
+        for object in script.take_created_text() {
+            let ObjectKind::Text(tobj) = &object.kind else {
+                continue;
+            };
+            let id = object.base.id;
+            tracing::debug!(id, text = %tobj.text.value, "runtime text layer created by script");
+            self.locals.insert(
+                id,
+                LocalXf {
+                    origin: [object.base.origin.value[0], object.base.origin.value[1]],
+                    scale: [object.base.scale.value[0], object.base.scale.value[1]],
+                    angle_z: object.base.angles.value[2],
+                    parent: None,
+                },
+            );
+            self.visible_by_id
+                .insert(id, object.base.visible.value && tobj.visible.value);
+            let tp = self
+                .text_pipeline
+                .get_or_insert_with(|| extras::build_text_pipeline(&self.device));
+            let fonts = self.text_fonts.get_or_insert_with(TextFonts::new);
+            let no_assets = MemorySource(HashMap::new());
+            let source: &dyn AssetSource = self.rebuild.as_ref().map_or(&no_assets, |c| &c.source);
+            let world = world_xf(id, &self.locals);
+            if let Some(tg) = extras::build_text(
+                &self.device,
+                &self.queue,
+                tp,
+                fonts,
+                &object,
+                tobj,
+                (self.proj_w, self.proj_h),
+                &self.screen_mvp,
+                source,
+                (world.0, world.1),
+            ) {
+                self.items.push(SceneItem::Text(Box::new(tg)));
+                self.runtime_seq += 1;
+            }
+        }
         for (layer_id, cmd, value) in script.take_video_ops() {
             let Some(item_idx) = self.items.iter().position(|it| match it {
                 SceneItem::Image(o) => o.id == layer_id,

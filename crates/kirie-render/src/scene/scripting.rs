@@ -106,6 +106,7 @@ pub struct ScriptHost {
     res: [f32; 2],
     elapsed: f64,
     created: Vec<(i64, String)>,
+    created_text: Vec<kirie_scene::object::Object>,
     destroyed: Vec<i64>,
     particle_ops: Vec<ParticleOp>,
     material_ops: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
@@ -274,6 +275,7 @@ impl ScriptHost {
             res: [res.0 as f32, res.1 as f32],
             elapsed: 0.0,
             created: Vec::new(),
+            created_text: Vec::new(),
             destroyed: Vec::new(),
             particle_ops: Vec::new(),
             material_ops: Vec::new(),
@@ -397,6 +399,10 @@ impl ScriptHost {
         std::mem::take(&mut self.created)
     }
 
+    pub fn take_created_text(&mut self) -> Vec<kirie_scene::object::Object> {
+        std::mem::take(&mut self.created_text)
+    }
+
     pub fn note_animation(&mut self, updates: &[PropUpdate], overrides: &[(String, ScriptValue)]) {
         for u in updates {
             let value = match u.target {
@@ -460,8 +466,17 @@ impl ScriptHost {
                     }
                 }
                 SceneOp::CreateLayer {
-                    layer_id, path, text, ..
+                    layer_id,
+                    path,
+                    text,
+                    config,
+                    ..
                 } => {
+                    if let Some(object) = config.as_deref().and_then(|c| text_object(layer_id, c)) {
+                        self.layers.push(layer_state(&object));
+                        self.created_text.push(object);
+                        continue;
+                    }
                     self.layers.push(LayerState {
                         id: layer_id,
                         name: path.clone(),
@@ -875,6 +890,19 @@ fn collect(
         initial: initial(),
         script_props: flatten_props(&b.properties),
     });
+}
+
+fn text_object(layer_id: i64, config: &str) -> Option<kirie_scene::object::Object> {
+    let mut value: Value = serde_json::from_str(config).ok()?;
+    value
+        .as_object_mut()?
+        .insert("id".to_owned(), Value::from(layer_id));
+    let mut object = kirie_scene::object::Object::parse(&value)?;
+    if !matches!(object.kind, ObjectKind::Text(_)) {
+        return None;
+    }
+    object.base.angles.value = object.base.angles.value.map(f32::to_radians);
+    Some(object)
 }
 
 fn layer_state(object: &kirie_scene::object::Object) -> LayerState {

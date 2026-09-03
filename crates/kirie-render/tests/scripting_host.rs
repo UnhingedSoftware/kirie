@@ -493,3 +493,70 @@ fn angles_cross_the_script_boundary_in_degrees() {
         angle(4)
     );
 }
+
+#[test]
+fn created_text_layer_becomes_a_text_object() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 9,
+                "name": "clock",
+                "text": "12:00",
+                "font": "fonts/a.ttf",
+                "pointsize": 25,
+                "origin": "50 60 0",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "var shadow = null; export function update(v) { if (!shadow) { shadow = thisScene.createLayer({ text: 'shadow', color: '0 0 0', alpha: 1, pointsize: thisLayer.pointsize, font: thisLayer.font }); shadow.visible = false; shadow.origin = thisLayer.origin; shadow.angles = new Vec3(0, 0, 90); thisScene.sortLayer(shadow, thisScene.getLayerIndex(thisLayer)); } shadow.text = 'tick'; return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("host");
+    let updates = host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    let created = host.take_created_text();
+    assert_eq!(created.len(), 1, "one text layer is created");
+    let object = &created[0];
+    assert!(object.base.id <= -1000, "synthetic id: {}", object.base.id);
+    let kirie_scene::object::ObjectKind::Text(text) = &object.kind else {
+        panic!("created layer is not text: {:?}", object.kind);
+    };
+    assert_eq!(text.text.value, "shadow");
+    assert_eq!(text.font, "fonts/a.ttf");
+    assert_eq!(text.pointsize.value, 25.0);
+    assert_eq!(&text.color.value[..3], &[0.0, 0.0, 0.0]);
+    assert!(host.take_created().is_empty(), "text layers are not image layers");
+    let id = object.base.id;
+    assert!(
+        updates.iter().any(|u| u.object_id == id
+            && u.target == PropTarget::Origin
+            && kirie_render::scene::scripting::as_vec3(&u.value) == Some([50.0, 60.0, 0.0])),
+        "origin copied from the clock reaches the renderer"
+    );
+    assert!(
+        updates.iter().any(|u| u.object_id == id
+            && u.target == PropTarget::Angles
+            && kirie_render::scene::scripting::as_vec3(&u.value)
+                .is_some_and(|v| (v[2] - 90f32.to_radians()).abs() < 1e-5)),
+        "angles reach the renderer in radians"
+    );
+    assert!(
+        updates.iter().any(|u| u.object_id == id
+            && u.target == PropTarget::Visible
+            && u.value == kirie_script::ScriptValue::Bool(false)),
+        "visible=false reaches the renderer"
+    );
+    assert!(
+        updates.iter().any(|u| u.object_id == id
+            && u.target == PropTarget::Text
+            && u.value == kirie_script::ScriptValue::Str("tick".into())),
+        "per-tick text write reaches the renderer"
+    );
+    let order = host.take_layer_order().expect("sortLayer reorders");
+    assert_eq!(order, vec![id, 9], "the shadow sorts behind the clock");
+    host.tick(0.5, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    assert!(host.take_created_text().is_empty(), "created once");
+}

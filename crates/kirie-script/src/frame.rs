@@ -261,6 +261,7 @@ pub enum SceneOp {
         path: String,
         workshop_id: Option<String>,
         text: Option<String>,
+        config: Option<String>,
     },
     SortLayer {
         layer_id: i64,

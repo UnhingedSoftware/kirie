@@ -372,13 +372,24 @@ var __scene = {
       visible: (cfg.visible === undefined) ? true : !!cfg.visible,
       alpha: (cfg.alpha === undefined) ? 1 : +cfg.alpha, color: v3(cfg.color, [1, 1, 1]),
     };
+    var config;
     if (typeof cfg.text === 'string') {
       rec.text = cfg.text;
       rec.pointsize = (cfg.pointsize === undefined) ? 32 : +cfg.pointsize;
       rec.font = (typeof cfg.font === 'string') ? cfg.font : '';
+      config = {
+        name: rec.name, origin: rec.origin.join(' '), angles: rec.angles.join(' '), scale: rec.scale.join(' '),
+        visible: rec.visible, alpha: rec.alpha, color: rec.color.join(' '),
+        text: rec.text, pointsize: rec.pointsize, font: rec.font,
+      };
+      ['padding', 'horizontalalign', 'verticalalign', 'limitwidth', 'maxwidth', 'limitrows', 'maxrows',
+        'opaquebackground', 'backgroundcolor'].forEach(function (k) {
+        if (cfg[k] !== undefined) config[k] = cfg[k];
+      });
+      config = JSON.stringify(config);
     }
     __host.layers.push(rec);
-    __host.ops.push({ op: 'createLayer', id: id, path: path, workshopId: __host.workshopId, text: rec.text });
+    __host.ops.push({ op: 'createLayer', id: id, path: path, workshopId: __host.workshopId, text: rec.text, config: config });
     ['origin', 'angles', 'scale', 'color', 'visible', 'alpha', 'text', 'pointsize', 'font'].forEach(function (k) {
       if (rec[k] !== undefined) __recordProp(id, k, Array.isArray(rec[k]) ? rec[k].slice() : rec[k]);
     });
