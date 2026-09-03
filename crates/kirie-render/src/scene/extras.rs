@@ -95,12 +95,19 @@ struct TextQuad {
     color_alpha: f32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRasterScale {
+    Screen,
+    Engine,
+}
+
 #[must_use]
 pub fn text_layout(
     fonts: &mut TextFonts,
     tobj: &TextObject,
     source: &dyn AssetSource,
     world: ([f32; 2], [f32; 2]),
+    raster: TextRasterScale,
 ) -> Option<(TextRebuild, text::TextRaster)> {
     let bundled = fonts.bundled_family(&tobj.font, source);
     const WE_PT_TO_PX: f32 = 300.0 / 72.0;
@@ -110,7 +117,10 @@ pub fn text_layout(
         return None;
     }
     let (_, world_scale) = world;
-    let raster_scale = ((world_scale[0] + world_scale[1]) * 0.5).clamp(0.05, 32.0);
+    let raster_scale = match raster {
+        TextRasterScale::Screen => ((world_scale[0] + world_scale[1]) * 0.5).clamp(0.05, 32.0),
+        TextRasterScale::Engine => 1.0,
+    };
     let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
     let box_scale = if tobj.limitwidth {
         raster_scale / world_scale[0]
@@ -448,7 +458,7 @@ pub fn build_text(
     world: ([f32; 2], [f32; 2]),
 ) -> Option<TextGpu> {
     let visible = tobj.visible.value && object.base.visible.value;
-    let (rebuild, raster) = text_layout(fonts, tobj, source, world)?;
+    let (rebuild, raster) = text_layout(fonts, tobj, source, world, TextRasterScale::Screen)?;
     let (world_origin, world_scale) = world;
     let blank = !raster.any_coverage;
     let texture = text::upload(device, queue, &raster);

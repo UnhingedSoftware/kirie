@@ -1742,7 +1742,13 @@ fn build_text_layer(
     fbo_scale: f32,
 ) -> Option<ObjectGpu> {
     use kirie_scene::user::UserSetting;
-    let (rebuild, raster) = extras::text_layout(fonts, tobj, source, (world.0, world.1))?;
+    let (rebuild, raster) = extras::text_layout(
+        fonts,
+        tobj,
+        source,
+        (world.0, world.1),
+        extras::TextRasterScale::Engine,
+    )?;
     let texture = Arc::new(super::text::upload(device, queue, &raster));
     let name = text_texture_name(object.base.id);
     registry.insert(&name, texture.clone());
