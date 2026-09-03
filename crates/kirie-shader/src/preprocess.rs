@@ -33,16 +33,41 @@ precision highp int;
 #define GLSL 1
 "#;
 
-const SCREEN_POSITION: &str = "v_ScreenPos = gl_Position.xyw;";
+const COMPOSE_POSITION: &str = "vec3 position = vec3(a_TexCoord, 0.0);";
 
-fn screen_position_to_texture_space(source: &str) -> String {
-    if !source.contains(SCREEN_POSITION) {
+fn screen_space_to_texture_space(source: &str) -> String {
+    if !source.contains(".xyw;") && !source.contains(COMPOSE_POSITION) {
         return source.to_owned();
     }
-    source.replace(
-        SCREEN_POSITION,
-        "v_ScreenPos = gl_Position.xyw; v_ScreenPos.y = -v_ScreenPos.y;",
-    )
+    let mut out = String::with_capacity(source.len() + 64);
+    for line in source.split_inclusive('\n') {
+        let statement = line.trim();
+        let flip = if statement == COMPOSE_POSITION {
+            Some("position.y = 1.0 - position.y;".to_owned())
+        } else {
+            screen_space_target(statement).map(|target| format!("{target}.y = -{target}.y;"))
+        };
+        let Some(flip) = flip else {
+            out.push_str(line);
+            continue;
+        };
+        let body = line.trim_end_matches(['\r', '\n']);
+        out.push_str(body);
+        out.push(' ');
+        out.push_str(&flip);
+        out.push_str(&line[body.len()..]);
+    }
+    out
+}
+
+fn screen_space_target(statement: &str) -> Option<&str> {
+    let body = statement.strip_suffix(".xyw;")?;
+    let (target, source) = body.split_once(" = ")?;
+    let is_ident = !target.is_empty() && target.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    let is_clip_space = source == "gl_Position"
+        || source == "clipSpacePosition"
+        || (source.starts_with("mul(") && source.ends_with("ModelViewProjectionMatrix)"));
+    (is_ident && is_clip_space).then_some(target)
 }
 
 const LIGHTING_V1_STUB: &str = "vec3 PerformLighting_V1(vec3 worldPos, vec3 albedo, vec3 normal, vec3 viewDir, vec3 specularTint, vec3 baseReflectance, float roughness, float metallic) { return vec3(0.0); }\n";
@@ -287,7 +312,7 @@ pub fn preprocess(
     }
 
     let expanded = booleanize_combo_conditions(&expanded, &active);
-    let expanded = screen_position_to_texture_space(&expanded);
+    let expanded = screen_space_to_texture_space(&expanded);
     let body = expanded.replace("gl_FragColor", "out_FragColor");
     let body = if unused_io.is_empty() {
         body
@@ -660,14 +685,50 @@ mod tests {
     }
     #[test]
     fn a_screen_position_is_flipped_into_texture_space() {
-        let out = screen_position_to_texture_space("	v_ScreenPos = gl_Position.xyw;\n");
-        assert!(out.contains("v_ScreenPos.y = -v_ScreenPos.y;"), "{out}");
+        let out = screen_space_to_texture_space("	v_ScreenPos = gl_Position.xyw;\n#ifdef HLSL\n");
+        assert_eq!(
+            out,
+            "	v_ScreenPos = gl_Position.xyw; v_ScreenPos.y = -v_ScreenPos.y;\n#ifdef HLSL\n"
+        );
+    }
+
+    #[test]
+    fn a_projected_screen_coordinate_is_flipped_into_texture_space() {
+        for line in [
+            "	v_ScreenCoord = mul(vec4(a_Position, 1.0), g_ModelViewProjectionMatrix).xyw;\n",
+            "	v_ScreenCoord = mul(vec4((a_Position), 1.0), g_EffectModelViewProjectionMatrix).xyw;\n",
+            "	screenSpacePosition = clipSpacePosition.xyw;\n",
+        ] {
+            let out = screen_space_to_texture_space(line);
+            let target = line.trim().split_once(" = ").unwrap().0;
+            assert!(out.contains(&format!("{target}.y = -{target}.y;")), "{out}");
+        }
+    }
+
+    #[test]
+    fn an_unprojected_or_compound_xyw_is_left_alone() {
+        for source in [
+            "	v_PointerUV.xyz = mul(vec4(pointer * 2 - 1, 0.0, 1.0), g_ModelViewProjectionMatrixInverse).xyw;",
+            "	force.xyw += left.xyw;",
+            "	vec4 Q = (RGB.r < P.x) ? vec4(P.xyw, RGB.r) : vec4(RGB.r, P.yzx);",
+        ] {
+            assert_eq!(screen_space_to_texture_space(source), source);
+        }
+    }
+
+    #[test]
+    fn the_compose_layer_position_is_flipped_into_texture_space() {
+        let out = screen_space_to_texture_space("	vec3 position = vec3(a_TexCoord, 0.0);\n#if FOO\n");
+        assert_eq!(
+            out,
+            "	vec3 position = vec3(a_TexCoord, 0.0); position.y = 1.0 - position.y;\n#if FOO\n"
+        );
     }
 
     #[test]
     fn a_shader_without_a_screen_position_is_left_alone() {
         let source = "void main() { gl_Position = vec4(0.0); }";
-        assert_eq!(screen_position_to_texture_space(source), source);
+        assert_eq!(screen_space_to_texture_space(source), source);
     }
 
     #[test]
