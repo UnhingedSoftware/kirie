@@ -104,6 +104,7 @@ pub struct ScriptHost {
     destroyed: Vec<i64>,
     particle_ops: Vec<ParticleOp>,
     material_ops: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
+    scene_ops: Vec<(String, kirie_script::ScriptValue)>,
     video_ops: Vec<(i64, String, f64)>,
     wants_media: bool,
     media_prev: Option<MediaPrev>,
@@ -271,6 +272,7 @@ impl ScriptHost {
             destroyed: Vec::new(),
             particle_ops: Vec::new(),
             material_ops: Vec::new(),
+            scene_ops: Vec::new(),
             video_ops: Vec::new(),
             wants_media,
             media_prev: None,
@@ -519,12 +521,23 @@ impl ScriptHost {
                     });
                 }
                 SceneOp::DestroyLayer { layer_id } => {
+                    tracing::debug!(layer_id, "script destroyed layer");
                     self.layers.retain(|l| l.id != layer_id);
                     self.destroyed.push(layer_id);
+                }
+                SceneOp::SetSceneProperty { name, value } => {
+                    if apply_scene_state(&mut self.scene, &name, &value) {
+                        self.scene_dirty = true;
+                        self.scene_ops.push((name, value));
+                    }
                 }
             }
         }
         updates
+    }
+
+    pub fn take_scene_ops(&mut self) -> Vec<(String, kirie_script::ScriptValue)> {
+        std::mem::take(&mut self.scene_ops)
     }
 
     pub fn take_destroyed(&mut self) -> Vec<i64> {
@@ -880,6 +893,43 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
     ls
 }
 
+fn apply_scene_state(scene: &mut SceneState, name: &str, value: &ScriptValue) -> bool {
+    let as_bool = || match value {
+        ScriptValue::Bool(b) => Some(*b),
+        _ => as_f32(value).map(|f| f != 0.0),
+    };
+    match name {
+        "bloom" => scene.bloom = as_bool().unwrap_or(scene.bloom),
+        "bloomstrength" => scene.bloomstrength = as_f32(value).map_or(scene.bloomstrength, |f| f as i64),
+        "bloomthreshold" => scene.bloomthreshold = as_f32(value).map_or(scene.bloomthreshold, |f| f as i64),
+        "clearenabled" => scene.clearenabled = as_bool().unwrap_or(scene.clearenabled),
+        "camerafade" => scene.camerafade = as_bool().unwrap_or(scene.camerafade),
+        "camerashake" => scene.camerashake = as_bool().unwrap_or(scene.camerashake),
+        "camerashakespeed" => scene.camerashakespeed = as_f32(value).unwrap_or(scene.camerashakespeed),
+        "camerashakeamplitude" => {
+            scene.camerashakeamplitude = as_f32(value).unwrap_or(scene.camerashakeamplitude);
+        }
+        "camerashakeroughness" => {
+            scene.camerashakeroughness = as_f32(value).unwrap_or(scene.camerashakeroughness);
+        }
+        "cameraparallax" => scene.cameraparallax = as_bool().unwrap_or(scene.cameraparallax),
+        "cameraparallaxamount" => {
+            scene.cameraparallaxamount = as_f32(value).unwrap_or(scene.cameraparallaxamount);
+        }
+        "cameraparallaxdelay" => {
+            scene.cameraparallaxdelay = as_f32(value).unwrap_or(scene.cameraparallaxdelay);
+        }
+        "cameraparallaxmouseinfluence" => {
+            scene.cameraparallaxmouseinfluence = as_f32(value).unwrap_or(scene.cameraparallaxmouseinfluence);
+        }
+        "clearcolor" => scene.clearcolor = as_rgb(value).unwrap_or(scene.clearcolor),
+        "ambientcolor" => scene.ambientcolor = as_rgb(value).unwrap_or(scene.ambientcolor),
+        "skylightcolor" => scene.skylightcolor = as_rgb(value).unwrap_or(scene.skylightcolor),
+        _ => return false,
+    }
+    true
+}
+
 fn scene_state(model: &SceneModel) -> SceneState {
     let g = &model.scene.general;
     let cam = &model.scene.camera;
@@ -905,6 +955,15 @@ fn scene_state(model: &SceneModel) -> SceneState {
         fov: cam.fov.value,
         nearz: cam.nearz,
         farz: cam.farz,
+        camerafade: g.camerafade.value,
+        camerashake: g.camerashake.value,
+        camerashakespeed: g.camerashakespeed.value,
+        camerashakeamplitude: g.camerashakeamplitude.value,
+        camerashakeroughness: g.camerashakeroughness.value,
+        cameraparallax: g.cameraparallax.value,
+        cameraparallaxamount: g.cameraparallaxamount.value,
+        cameraparallaxdelay: g.cameraparallaxdelay.value,
+        cameraparallaxmouseinfluence: g.cameraparallaxmouseinfluence.value,
         camera: kirie_script::CameraState {
             eye: cam.eye,
             center: cam.center,

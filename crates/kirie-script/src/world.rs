@@ -829,6 +829,10 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
             name: obj.get("name").ok()?,
             value: op_value(&obj.get::<_, Value>("value").ok()?),
         }),
+        "setScene" => Some(SceneOp::SetSceneProperty {
+            name: obj.get("name").ok()?,
+            value: op_value(&obj.get::<_, Value>("value").ok()?),
+        }),
         _ => None,
     }
 }

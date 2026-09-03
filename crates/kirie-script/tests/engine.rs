@@ -220,6 +220,29 @@ fn this_layer_write_records_scene_op() {
 }
 
 #[test]
+fn this_scene_write_records_scene_op() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "visible_7",
+        "export function init(){ thisScene.cameraparallax = true; thisScene.cameraparallaxdelay = 0.61; thisScene.clearcolor = new Vec3(0.5, 0.25, 0); }\
+         export function update(v){ return thisScene.cameraparallax && thisScene.clearcolor.x === 0.5; }",
+        Some(7),
+        ScriptValue::Bool(false),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    assert_eq!(out.property_results[0].1, ScriptValue::Bool(true));
+    assert!(out.ops.iter().any(|op| matches!(op,
+        SceneOp::SetSceneProperty { name, value: ScriptValue::Bool(true) } if name == "cameraparallax")));
+    assert!(out.ops.iter().any(|op| matches!(op,
+        SceneOp::SetSceneProperty { name, value: ScriptValue::Float(f) } if name == "cameraparallaxdelay" && (f - 0.61).abs() < 1e-9)));
+    assert!(out.ops.iter().any(|op| matches!(op,
+        SceneOp::SetSceneProperty { name, value: ScriptValue::Vec3(v) } if name == "clearcolor" && *v == [0.5, 0.25, 0.0])));
+}
+
+#[test]
 fn cursor_screen_position_is_in_pixels() {
     let e = ScriptEngine::new().unwrap();
     e.load_property_script(

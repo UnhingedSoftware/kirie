@@ -269,6 +269,10 @@ pub enum SceneOp {
         name: String,
         value: ScriptValue,
     },
+    SetSceneProperty {
+        name: String,
+        value: ScriptValue,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

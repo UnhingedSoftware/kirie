@@ -829,6 +829,110 @@ impl SceneRenderer {
         }
     }
 
+    fn apply_scene_property(&mut self, name: &str, value: &kirie_script::ScriptValue) {
+        use super::scripting::{as_f32, as_rgb};
+        let as_bool = || match value {
+            kirie_script::ScriptValue::Bool(b) => Some(*b),
+            _ => as_f32(value).map(|f| f != 0.0),
+        };
+        let g = &mut self.general;
+        match name {
+            "bloom" => {
+                if let Some(b) = as_bool() {
+                    g.bloom.value = b;
+                }
+            }
+            "bloomstrength" => {
+                if let Some(f) = as_f32(value) {
+                    g.bloomstrength.value = f;
+                }
+            }
+            "bloomthreshold" => {
+                if let Some(f) = as_f32(value) {
+                    g.bloomthreshold.value = f;
+                }
+            }
+            "camerafade" => {
+                if let Some(b) = as_bool() {
+                    g.camerafade.value = b;
+                }
+            }
+            "camerashake" => {
+                if let Some(b) = as_bool() {
+                    g.camerashake.value = b;
+                }
+            }
+            "camerashakespeed" => {
+                if let Some(f) = as_f32(value) {
+                    g.camerashakespeed.value = f;
+                }
+            }
+            "camerashakeamplitude" => {
+                if let Some(f) = as_f32(value) {
+                    g.camerashakeamplitude.value = f;
+                }
+            }
+            "camerashakeroughness" => {
+                if let Some(f) = as_f32(value) {
+                    g.camerashakeroughness.value = f;
+                }
+            }
+            "cameraparallax" => {
+                if let Some(b) = as_bool() {
+                    g.cameraparallax.value = b;
+                }
+            }
+            "cameraparallaxamount" => {
+                if let Some(f) = as_f32(value) {
+                    g.cameraparallaxamount.value = f;
+                }
+            }
+            "cameraparallaxdelay" => {
+                if let Some(f) = as_f32(value) {
+                    g.cameraparallaxdelay.value = f;
+                }
+            }
+            "cameraparallaxmouseinfluence" => {
+                if let Some(f) = as_f32(value) {
+                    g.cameraparallaxmouseinfluence.value = f;
+                }
+            }
+            "clearcolor" => {
+                if let Some(c) = as_rgb(value) {
+                    g.clearcolor.value = [c[0], c[1], c[2], 1.0];
+                    self.clear_color = wgpu::Color {
+                        r: f64::from(c[0]),
+                        g: f64::from(c[1]),
+                        b: f64::from(c[2]),
+                        a: 1.0,
+                    };
+                }
+            }
+            "ambientcolor" => {
+                if let Some(c) = as_rgb(value) {
+                    g.ambientcolor.value = [c[0], c[1], c[2], 1.0];
+                    self.ambient = c;
+                }
+            }
+            "skylightcolor" => {
+                if let Some(c) = as_rgb(value) {
+                    g.skylightcolor.value = [c[0], c[1], c[2], 1.0];
+                    self.skylight = c;
+                }
+            }
+            _ => return,
+        }
+        if matches!(name, "bloomstrength" | "bloomthreshold")
+            && let Some(bloom) = &self.bloom
+        {
+            bloom.set_params(
+                &self.queue,
+                self.general.bloomstrength.value,
+                self.general.bloomthreshold.value,
+            );
+        }
+    }
+
     fn apply_script_scene_ops(&mut self) {
         let Some(script) = self.script.as_mut() else {
             return;
@@ -908,6 +1012,7 @@ impl SceneRenderer {
                 }
             }
         }
+        let scene_ops = script.take_scene_ops();
         for op in script.take_particle_ops() {
             let target = match &op {
                 ParticleOp::Command { id, .. }
@@ -998,6 +1103,9 @@ impl SceneRenderer {
             self.runtime_seq = order.len() as i64;
             self.items
                 .sort_by_key(|it| pos.get(&item_id(it)).copied().unwrap_or(usize::MAX));
+        }
+        for (name, value) in scene_ops {
+            self.apply_scene_property(&name, &value);
         }
     }
 }

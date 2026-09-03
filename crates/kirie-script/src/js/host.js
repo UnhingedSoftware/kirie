@@ -507,9 +507,28 @@ globalThis.__snapshotInitialLayers = function () {
   __host.initialLayers = snap;
 };
 ['bloom', 'bloomstrength', 'bloomthreshold', 'clearenabled', 'fov', 'nearz', 'farz', 'camerafade', 'camerashake', 'camerashakespeed', 'camerashakeamplitude', 'camerashakeroughness', 'cameraparallax', 'cameraparallaxamount', 'cameraparallaxdelay', 'cameraparallaxmouseinfluence'].forEach(function (k) {
-  Object.defineProperty(__scene, k, { enumerable: true, get: function () { return __host.scene[k]; } });
+  Object.defineProperty(__scene, k, {
+    enumerable: true,
+    get: function () { return __host.scene[k]; },
+    set: function (v) {
+      var cur = __host.scene[k];
+      var next = (typeof cur === 'boolean') ? !!v : +v;
+      __host.scene[k] = next;
+      __host.ops.push({ op: 'setScene', name: k, value: next });
+    },
+  });
 });
-['clearcolor', 'ambientcolor', 'skylightcolor'].forEach(function (k) { Object.defineProperty(__scene, k, { enumerable: true, get: __sceneVecGetter(k) }); });
+['clearcolor', 'ambientcolor', 'skylightcolor'].forEach(function (k) {
+  Object.defineProperty(__scene, k, {
+    enumerable: true,
+    get: __sceneVecGetter(k),
+    set: function (v) {
+      var next = Array.isArray(v) ? [+v[0], +v[1], +v[2]] : [+v.x, +v.y, +v.z];
+      __host.scene[k] = next;
+      __host.ops.push({ op: 'setScene', name: k, value: next });
+    },
+  });
+});
 globalThis.thisScene = __scene;
 
 // ---- createScriptProperties (docs §5.5, property-script variant) ----------
