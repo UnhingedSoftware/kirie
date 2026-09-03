@@ -2068,10 +2068,7 @@ impl Renderer for SceneRenderer {
 
         let spectrum = self.audio.as_ref().map(|a| a.latest_spectrum());
 
-        let pointer_scene = {
-            let (pw, ph) = self.projection_size();
-            [self.pointer[0] * pw as f32, self.pointer[1] * ph as f32]
-        };
+        let pointer_scene = pointer_to_scene(self.pointer, self.projection_size());
         let media_state = self.media.as_ref().map(|m| m.latest());
         let anim = match self.animator.as_mut() {
             Some(a) => {
@@ -2459,7 +2456,7 @@ impl Renderer for SceneRenderer {
                     if pg.sim.follows_pointer() {
                         pg.sim.set_pointer_local([
                             pointer_scene[0] - pg.origin[0],
-                            pg.origin[1] - pointer_scene[1],
+                            pointer_scene[1] - pg.origin[1],
                             0.0,
                         ]);
                     }
@@ -3497,6 +3494,13 @@ fn transform_affected(id: i64, dirty: &[i64], locals: &HashMap<i64, LocalXf>) ->
     false
 }
 
+fn pointer_to_scene(pointer: [f32; 2], projection: (u32, u32)) -> [f32; 2] {
+    [
+        pointer[0] * projection.0 as f32,
+        (1.0 - pointer[1]) * projection.1 as f32,
+    ]
+}
+
 fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     let mut chain: Vec<LocalXf> = Vec::new();
     let mut cur = Some(id);
@@ -4106,6 +4110,13 @@ gl_FragColor = texSample2D(g_Texture0, v_TexCoord);\n\
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pointer_scene_space_is_y_up_like_layer_origins() {
+        assert_eq!(pointer_to_scene([0.5, 0.5], (1920, 1080)), [960.0, 540.0]);
+        assert_eq!(pointer_to_scene([0.0, 0.0], (1920, 1080)), [0.0, 1080.0]);
+        assert_eq!(pointer_to_scene([1.0, 1.0], (1920, 1080)), [1920.0, 0.0]);
+    }
 
     fn apply(m: &Mat4, p: [f32; 4]) -> [f32; 4] {
         let mut out = [0.0f32; 4];
