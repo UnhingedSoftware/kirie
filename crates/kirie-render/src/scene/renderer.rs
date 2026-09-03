@@ -104,6 +104,7 @@ struct ObjectGpu {
     final_front: Option<usize>,
     atlas: Option<Arc<super::texture::AtlasTexture>>,
     image_size: (u32, u32),
+    anchor: [f32; 2],
 }
 
 struct AtlasSlot {
@@ -797,6 +798,7 @@ impl SceneRenderer {
                 }
                 continue;
             };
+            let origin = anchored_origin(origin, o.image_size, scale, angle_z, o.anchor);
             let quad = scene_space_quad(origin, o.image_size, scale, angle_z, (sw, sh));
             for pass in &o.passes {
                 if pass.geometry != Geometry::Scene {
@@ -1230,6 +1232,8 @@ fn build_object(
 
     let scale = world_scale;
     let angle_z = world_angle_z;
+    let anchor = alignment_anchor(&image.alignment);
+    let origin = anchored_origin(origin, (iw, ih), [scale[0], scale[1]], angle_z, anchor);
     let scene_quad = scene_space_quad(origin, (iw, ih), [scale[0], scale[1]], angle_z, scene_size);
     let model_matrix = matrix::ortho(0.0, iw as f32, 0.0, ih as f32, 0.0, 1.0);
 
@@ -1602,6 +1606,7 @@ fn build_object(
         angle_z: world_angle_z,
         atlas: layer_atlas,
         image_size: (iw, ih),
+        anchor,
     })
 }
 
@@ -3179,6 +3184,40 @@ fn local_to_scene(
     matrix::mul(&center, &matrix::mul(&matrix::rotation_z(-angle_z), &half))
 }
 
+fn alignment_anchor(alignment: &str) -> [f32; 2] {
+    let x = if alignment.ends_with("left") {
+        1.0
+    } else if alignment.ends_with("right") {
+        -1.0
+    } else {
+        0.0
+    };
+    let y = if alignment.starts_with("top") {
+        -1.0
+    } else if alignment.starts_with("bottom") {
+        1.0
+    } else {
+        0.0
+    };
+    [x, y]
+}
+
+fn anchored_origin(
+    origin: [f32; 2],
+    size: (u32, u32),
+    scale: [f32; 2],
+    angle_z: f32,
+    anchor: [f32; 2],
+) -> [f32; 2] {
+    if anchor == [0.0, 0.0] {
+        return origin;
+    }
+    let dx = anchor[0] * size.0 as f32 / 2.0 * scale[0];
+    let dy = anchor[1] * size.1 as f32 / 2.0 * scale[1];
+    let (s, c) = (-angle_z).sin_cos();
+    [origin[0] + dx * c - dy * s, origin[1] + dx * s + dy * c]
+}
+
 fn scene_space_quad(
     origin: [f32; 2],
     size: (u32, u32),
@@ -3941,6 +3980,42 @@ mod tests {
             &inputs,
         )
         .expect("commands/copy fragment stage must translate");
+    }
+
+    #[test]
+    fn a_topleft_layer_hangs_from_its_origin() {
+        let anchor = alignment_anchor("topleft");
+        let origin = anchored_origin([653.0, 1080.0], (653, 30), [1.0, 1.0], 0.0, anchor);
+        assert_eq!(origin, [979.5, 1065.0]);
+        let q = scene_space_quad(origin, (653, 30), [1.0, 1.0], 0.0, (1920, 1080));
+        assert!((q[0][0] - (653.0 - 960.0)).abs() < 1e-3);
+        assert!((q[0][1] - 540.0).abs() < 1e-3);
+        assert!((q[3][0] - (1306.0 - 960.0)).abs() < 1e-3);
+        assert!((q[3][1] - 510.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn a_centered_layer_keeps_its_origin() {
+        let anchor = alignment_anchor("center");
+        assert_eq!(
+            anchored_origin([10.0, 20.0], (100, 50), [2.0, 2.0], 0.7, anchor),
+            [10.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn a_left_layer_rotates_about_its_origin() {
+        let anchor = alignment_anchor("left");
+        assert_eq!(anchor, [1.0, 0.0]);
+        let origin = anchored_origin(
+            [0.0, 0.0],
+            (100, 20),
+            [1.0, 1.0],
+            std::f32::consts::FRAC_PI_2,
+            anchor,
+        );
+        assert!(origin[0].abs() < 1e-4, "{origin:?}");
+        assert!((origin[1] + 50.0).abs() < 1e-4, "{origin:?}");
     }
 
     #[test]
