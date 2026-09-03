@@ -107,9 +107,12 @@ impl Object {
                 resolve_us(&mut t.color, bag);
                 resolve_us(&mut t.alpha, bag);
                 resolve_us(&mut t.visible, bag);
+                for effect in &mut t.effects {
+                    effect.resolve(bag);
+                }
             }
-            ObjectKind::Sound(_)
-            | ObjectKind::Model(_)
+            ObjectKind::Sound(snd) => resolve_us(&mut snd.volume, bag),
+            ObjectKind::Model(_)
             | ObjectKind::Light(_)
             | ObjectKind::Shape(_)
             | ObjectKind::Group => {}
@@ -263,6 +266,7 @@ impl SceneModel {
             match &mut object.kind {
                 ObjectKind::Image(img) => load_image_assets(img, source, &mut problems),
                 ObjectKind::Particle(p) => load_particle_assets(p, source, &mut problems),
+                ObjectKind::Text(t) => load_effect_assets(&mut t.effects, source, &mut problems),
                 _ => {}
             }
         }
@@ -288,7 +292,11 @@ fn load_image_assets(img: &mut ImageObject, source: &dyn AssetSource, problems: 
             }),
         }
     }
-    for effect in &mut img.effects {
+    load_effect_assets(&mut img.effects, source, problems);
+}
+
+fn load_effect_assets(effects: &mut [Effect], source: &dyn AssetSource, problems: &mut Vec<AssetProblem>) {
+    for effect in effects {
         if let Some(value) = load_json(source, &effect.file, problems) {
             let mut file = EffectFile::from_value(&value);
             for pass in &mut file.passes {

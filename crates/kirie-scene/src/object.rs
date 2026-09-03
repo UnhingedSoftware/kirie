@@ -295,12 +295,14 @@ pub struct TextObject {
     pub padding: i64,
     pub limitwidth: bool,
     pub maxwidth: f32,
+    pub effects: Vec<Effect>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SoundObject {
     pub sound: Vec<String>,
     pub playbackmode: Option<String>,
+    pub volume: UserSetting<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -387,14 +389,7 @@ fn parse_image(obj: &Map<String, Value>) -> ImageObject {
         .unwrap_or("center")
         .to_owned();
     let size = user_vec2(obj, "size", [0.0, 0.0]).value;
-    let effects = match obj.get("effects") {
-        Some(Value::Array(a)) => a
-            .iter()
-            .filter_map(Value::as_object)
-            .filter_map(Effect::parse)
-            .collect(),
-        _ => Vec::new(),
-    };
+    let effects = parse_effects(obj);
     let animationlayers = match obj.get("animationlayers") {
         Some(Value::Array(a)) => a
             .iter()
@@ -463,6 +458,18 @@ fn parse_text(obj: &Map<String, Value>) -> TextObject {
             .get("maxwidth")
             .and_then(Value::as_f64)
             .map_or(500.0, |v| v as f32),
+        effects: parse_effects(obj),
+    }
+}
+
+fn parse_effects(obj: &Map<String, Value>) -> Vec<Effect> {
+    match obj.get("effects") {
+        Some(Value::Array(a)) => a
+            .iter()
+            .filter_map(Value::as_object)
+            .filter_map(Effect::parse)
+            .collect(),
+        _ => Vec::new(),
     }
 }
 
@@ -474,6 +481,7 @@ fn parse_sound(obj: &Map<String, Value>) -> ObjectKind {
     ObjectKind::Sound(SoundObject {
         sound,
         playbackmode: obj.get("playbackmode").and_then(Value::as_str).map(str::to_owned),
+        volume: user_f32(obj, "volume", 1.0),
     })
 }
 
