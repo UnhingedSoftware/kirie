@@ -66,7 +66,6 @@ pub struct World {
     context: Context,
     modules: BTreeMap<String, ModuleMeta>,
     order: Vec<String>,
-    next_layer_handle: u32,
     cursor: CursorState,
     prev_res: Option<[f64; 2]>,
     language: String,
@@ -102,7 +101,6 @@ impl World {
             context,
             modules: BTreeMap::new(),
             order: Vec::new(),
-            next_layer_handle: 0,
             cursor: CursorState::default(),
             prev_res: None,
             language: system_language(),
@@ -379,54 +377,6 @@ impl World {
             if let Ok(f) = persist {
                 let _ = ctx.globals().set("__persistStorage", f);
             }
-        });
-    }
-
-    pub fn create_layer_script(
-        &mut self,
-        source: &str,
-        script_properties: &serde_json::Value,
-        initial_text: &str,
-    ) -> u32 {
-        self.next_layer_handle += 1;
-        let handle = self.next_layer_handle;
-        let ok = self.context.with(|ctx| -> bool {
-            let props = match json_to_js(&ctx, script_properties) {
-                Ok(v) => v,
-                Err(_) => return false,
-            };
-            let create: Function = match global(&ctx, "__createLayerScript") {
-                Ok(f) => f,
-                Err(_) => return false,
-            };
-            create
-                .call::<_, bool>((handle, source, props, initial_text))
-                .catch(&ctx)
-                .unwrap_or(false)
-        });
-        if ok { handle } else { 0 }
-    }
-
-    pub fn tick_layer(&mut self, handle: u32, time: f64, dt: f64, fps: f64) -> Vec<LogLine> {
-        self.context.with(|ctx| {
-            let _ = call_void(&ctx, "__tickLayer", (handle, time, dt, fps));
-            let mut out = TickOutput::default();
-            drain_side_effects(&ctx, &mut out);
-            out.logs
-        })
-    }
-
-    pub fn layer_text(&self, handle: u32) -> String {
-        self.context.with(|ctx| {
-            global(&ctx, "__layerText")
-                .and_then(|f: Function| f.call::<_, String>((handle,)).internal())
-                .unwrap_or_default()
-        })
-    }
-
-    pub fn destroy_layer(&mut self, handle: u32) {
-        self.context.with(|ctx| {
-            let _ = call_void(&ctx, "__destroyLayer", (handle,));
         });
     }
 

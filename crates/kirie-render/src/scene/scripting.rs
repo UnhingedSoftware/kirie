@@ -204,11 +204,7 @@ impl ScriptHost {
             }
         }
 
-        let has_text_scripts =
-            model.scene.objects.iter().any(
-                |o| matches!(&o.kind, kirie_scene::object::ObjectKind::Text(t) if t.text.script.is_some()),
-            );
-        if pending.is_empty() && !has_text_scripts {
+        if pending.is_empty() {
             return None;
         }
 
@@ -294,27 +290,6 @@ impl ScriptHost {
             tz_offset_secs: local_utc_offset_secs(),
             overrides: Vec::new(),
         })
-    }
-
-    pub fn create_text_layer(
-        &mut self,
-        source: &str,
-        properties: serde_json::Value,
-        initial_text: &str,
-    ) -> Option<u32> {
-        match self.engine.create_layer_script(source, properties, initial_text) {
-            Ok(h) if h != 0 => Some(h),
-            Ok(_) => None,
-            Err(e) => {
-                tracing::debug!(error = %e, "text layer script failed to load");
-                None
-            }
-        }
-    }
-
-    pub fn tick_text_layer(&mut self, handle: u32, time: f64, dt: f64) -> Option<String> {
-        let _ = self.engine.tick_layer(handle, time, dt, 60.0);
-        self.engine.layer_text(handle).ok()
     }
 
     pub fn tick(

@@ -594,7 +594,7 @@ impl SceneRenderer {
         let (blit_pipeline, blit_bind, blit_window) =
             build_blit(device, target.format, &scene_fbo, &fbo_sampler);
 
-        let mut script = ScriptHost::build(model, (proj_w, proj_h), user_props);
+        let script = ScriptHost::build(model, (proj_w, proj_h), user_props);
         let animator = PropertyAnimator::build(model);
         let tz_offset_secs = if animator.is_some() {
             super::scripting::local_utc_offset_secs()
@@ -603,17 +603,6 @@ impl SceneRenderer {
         };
         let zoom = model.scene.general.zoom.value;
         let zoom = if zoom > 0.0 { zoom } else { 1.0 };
-
-        if let Some(host) = script.as_mut() {
-            for item in &mut items {
-                if let SceneItem::Text(tg) = item {
-                    let initial = tg.current_text().to_owned();
-                    if let Some(ts) = tg.script.as_mut() {
-                        ts.handle = host.create_text_layer(&ts.source, ts.properties.clone(), &initial);
-                    }
-                }
-            }
-        }
 
         let media = script.as_ref().filter(|h| h.wants_media()).map(|_| {
             Arc::new(crate::media::MediaSource::start(
@@ -1827,20 +1816,7 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        if let (Some(host), Some(tp), Some(fonts)) = (
-            self.script.as_mut(),
-            self.text_pipeline.as_ref(),
-            self.text_fonts.as_mut(),
-        ) {
-            let elapsed = self.elapsed;
-            for item in &mut self.items {
-                if let SceneItem::Text(tg) = item
-                    && let Some(handle) = tg.script.as_ref().and_then(|s| s.handle)
-                    && let Some(new_text) = host.tick_text_layer(handle, elapsed, f64::from(dt))
-                {
-                    tg.retext(&self.device, &self.queue, tp, fonts, &new_text);
-                }
-            }
+        if let (Some(tp), Some(fonts)) = (self.text_pipeline.as_ref(), self.text_fonts.as_mut()) {
             for u in &updates {
                 if u.target != PropTarget::Text {
                     continue;

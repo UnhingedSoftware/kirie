@@ -26,7 +26,6 @@ globalThis.__host = {
   scriptProps: {},
   timers: [],
   timerSeq: 1,
-  textLayers: Object.create(null),
   modules: Object.create(null),
 };
 
@@ -630,30 +629,3 @@ globalThis.__callExport = function (key, name, arg, arg2) {
 };
 globalThis.__moduleWorkshopId = function (key) { var ns = __host.modules[key]; return ns && typeof ns.__workshopId === 'string' ? ns.__workshopId : null; };
 
-// ---- text-layer scripts (docs §7) -----------------------------------------
-globalThis.__createLayerScript = function (handle, source, props, text) {
-  // §7.1 source transform: strip 'use strict'; / "use strict"; / 'export '.
-  var stripped = source.split("'use strict';").join('').split('"use strict";').join('').split('export ').join('');
-  var wrapper = '(function(){\n'
-    + 'var __id = ' + handle + ';\n'
-    + 'var __props = Object.assign({}, globalThis.__layerSeedProps || {});\n'
-    + 'var thisLayer = { text: String(globalThis.__layerSeedText || "") };\n'
-    + 'var thisScene = { get time(){ var c = globalThis.__sceneCtx; return c?c.time:0; }, get currentTime(){ var c = globalThis.__sceneCtx; return c?c.time:0; }, get dt(){ var c = globalThis.__sceneCtx; return c?c.dt:0; }, get fps(){ var c = globalThis.__sceneCtx; return c?c.fps:60; } };\n'
-    + 'var engine = { get frametime(){ var c = globalThis.__sceneCtx; return c?c.dt:0; }, get time(){ var c = globalThis.__sceneCtx; return c?c.time:0; } };\n'
-    + 'function createScriptProperties(){ var b = { addSlider:add, addCheckbox:add, addCombo:add, addColor:add, addText:add, finish:function(){ return __props; } }; function add(o){ if (o && !(o.name in __props)) { var v = o.value; if (v === undefined && o.options && o.options.length) v = o.options[0].value; __props[o.name] = v; } return b; } return b; }\n'
-    + stripped + '\n'
-    + 'globalThis.__host.textLayers[__id] = { thisLayer: thisLayer, thisScene: thisScene, _init: (typeof init === "function")?init:null, _destroy: (typeof destroy === "function")?destroy:null, _tick: (typeof update === "function")?function(){ var r = update(thisLayer.text); if (typeof r === "string") thisLayer.text = r; }:null, _inited:false };\n'
-    + '})();';
-  globalThis.__layerSeedProps = props || {};
-  globalThis.__layerSeedText = text || '';
-  try { (0, eval)(wrapper); } finally { globalThis.__layerSeedProps = undefined; globalThis.__layerSeedText = undefined; }
-  return !!__host.textLayers[handle];
-};
-globalThis.__tickLayer = function (handle, time, dt, fps) {
-  globalThis.__sceneCtx = { time: time, dt: dt, fps: fps };
-  var e = __host.textLayers[handle]; if (!e) return;
-  if (!e._inited) { e._inited = true; if (e._init) { try { e._init.call(e); } catch (ex) { __host.console.push('E' + String(ex && ex.stack || ex)); } } }
-  if (e._tick) { try { e._tick.call(e); } catch (ex) { __host.console.push('E' + String(ex && ex.stack || ex)); } }
-};
-globalThis.__layerText = function (handle) { var e = __host.textLayers[handle]; return e ? String(e.thisLayer.text) : ''; };
-globalThis.__destroyLayer = function (handle) { var e = __host.textLayers[handle]; if (e && e._destroy) { try { e._destroy.call(e); } catch (ex) { __host.console.push('E' + String(ex && ex.stack || ex)); } } delete __host.textLayers[handle]; };

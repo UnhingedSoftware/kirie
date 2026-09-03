@@ -3,7 +3,7 @@ use std::thread::JoinHandle;
 use crossbeam_channel::{Sender, bounded};
 
 use crate::error::ScriptError;
-use crate::frame::{HostFrame, LogLine, TickOutput};
+use crate::frame::{HostFrame, TickOutput};
 use crate::value::ScriptValue;
 use crate::world::World;
 
@@ -31,27 +31,6 @@ enum Command {
         key: String,
         value: ScriptValue,
         reply: Sender<TickOutput>,
-    },
-    CreateLayerScript {
-        source: String,
-        script_properties: serde_json::Value,
-        initial_text: String,
-        reply: Sender<u32>,
-    },
-    TickLayer {
-        handle: u32,
-        time: f64,
-        dt: f64,
-        fps: f64,
-        reply: Sender<Vec<LogLine>>,
-    },
-    LayerText {
-        handle: u32,
-        reply: Sender<String>,
-    },
-    DestroyLayer {
-        handle: u32,
-        reply: Sender<()>,
     },
     Eval {
         source: String,
@@ -156,46 +135,6 @@ impl ScriptEngine {
         rx.recv().map_err(|_| ScriptError::ThreadGone)
     }
 
-    pub fn create_layer_script(
-        &self,
-        source: impl Into<String>,
-        script_properties: serde_json::Value,
-        initial_text: impl Into<String>,
-    ) -> Result<u32, ScriptError> {
-        let (reply, rx) = bounded(1);
-        self.send(Command::CreateLayerScript {
-            source: source.into(),
-            script_properties,
-            initial_text: initial_text.into(),
-            reply,
-        })?;
-        rx.recv().map_err(|_| ScriptError::ThreadGone)
-    }
-
-    pub fn tick_layer(&self, handle: u32, time: f64, dt: f64, fps: f64) -> Result<Vec<LogLine>, ScriptError> {
-        let (reply, rx) = bounded(1);
-        self.send(Command::TickLayer {
-            handle,
-            time,
-            dt,
-            fps,
-            reply,
-        })?;
-        rx.recv().map_err(|_| ScriptError::ThreadGone)
-    }
-
-    pub fn layer_text(&self, handle: u32) -> Result<String, ScriptError> {
-        let (reply, rx) = bounded(1);
-        self.send(Command::LayerText { handle, reply })?;
-        rx.recv().map_err(|_| ScriptError::ThreadGone)
-    }
-
-    pub fn destroy_layer(&self, handle: u32) -> Result<(), ScriptError> {
-        let (reply, rx) = bounded(1);
-        self.send(Command::DestroyLayer { handle, reply })?;
-        rx.recv().map_err(|_| ScriptError::ThreadGone)
-    }
-
     pub fn set_storage_path(&self, path: std::path::PathBuf) -> Result<(), ScriptError> {
         self.send(Command::SetStoragePath { path })
     }
@@ -246,30 +185,6 @@ fn serve(world: &mut World, cmd: Command) {
         }
         Command::DispatchUserProperty { key, value, reply } => {
             let _ = reply.send(world.dispatch_user_property(&key, &value));
-        }
-        Command::CreateLayerScript {
-            source,
-            script_properties,
-            initial_text,
-            reply,
-        } => {
-            let _ = reply.send(world.create_layer_script(&source, &script_properties, &initial_text));
-        }
-        Command::TickLayer {
-            handle,
-            time,
-            dt,
-            fps,
-            reply,
-        } => {
-            let _ = reply.send(world.tick_layer(handle, time, dt, fps));
-        }
-        Command::LayerText { handle, reply } => {
-            let _ = reply.send(world.layer_text(handle));
-        }
-        Command::DestroyLayer { handle, reply } => {
-            world.destroy_layer(handle);
-            let _ = reply.send(());
         }
         Command::Eval { source, reply } => {
             let _ = reply.send(world.eval_to_string(&source));

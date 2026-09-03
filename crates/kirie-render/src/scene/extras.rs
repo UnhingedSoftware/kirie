@@ -30,15 +30,8 @@ pub struct TextGpu {
     pub bind: wgpu::BindGroup,
     pub vertex_buffer: wgpu::Buffer,
     _texture: GpuTexture,
-    pub script: Option<TextScriptState>,
     rebuild: TextRebuild,
     ubo: wgpu::Buffer,
-}
-
-pub struct TextScriptState {
-    pub source: String,
-    pub properties: serde_json::Value,
-    pub handle: Option<u32>,
 }
 
 struct TextRebuild {
@@ -494,11 +487,6 @@ pub fn build_text(
         bind,
         vertex_buffer,
         _texture: texture,
-        script: tobj.text.script.as_ref().map(|sb| TextScriptState {
-            source: sb.source.clone(),
-            properties: serde_json::Value::Object(sb.properties.clone()),
-            handle: None,
-        }),
         rebuild: TextRebuild {
             current: tobj.text.value.clone(),
             font: tobj.font.clone(),

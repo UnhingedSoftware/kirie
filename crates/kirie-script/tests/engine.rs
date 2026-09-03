@@ -702,23 +702,6 @@ fn engine_interval_fires_by_frame_clock() {
 }
 
 #[test]
-fn text_layer_script_ticks_and_reads_text() {
-    let e = ScriptEngine::new().unwrap();
-    let h = e
-        .create_layer_script(
-            "'use strict';\nexport function update(value){ return 'T:' + Math.floor(thisScene.time); }",
-            serde_json::json!({}),
-            "placeholder",
-        )
-        .unwrap();
-    assert!(h > 0);
-    e.tick_layer(h, 5.0, 0.016, 60.0).unwrap();
-    assert_eq!(e.layer_text(h).unwrap(), "T:5");
-    e.destroy_layer(h).unwrap();
-    assert_eq!(e.layer_text(h).unwrap(), "");
-}
-
-#[test]
 fn register_audio_buffers_reads_matching_resolution() {
     let e = ScriptEngine::new().unwrap();
     for (res, key) in [(16, "a16"), (32, "a32"), (64, "a64")] {
