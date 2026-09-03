@@ -139,7 +139,11 @@ impl PropertyAnimation {
             wraploop,
             startpaused: opt("startpaused").and_then(Value::as_bool).unwrap_or(false),
             name: opt("name").and_then(Value::as_str).map(str::to_owned),
-            relative: property.get("relative").and_then(Value::as_bool).unwrap_or(false),
+            relative: anim
+                .get("relative")
+                .or_else(|| property.get("relative"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
             parent: opt("parent")
                 .and_then(|p| p.get("key"))
                 .and_then(Value::as_str)
@@ -289,13 +293,13 @@ mod tests {
     fn parses_options_and_channels() {
         let a = PropertyAnimation::parse(&prop(json!({
             "value": "1 2 0",
-            "relative": true,
             "animation": {
                 "c0": [key(0.0, 0.0), key(30.0, 10.0)],
                 "c1": [key(0.0, 0.0), key(30.0, -5.0)],
                 "options": {"fps": 15, "length": 60, "mode": "loop", "wraploop": true,
                             "startpaused": true, "name": "n", "parent": {"key": "alpha"},
-                            "children": [{"key": "scale"}], "events": [{"frame": 30, "name": "e"}]}
+                            "children": [{"key": "scale"}], "events": [{"frame": 30, "name": "e"}]},
+                "relative": true
             }
         })))
         .unwrap();
