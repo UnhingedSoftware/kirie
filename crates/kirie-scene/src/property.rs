@@ -49,7 +49,7 @@ impl PropertyBag {
                     PropertyKind::Slider { value, .. } => PropertyValue::Number(f64::from(*value)),
                     PropertyKind::Color { value: [r, g, b] } => PropertyValue::Color([*r, *g, *b, 1.0]),
                     PropertyKind::Combo { value, .. } => PropertyValue::Combo(value.clone()),
-                    PropertyKind::Text => PropertyValue::Text(p.text.clone()),
+                    PropertyKind::Text => PropertyValue::Text(String::new()),
                     PropertyKind::TextInput { value }
                     | PropertyKind::UserShortcut { value }
                     | PropertyKind::File { value }
@@ -239,5 +239,27 @@ impl Resolvable for DynamicValue {
     }
     fn from_bool(b: bool) -> Self {
         DynamicValue::Bool(b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_properties_resolve_to_empty_text() {
+        let project = Project::from_value(serde_json::json!({
+            "title": "t",
+            "file": "scene.json",
+            "type": "scene",
+            "general": { "properties": {
+                "heading": { "type": "text", "text": "<h4>Notepad</h4>", "value": false, "order": 1 },
+                "name": { "type": "textinput", "text": "Name", "value": "TYO", "order": 2 }
+            } }
+        }))
+        .expect("project parses");
+        let bag = PropertyBag::from_project(&project);
+        assert_eq!(bag.get("heading"), Some(&PropertyValue::Text(String::new())));
+        assert_eq!(bag.get("name"), Some(&PropertyValue::Text("TYO".into())));
     }
 }
