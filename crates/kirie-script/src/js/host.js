@@ -235,6 +235,15 @@ function __makeLayer(id) {
       __host.ops.push({ op: 'setParent', id: id, parent: pid });
     },
   };
+  Object.defineProperty(self, 'size', {
+    enumerable: true,
+    get: function () { var l = __layerById(id); if (!l || !l.size) return undefined; return new Vec2(l.size[0], l.size[1]); },
+  });
+  Object.defineProperty(self, 'solid', {
+    enumerable: true,
+    get: function () { var l = __layerById(id); return !!(l && l.solid); },
+    set: function (val) { var l = __layerById(id); if (l) l.solid = !!val; },
+  });
   var names = Object.keys(__VEC3_PROPS).concat(Object.keys(__VEC2_PROPS), Object.keys(__NUM_PROPS), Object.keys(__BOOL_PROPS), Object.keys(__STR_PROPS));
   names.forEach(function (name) {
     Object.defineProperty(self, name, {
@@ -308,23 +317,30 @@ var __scene = {
   // docs §6.2: the new layer is not visible in this frame's snapshot; return
   // undefined and let the integrator create it (deviation, documented).
   createLayer: function (arg) {
-    var path = (typeof arg === 'string') ? arg : (arg && arg.file);
-    if (!path) return undefined;
-    // Return a REAL layer proxy backed by a synthetic script-world record, not
-    // undefined: scripts chain property writes off the return value
-    // (`var bar = thisScene.createLayer(...); bar.alignment = ...`) and an
-    // undefined return throws mid-init, aborting the rest of the script (e.g.
-    // the audio-visualizer template never gets its `thisLayer.visible=false`).
-    // The compositor does not draw synthetic layers yet (the createLayer op is
-    // recorded for it); the proxy keeps scripts running to completion.
+    var cfg = (arg && typeof arg === 'object') ? arg : {};
+    var path = (typeof arg === 'string') ? arg : (typeof cfg.file === 'string' ? cfg.file : '');
+    if (!path && typeof arg !== 'object') return undefined;
     if (__host.__nextSyntheticId === undefined) __host.__nextSyntheticId = -1000;
     var id = __host.__nextSyntheticId--;
-    __host.layers.push({
-      id: id, name: String(path), parent: null,
-      origin: [0, 0, 0], angles: [0, 0, 0], scale: [1, 1, 1],
-      visible: true, alpha: 1, color: [1, 1, 1],
+    var v3 = function (v, d) {
+      if (v == null) return d;
+      if (typeof v === 'number') return [v, v, v];
+      if (typeof v === 'string') { var p = v.split(/\s+/).map(Number); return [p[0] || 0, p[1] || 0, p[2] || 0]; }
+      if (typeof v.length === 'number') return [+v[0] || 0, +v[1] || 0, +v[2] || 0];
+      return [+v.x || 0, +v.y || 0, +v.z || 0];
+    };
+    var rec = {
+      id: id, name: (typeof cfg.name === 'string') ? cfg.name : String(path), parent: null,
+      origin: v3(cfg.origin, [0, 0, 0]), angles: v3(cfg.angles, [0, 0, 0]), scale: v3(cfg.scale, [1, 1, 1]),
+      visible: (cfg.visible === undefined) ? true : !!cfg.visible,
+      alpha: (cfg.alpha === undefined) ? 1 : +cfg.alpha, color: v3(cfg.color, [1, 1, 1]),
+    };
+    if (typeof cfg.text === 'string') { rec.text = cfg.text; rec.pointSize = (cfg.pointsize === undefined) ? 24 : +cfg.pointsize; }
+    __host.layers.push(rec);
+    __host.ops.push({ op: 'createLayer', id: id, path: path, workshopId: __host.workshopId, text: rec.text });
+    ['origin', 'angles', 'scale', 'color', 'visible', 'alpha', 'text', 'pointSize'].forEach(function (k) {
+      if (rec[k] !== undefined) __recordProp(id, k, Array.isArray(rec[k]) ? rec[k].slice() : rec[k]);
     });
-    __host.ops.push({ op: 'createLayer', id: id, path: path, workshopId: __host.workshopId });
     return __makeLayer(id);
   },
   sortLayer: function (layer, index) { if (layer && layer.__id !== undefined) __host.ops.push({ op: 'sortLayer', id: layer.__id, index: index }); },

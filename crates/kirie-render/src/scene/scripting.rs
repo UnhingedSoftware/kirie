@@ -451,7 +451,9 @@ impl ScriptHost {
                         });
                     }
                 }
-                SceneOp::CreateLayer { layer_id, path, .. } => {
+                SceneOp::CreateLayer {
+                    layer_id, path, text, ..
+                } => {
                     self.layers.push(LayerState {
                         id: layer_id,
                         name: path.clone(),
@@ -461,9 +463,12 @@ impl ScriptHost {
                         visible: Some(true),
                         alpha: Some(1.0),
                         color: Some([1.0; 3]),
+                        text,
                         ..LayerState::default()
                     });
-                    self.created.push((layer_id, path));
+                    if !path.is_empty() {
+                        self.created.push((layer_id, path));
+                    }
                 }
                 SceneOp::SetCameraTransforms {
                     eye,
