@@ -304,7 +304,11 @@ fn text_corpus_renders_real_glyphs() {
                 &tobj.text.value,
                 &tobj.font,
                 tobj.pointsize.value,
-                if tobj.limitwidth { tobj.maxwidth.value } else { 0.0 },
+                text::TextLimits {
+                    max_width: tobj.limitwidth.then_some(tobj.maxwidth.value),
+                    max_rows: tobj.limitrows.then_some(tobj.maxrows as usize),
+                    ellipsis: tobj.limituseellipsis,
+                },
                 &tobj.horizontalalign,
                 tobj.padding as f32,
                 None,

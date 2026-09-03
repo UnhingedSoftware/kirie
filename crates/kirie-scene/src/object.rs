@@ -7,7 +7,7 @@ use crate::user::{
     ConstantValues, UserSetting, parse_constant_values, user_bool, user_color, user_f32, user_i64,
     user_string, user_vec2, user_vec3,
 };
-use crate::value::{Color, Vec2, Vec3, WHITE, coerce_f64, coerce_i64};
+use crate::value::{Color, Vec2, Vec3, WHITE, coerce_f64, coerce_i64, coerce_u32};
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Keyframe {
@@ -295,6 +295,9 @@ pub struct TextObject {
     pub padding: i64,
     pub limitwidth: bool,
     pub maxwidth: UserSetting<f32>,
+    pub limitrows: bool,
+    pub maxrows: u32,
+    pub limituseellipsis: bool,
     pub effects: Vec<Effect>,
 }
 
@@ -455,6 +458,12 @@ fn parse_text(obj: &Map<String, Value>) -> TextObject {
         padding: obj.get("padding").and_then(coerce_i64).unwrap_or(0),
         limitwidth: obj.get("limitwidth").and_then(Value::as_bool).unwrap_or(false),
         maxwidth: user_f32(obj, "maxwidth", 500.0),
+        limitrows: obj.get("limitrows").and_then(Value::as_bool).unwrap_or(false),
+        maxrows: obj.get("maxrows").and_then(coerce_u32).unwrap_or(1).max(1),
+        limituseellipsis: obj
+            .get("limituseellipsis")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         effects: parse_effects(obj),
     }
 }

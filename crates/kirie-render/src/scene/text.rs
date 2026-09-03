@@ -193,6 +193,68 @@ fn unescape(text: &str) -> String {
         .replace("&amp;", "&")
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TextLimits {
+    pub max_width: Option<f32>,
+    pub max_rows: Option<usize>,
+    pub ellipsis: bool,
+}
+
+impl TextLimits {
+    #[must_use]
+    pub fn width(max_width: f32) -> Self {
+        Self {
+            max_width: Some(max_width),
+            ..Self::default()
+        }
+    }
+}
+
+fn visible_line_count(buffer: &Buffer) -> usize {
+    buffer.layout_runs().count()
+}
+
+fn text_within_rows(buffer: &Buffer, rows: usize) -> String {
+    let mut ends: Vec<(usize, usize)> = Vec::new();
+    for run in buffer.layout_runs().take(rows) {
+        let end = run.glyphs.iter().map(|g| g.end).max().unwrap_or(0);
+        match ends.last_mut() {
+            Some((line, e)) if *line == run.line_i => *e = (*e).max(end),
+            _ => ends.push((run.line_i, end)),
+        }
+    }
+    ends.iter()
+        .map(|(line, end)| &buffer.lines[*line].text()[..*end])
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn limit_rows(
+    fonts: &mut TextFonts,
+    buffer: &mut Buffer,
+    attrs: &Attrs,
+    align: Align,
+    rows: usize,
+    ellipsis: bool,
+) {
+    if visible_line_count(buffer) <= rows {
+        return;
+    }
+    let mut kept = text_within_rows(buffer, rows);
+    loop {
+        let candidate = if ellipsis {
+            format!("{}\u{2026}", kept.trim_end())
+        } else {
+            kept.clone()
+        };
+        buffer.set_text(&candidate, attrs, Shaping::Advanced, Some(align));
+        buffer.shape_until_scroll(&mut fonts.font_system, false);
+        if visible_line_count(buffer) <= rows || kept.pop().is_none() {
+            return;
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn rasterize(
@@ -200,7 +262,7 @@ pub fn rasterize(
     text: &str,
     font: &str,
     point_size: f32,
-    max_width: f32,
+    limits: TextLimits,
     horizontalalign: &str,
     padding: f32,
     bundled_family: Option<&str>,
@@ -216,7 +278,8 @@ pub fn rasterize(
     let point_size = point_size.max(1.0);
     let pad = padding.max(0.0);
 
-    let wrap_w = (max_width > 1.0).then_some(max_width);
+    let wrap_w = limits.max_width.filter(|w| *w > 1.0);
+    let align = h_align(horizontalalign);
 
     let hint = family_hint(font);
     let family_name = bundled_family.or(hint.as_deref());
@@ -230,14 +293,21 @@ pub fn rasterize(
         let mut buffer = Buffer::new(fs, Metrics::new(point_size, point_size));
         buffer.set_hinting(Hinting::Enabled);
         buffer.set_size(wrap_w, None);
-        buffer.set_wrap(if wrap_w.is_some() { Wrap::WordOrGlyph } else { Wrap::None });
-        buffer.set_text(text, &attrs, Shaping::Advanced, Some(h_align(horizontalalign)));
+        buffer.set_wrap(if wrap_w.is_some() {
+            Wrap::WordOrGlyph
+        } else {
+            Wrap::None
+        });
+        buffer.set_text(text, &attrs, Shaping::Advanced, Some(align));
         buffer.shape_until_scroll(fs, false);
         buffer
     };
     let line = line_metrics(fonts, &buffer, point_size);
     buffer.set_metrics(Metrics::new(point_size, line.height));
     buffer.shape_until_scroll(&mut fonts.font_system, false);
+    if let Some(rows) = limits.max_rows {
+        limit_rows(fonts, &mut buffer, &attrs, align, rows.max(1), limits.ellipsis);
+    }
 
     let mut text_w = 0.0f32;
     let mut text_h = 0.0f32;
@@ -413,7 +483,7 @@ mod tests {
             "line one\nline two\nline three",
             "",
             32.0,
-            0.0,
+            TextLimits::default(),
             "left",
             0.0,
             None,
@@ -430,14 +500,23 @@ mod tests {
         if fonts.face_count() == 0 {
             return;
         }
-        let one =
-            rasterize(&mut fonts, "Hg", "", 40.0, 0.0, "left", 0.0, None).expect("rasterizes");
+        let one = rasterize(
+            &mut fonts,
+            "Hg",
+            "",
+            40.0,
+            TextLimits::default(),
+            "left",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
         let two = rasterize(
             &mut fonts,
             "Hg\nHg",
             "",
             40.0,
-            0.0,
+            TextLimits::default(),
             "left",
             0.0,
             None,
@@ -458,7 +537,7 @@ mod tests {
             "Hello",
             "",
             24.0,
-            0.0,
+            TextLimits::default(),
             "center",
             0.0,
             None,
@@ -478,17 +557,108 @@ mod tests {
         if fonts.face_count() == 0 {
             return;
         }
-        let one = rasterize(&mut fonts, "ab cd", "", 16.0, 0.0, "center", 0.0, None).expect("rasterizes");
+        let one = rasterize(
+            &mut fonts,
+            "ab cd",
+            "",
+            16.0,
+            TextLimits::default(),
+            "center",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
         assert_eq!(one.line_count, 1);
         let limit = one.width as f32 + 1.0;
-        let padded = rasterize(&mut fonts, "ab cd", "", 16.0, limit, "center", 10.0, None).expect("rasterizes");
-        assert_eq!(padded.line_count, 1, "padding is drawn around the box, not taken from it");
+        let padded = rasterize(
+            &mut fonts,
+            "ab cd",
+            "",
+            16.0,
+            TextLimits::width(limit),
+            "center",
+            10.0,
+            None,
+        )
+        .expect("rasterizes");
+        assert_eq!(
+            padded.line_count, 1,
+            "padding is drawn around the box, not taken from it"
+        );
         assert!(padded.width.abs_diff(one.width + 20) <= 1);
         assert_eq!(padded.inset, 10.0);
-        let wrapped =
-            rasterize(&mut fonts, "ab cd", "", 16.0, limit * 0.75, "center", 0.0, None).expect("rasterizes");
+        let wrapped = rasterize(
+            &mut fonts,
+            "ab cd",
+            "",
+            16.0,
+            TextLimits::width(limit * 0.75),
+            "center",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
         assert_eq!(wrapped.line_count, 2);
-        assert!(wrapped.width < one.width, "the bitmap hugs the wrapped lines, not the limit");
+        assert!(
+            wrapped.width < one.width,
+            "the bitmap hugs the wrapped lines, not the limit"
+        );
+    }
+
+    #[test]
+    fn max_rows_drops_the_overflow_or_ends_it_with_an_ellipsis() {
+        let mut fonts = TextFonts::new();
+        if fonts.face_count() == 0 {
+            return;
+        }
+        let wide = rasterize(
+            &mut fonts,
+            "ab cd ef",
+            "",
+            16.0,
+            TextLimits::default(),
+            "left",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
+        let narrow = TextLimits {
+            max_width: Some(wide.width as f32 * 0.4),
+            max_rows: Some(2),
+            ellipsis: false,
+        };
+        let cut = rasterize(&mut fonts, "ab cd ef", "", 16.0, narrow, "left", 0.0, None).expect("rasterizes");
+        assert_eq!(cut.line_count, 2);
+        let dots = rasterize(
+            &mut fonts,
+            "ab cd ef",
+            "",
+            16.0,
+            TextLimits {
+                ellipsis: true,
+                ..narrow
+            },
+            "left",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
+        assert_eq!(dots.line_count, 2);
+        let rows = rasterize(
+            &mut fonts,
+            "a\nb\nc\nd",
+            "",
+            16.0,
+            TextLimits {
+                max_rows: Some(3),
+                ..TextLimits::default()
+            },
+            "left",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
+        assert_eq!(rows.line_count, 3, "explicit newlines count as rows too");
     }
 
     #[test]
@@ -500,7 +670,7 @@ mod tests {
                 "",
                 "any",
                 32.0,
-                0.0,
+                TextLimits::default(),
                 "center",
                 0.0,
                 None

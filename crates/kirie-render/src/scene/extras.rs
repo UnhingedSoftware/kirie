@@ -39,7 +39,7 @@ pub struct TextRebuild {
     pub current: String,
     font: String,
     raster_px: f32,
-    box_w: f32,
+    limits: text::TextLimits,
     halign: String,
     valign: String,
     padding: f32,
@@ -58,7 +58,7 @@ impl TextRebuild {
             &self.current,
             &self.font,
             self.raster_px,
-            self.box_w,
+            self.limits,
             &self.halign,
             self.padding,
             self.bundled.as_deref(),
@@ -68,11 +68,11 @@ impl TextRebuild {
     }
 
     pub fn set_max_width(&mut self, maxwidth: f32) -> bool {
-        let w = maxwidth * self.box_scale;
-        if (w - self.box_w).abs() < f32::EPSILON {
+        let w = (self.box_scale > 0.0).then_some(maxwidth * self.box_scale);
+        if w == self.limits.max_width {
             return false;
         }
-        self.box_w = w;
+        self.limits.max_width = w;
         true
     }
 
@@ -144,11 +144,16 @@ pub fn text_layout(
     };
     let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
     let box_scale = if tobj.limitwidth { raster_scale } else { 0.0 };
+    let limits = text::TextLimits {
+        max_width: tobj.limitwidth.then_some(tobj.maxwidth.value * box_scale),
+        max_rows: tobj.limitrows.then_some(tobj.maxrows as usize),
+        ellipsis: tobj.limituseellipsis,
+    };
     let rebuild = TextRebuild {
         current: tobj.text.value.clone(),
         font: tobj.font.clone(),
         raster_px,
-        box_w: tobj.maxwidth.value * box_scale,
+        limits,
         halign: tobj.horizontalalign.clone(),
         valign: tobj.verticalalign.clone(),
         padding: tobj.padding as f32 * raster_scale,
@@ -750,7 +755,10 @@ mod tests {
         let w = ((q[2][0] - q[0][0]).powi(2) + (q[2][1] - q[0][1]).powi(2)).sqrt();
         let h = ((q[1][0] - q[0][0]).powi(2) + (q[1][1] - q[0][1]).powi(2)).sqrt();
         assert!((w - 200.0).abs() < 1e-3 && (h - 50.0).abs() < 1e-3);
-        assert!((q[2][0] - q[0][0]).abs() < 1e-3, "the top edge now runs vertically");
+        assert!(
+            (q[2][0] - q[0][0]).abs() < 1e-3,
+            "the top edge now runs vertically"
+        );
     }
 
     #[test]
