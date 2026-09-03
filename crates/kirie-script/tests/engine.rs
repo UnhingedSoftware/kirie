@@ -744,3 +744,70 @@ fn version_constants_exposed() {
     assert_eq!(kirie_script::API_VERSION, "2.8");
     assert_eq!(kirie_script::TRANSLATOR_VERSION, 1);
 }
+
+#[test]
+fn update_receives_the_live_vector_prop_as_a_vec3() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "scale_9",
+        "import * as WEMath from 'WEMath';\
+         export function update(v){ return new Vec3(WEMath.mix(v.x, 1, 0.5), v.y, v.z); }",
+        Some(9),
+        ScriptValue::Vec3([2.0, 2.0, 2.0]),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        layers: vec![LayerState {
+            id: 9,
+            name: "L".into(),
+            scale: Some([3.0, 4.0, 5.0]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    assert_eq!(out.property_results[0].1, ScriptValue::Vec3([2.0, 4.0, 5.0]));
+}
+
+#[test]
+fn we_math_matches_the_shipped_module() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_3",
+        "import * as WEMath from 'WEMath';\
+         export function update(v){ return new Vec3(WEMath.smoothStep(0, 10, 5), WEMath.mix(2, 4, 0.25), Number.isNaN(WEMath.mix(undefined, 1, 0.1)) ? 1 : 0); }",
+        None,
+        ScriptValue::Int(0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let out = e.tick(HostFrame::default(), vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    assert_eq!(out.property_results[0].1, ScriptValue::Vec3([0.5, 2.5, 1.0]));
+}
+
+#[test]
+fn this_object_aliases_this_layer() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_5",
+        "export function update(v){ return thisObject === thisLayer && thisObject.name === 'L' ? 1 : 0; }",
+        Some(5),
+        ScriptValue::Int(0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        layers: vec![LayerState {
+            id: 5,
+            name: "L".into(),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    assert_eq!(num(&out.property_results[0].1), 1.0);
+}
