@@ -383,9 +383,7 @@ pub fn build_text(
     source: &dyn AssetSource,
     world: ([f32; 2], [f32; 2]),
 ) -> Option<TextGpu> {
-    if !(tobj.visible.value && object.base.visible.value) {
-        return None;
-    }
+    let visible = tobj.visible.value && object.base.visible.value;
 
     let bundled = fonts.bundled_family(&tobj.font, source);
     const WE_PT_TO_PX: f32 = 300.0 / 72.0;
@@ -417,10 +415,10 @@ pub fn build_text(
         &tobj.verticalalign,
         padding,
         bundled.as_deref(),
-    )?;
-    if !raster.any_coverage {
-        return None;
-    }
+    )
+    .filter(|r| r.any_coverage)
+    .unwrap_or_else(text::TextRaster::blank);
+    let blank = !raster.any_coverage;
     let texture = text::upload(device, queue, &raster);
 
     let (world_origin, world_scale) = world;
@@ -491,8 +489,8 @@ pub fn build_text(
     });
     Some(TextGpu {
         id: object.base.id,
-        visible: true,
-        blank: false,
+        visible,
+        blank,
         bind,
         vertex_buffer,
         _texture: texture,

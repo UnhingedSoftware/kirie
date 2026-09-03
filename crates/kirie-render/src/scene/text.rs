@@ -73,6 +73,19 @@ pub struct TextRaster {
     pub any_coverage: bool,
 }
 
+impl TextRaster {
+    #[must_use]
+    pub fn blank() -> Self {
+        TextRaster {
+            pixels: vec![0; 4],
+            width: 1,
+            height: 1,
+            line_count: 0,
+            any_coverage: false,
+        }
+    }
+}
+
 fn h_align(s: &str) -> Align {
     match s {
         "left" => Align::Left,
