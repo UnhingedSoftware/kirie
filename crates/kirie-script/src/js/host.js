@@ -130,9 +130,9 @@ function __recordProp(id, name, value) { __host.ops.push({ op: 'setProp', id: id
 
 var __VEC3_PROPS = { origin: 1, scale: 1, angles: 1, color: 1 };
 var __VEC2_PROPS = { parallaxDepth: 1 };
-var __NUM_PROPS = { alpha: 1, pointSize: 1 };
+var __NUM_PROPS = { alpha: 1, pointsize: 1 };
 var __BOOL_PROPS = { visible: 1 };
-var __STR_PROPS = { text: 1 };
+var __STR_PROPS = { text: 1, font: 1 };
 
 function __makeLayer(id) {
   var self = {
@@ -372,10 +372,14 @@ var __scene = {
       visible: (cfg.visible === undefined) ? true : !!cfg.visible,
       alpha: (cfg.alpha === undefined) ? 1 : +cfg.alpha, color: v3(cfg.color, [1, 1, 1]),
     };
-    if (typeof cfg.text === 'string') { rec.text = cfg.text; rec.pointSize = (cfg.pointsize === undefined) ? 24 : +cfg.pointsize; }
+    if (typeof cfg.text === 'string') {
+      rec.text = cfg.text;
+      rec.pointsize = (cfg.pointsize === undefined) ? 32 : +cfg.pointsize;
+      rec.font = (typeof cfg.font === 'string') ? cfg.font : '';
+    }
     __host.layers.push(rec);
     __host.ops.push({ op: 'createLayer', id: id, path: path, workshopId: __host.workshopId, text: rec.text });
-    ['origin', 'angles', 'scale', 'color', 'visible', 'alpha', 'text', 'pointSize'].forEach(function (k) {
+    ['origin', 'angles', 'scale', 'color', 'visible', 'alpha', 'text', 'pointsize', 'font'].forEach(function (k) {
       if (rec[k] !== undefined) __recordProp(id, k, Array.isArray(rec[k]) ? rec[k].slice() : rec[k]);
     });
     return __makeLayer(id);

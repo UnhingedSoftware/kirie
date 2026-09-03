@@ -2091,26 +2091,59 @@ impl Renderer for SceneRenderer {
         }
 
         if let Some(fonts) = self.text_fonts.as_mut() {
+            let no_assets = MemorySource(HashMap::new());
             for u in &updates {
-                if u.target != PropTarget::Text {
+                if !matches!(
+                    u.target,
+                    PropTarget::Text | PropTarget::PointSize | PropTarget::Font
+                ) {
                     continue;
                 }
-                let kirie_script::ScriptValue::Str(s) = &u.value else {
-                    continue;
-                };
                 for item in &mut self.items {
                     match item {
-                        SceneItem::Text(tg) if tg.id == u.object_id && tg.current_text() != s.as_str() => {
-                            if let Some(tp) = self.text_pipeline.as_ref() {
-                                tg.retext(&self.device, &self.queue, tp, fonts, s);
+                        SceneItem::Text(tg) if tg.id == u.object_id => {
+                            let Some(tp) = self.text_pipeline.as_ref() else {
+                                continue;
+                            };
+                            match (u.target, &u.value) {
+                                (PropTarget::Text, kirie_script::ScriptValue::Str(s)) => {
+                                    tg.retext(&self.device, &self.queue, tp, fonts, s);
+                                }
+                                (PropTarget::PointSize, v) => {
+                                    if let Some(p) = as_f32(v) {
+                                        tg.set_point_size(&self.device, &self.queue, tp, fonts, p);
+                                    }
+                                }
+                                (PropTarget::Font, kirie_script::ScriptValue::Str(s)) => {
+                                    let source: &dyn AssetSource =
+                                        self.rebuild.as_ref().map_or(&no_assets, |c| &c.source);
+                                    tg.set_font(&self.device, &self.queue, tp, fonts, source, s);
+                                }
+                                _ => {}
                             }
                         }
-                        SceneItem::Image(o)
-                            if o.id == u.object_id
-                                && o.text.as_ref().is_some_and(|t| t.rebuild.current != *s) =>
-                        {
-                            if let (Some(ctx), Some(text)) = (self.rebuild.as_ref(), o.text.as_mut()) {
-                                text.rebuild.current = s.clone();
+                        SceneItem::Image(o) if o.id == u.object_id && o.text.is_some() => {
+                            let (Some(ctx), Some(text)) = (self.rebuild.as_ref(), o.text.as_mut()) else {
+                                continue;
+                            };
+                            let changed = match (u.target, &u.value) {
+                                (PropTarget::Text, kirie_script::ScriptValue::Str(s)) => {
+                                    if text.rebuild.current == *s {
+                                        false
+                                    } else {
+                                        text.rebuild.current = s.clone();
+                                        true
+                                    }
+                                }
+                                (PropTarget::PointSize, v) => {
+                                    as_f32(v).is_some_and(|p| text.rebuild.set_point_size(p))
+                                }
+                                (PropTarget::Font, kirie_script::ScriptValue::Str(s)) => {
+                                    text.rebuild.set_font(s, fonts, &ctx.source)
+                                }
+                                _ => false,
+                            };
+                            if changed {
                                 refresh_text_layer(
                                     &self.device,
                                     &self.queue,
@@ -3083,7 +3116,9 @@ fn apply_script_updates(items: &mut [SceneItem], updates: &[PropUpdate]) {
                 | PropTarget::Scale
                 | PropTarget::Angles
                 | PropTarget::ParticleRate
-                | PropTarget::Volume => {}
+                | PropTarget::Volume
+                | PropTarget::PointSize
+                | PropTarget::Font => {}
             }
         }
     }
@@ -3136,7 +3171,9 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
             | PropTarget::Text
             | PropTarget::ParticleRate
             | PropTarget::ParallaxDepth
-            | PropTarget::Volume => {}
+            | PropTarget::Volume
+            | PropTarget::PointSize
+            | PropTarget::Font => {}
         }
     }
 }

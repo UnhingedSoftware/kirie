@@ -24,8 +24,10 @@ pub struct LayerState {
     pub visible: Option<bool>,
     #[serde(rename = "parallaxDepth", skip_serializing_if = "Option::is_none")]
     pub parallax_depth: Option<f32>,
-    #[serde(rename = "pointSize", skip_serializing_if = "Option::is_none")]
-    pub point_size: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pointsize: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -49,7 +51,8 @@ impl Clone for LayerState {
             alpha: self.alpha,
             visible: self.visible,
             parallax_depth: self.parallax_depth,
-            point_size: self.point_size,
+            pointsize: self.pointsize,
+            font: self.font.clone(),
             text: self.text.clone(),
             size: self.size,
             solid: self.solid,
@@ -69,7 +72,8 @@ impl Clone for LayerState {
             alpha,
             visible,
             parallax_depth,
-            point_size,
+            pointsize,
+            font,
             text,
             size,
             solid,
@@ -85,7 +89,8 @@ impl Clone for LayerState {
         self.alpha = *alpha;
         self.visible = *visible;
         self.parallax_depth = *parallax_depth;
-        self.point_size = *point_size;
+        self.pointsize = *pointsize;
+        self.font.clone_from(font);
         self.text.clone_from(text);
         self.size = *size;
         self.solid = *solid;

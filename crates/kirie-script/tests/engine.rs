@@ -957,3 +957,36 @@ fn animation_events_reach_the_owning_object() {
     assert_eq!(by_key("visible_7"), ScriptValue::Str("yeshu@30/;".into()));
     assert_eq!(by_key("alpha_8"), ScriptValue::Str(String::new()));
 }
+
+#[test]
+fn text_layer_exposes_we_named_font_and_pointsize() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "text_9",
+        "export function init(){ thisLayer.pointsize = thisLayer.pointsize * 2; }\
+         export function update(v){ return thisLayer.font + ':' + thisLayer.pointsize; }",
+        Some(9),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        layers: vec![LayerState {
+            id: 9,
+            name: "T".into(),
+            pointsize: Some(48.0),
+            font: Some("fonts/a.ttf".into()),
+            text: Some(String::new()),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(out.property_results[0].1, ScriptValue::Str("fonts/a.ttf:96".into()));
+    assert!(
+        out.ops.iter().any(|op| matches!(op,
+        SceneOp::SetProperty { layer_id: 9, name, value: ScriptValue::Int(96) } if name == "pointsize")),
+        "ops: {:?}",
+        out.ops
+    );
+}

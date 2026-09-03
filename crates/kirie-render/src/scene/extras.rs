@@ -48,6 +48,8 @@ pub struct TextRebuild {
     box_scale: f32,
 }
 
+const WE_PT_TO_PX: f32 = 300.0 / 72.0;
+
 impl TextRebuild {
     #[must_use]
     pub fn rasterize(&self, fonts: &mut TextFonts) -> text::TextRaster {
@@ -72,6 +74,24 @@ impl TextRebuild {
             return false;
         }
         self.box_w = w;
+        true
+    }
+
+    pub fn set_point_size(&mut self, pointsize: f32) -> bool {
+        let px = pointsize * WE_PT_TO_PX * self.raster_scale;
+        if (px - self.raster_px).abs() < f32::EPSILON {
+            return false;
+        }
+        self.raster_px = px;
+        true
+    }
+
+    pub fn set_font(&mut self, font: &str, fonts: &mut TextFonts, source: &dyn AssetSource) -> bool {
+        if font == self.font {
+            return false;
+        }
+        self.font = font.to_owned();
+        self.bundled = fonts.bundled_family(font, source);
         true
     }
 
@@ -110,7 +130,6 @@ pub fn text_layout(
     raster: TextRasterScale,
 ) -> Option<(TextRebuild, text::TextRaster)> {
     let bundled = fonts.bundled_family(&tobj.font, source);
-    const WE_PT_TO_PX: f32 = 300.0 / 72.0;
     let scale_x = tobj.scale.value[0];
     let scale_y = tobj.scale.value[1];
     if scale_x <= 0.0 || scale_y <= 0.0 {
@@ -228,6 +247,33 @@ impl TextGpu {
         maxwidth: f32,
     ) {
         if self.rebuild.set_max_width(maxwidth) {
+            self.rerasterize(device, queue, tp, fonts);
+        }
+    }
+
+    pub fn set_point_size(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tp: &TextPipeline,
+        fonts: &mut TextFonts,
+        pointsize: f32,
+    ) {
+        if self.rebuild.set_point_size(pointsize) {
+            self.rerasterize(device, queue, tp, fonts);
+        }
+    }
+
+    pub fn set_font(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tp: &TextPipeline,
+        fonts: &mut TextFonts,
+        source: &dyn AssetSource,
+        font: &str,
+    ) {
+        if self.rebuild.set_font(font, fonts, source) {
             self.rerasterize(device, queue, tp, fonts);
         }
     }

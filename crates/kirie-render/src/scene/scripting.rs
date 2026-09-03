@@ -23,6 +23,8 @@ pub enum PropTarget {
     Angles,
     ParallaxDepth,
     Volume,
+    PointSize,
+    Font,
 }
 
 impl PropTarget {
@@ -39,6 +41,8 @@ impl PropTarget {
             "angles" => Self::Angles,
             "parallaxDepth" => Self::ParallaxDepth,
             "volume" => Self::Volume,
+            "pointsize" => Self::PointSize,
+            "font" => Self::Font,
             _ => return None,
         })
     }
@@ -642,6 +646,16 @@ impl ScriptHost {
                     layer.parallax_depth = Some(v[0]);
                 }
             }
+            PropTarget::PointSize => {
+                if let Some(p) = as_f32(value) {
+                    layer.pointsize = Some(p);
+                }
+            }
+            PropTarget::Font => {
+                if let ScriptValue::Str(s) = value {
+                    layer.font = Some(s.clone());
+                }
+            }
             PropTarget::Brightness | PropTarget::ParticleRate | PropTarget::Volume => {}
         }
     }
@@ -896,7 +910,8 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
             ls.color = Some([txt.color.value[0], txt.color.value[1], txt.color.value[2]]);
             ls.alpha = Some(txt.alpha.value);
             ls.visible = Some(txt.visible.value && base.visible.value);
-            ls.point_size = Some(txt.pointsize.value);
+            ls.pointsize = Some(txt.pointsize.value);
+            ls.font = Some(txt.font.clone());
             ls.text = Some(txt.text.value.clone());
             ls.size = Some(txt.size);
         }
