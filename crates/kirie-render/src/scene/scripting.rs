@@ -152,7 +152,7 @@ impl ScriptHost {
                 ScriptValue::Vec3(base.scale.value)
             });
             collect(&mut pending, id, "angles", &base.angles.script, || {
-                ScriptValue::Vec3(base.angles.value)
+                ScriptValue::Vec3(base.angles.value.map(f32::to_degrees))
             });
             if !matches!(&object.kind, ObjectKind::Image(_) | ObjectKind::Text(_)) {
                 collect(&mut pending, id, "visible", &base.visible.script, || {
@@ -399,7 +399,11 @@ impl ScriptHost {
 
     pub fn note_animation(&mut self, updates: &[PropUpdate], overrides: &[(String, ScriptValue)]) {
         for u in updates {
-            self.record_layer(u.object_id, u.target, &u.value);
+            let value = match u.target {
+                PropTarget::Angles => as_vec3(&u.value).map_or_else(|| u.value.clone(), radians_to_script),
+                _ => u.value.clone(),
+            };
+            self.record_layer(u.object_id, u.target, &value);
         }
         self.overrides.extend_from_slice(overrides);
     }
@@ -436,7 +440,7 @@ impl ScriptHost {
             updates.push(PropUpdate {
                 object_id,
                 target,
-                value,
+                value: script_to_renderer(target, value),
             });
         }
         for op in output.ops {
@@ -451,7 +455,7 @@ impl ScriptHost {
                         updates.push(PropUpdate {
                             object_id: layer_id,
                             target,
-                            value,
+                            value: script_to_renderer(target, value),
                         });
                     }
                 }
@@ -881,7 +885,7 @@ fn layer_state(object: &kirie_scene::object::Object) -> LayerState {
         parent: base.parent,
         origin: Some(base.origin.value),
         scale: Some(base.scale.value),
-        angles: Some(base.angles.value),
+        angles: Some(base.angles.value.map(f32::to_degrees)),
         visible: Some(base.visible.value),
         ..LayerState::default()
     };
@@ -1020,6 +1024,17 @@ pub fn as_f32(v: &ScriptValue) -> Option<f32> {
         ScriptValue::Int(i) => Some(*i as f32),
         ScriptValue::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
         _ => None,
+    }
+}
+
+fn radians_to_script(v: [f32; 3]) -> ScriptValue {
+    ScriptValue::Vec3(v.map(f32::to_degrees))
+}
+
+fn script_to_renderer(target: PropTarget, value: ScriptValue) -> ScriptValue {
+    match target {
+        PropTarget::Angles => as_vec3(&value).map_or(value, |v| ScriptValue::Vec3(v.map(f32::to_radians))),
+        _ => value,
     }
 }
 

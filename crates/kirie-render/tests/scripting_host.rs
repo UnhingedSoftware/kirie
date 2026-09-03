@@ -445,3 +445,51 @@ fn throwing_script_does_not_panic_and_leaves_value_alone() {
         );
     }
 }
+
+#[test]
+fn angles_cross_the_script_boundary_in_degrees() {
+    let json = r#"{
+        "camera": { "eye": "0 0 100", "center": "0 0 0", "up": "0 1 0" },
+        "general": { "orthogonalprojection": { "width": 128, "height": 128 } },
+        "objects": [
+            {
+                "id": 3,
+                "name": "dial",
+                "image": "models/x.json",
+                "angles": {
+                    "value": "0 0 -5.68977",
+                    "script": "export function update(v) { return new Vec3(0, 0, Math.round(v.z) + 90); }"
+                }
+            },
+            {
+                "id": 4,
+                "name": "hand",
+                "image": "models/x.json",
+                "alpha": {
+                    "value": 1.0,
+                    "script": "export function update(v) { var d = thisScene.getLayer('dial'); if (Math.round(d.angles.z) == -326) thisLayer.angles = new Vec3(0, 0, 180); return v; }"
+                }
+            }
+        ]
+    }"#;
+    let model = model(json);
+    let mut host = ScriptHost::build(&model, (128, 128), &[]).expect("scene has a driveable script");
+    let updates = host.tick(0.016, None, [0.5, 0.5], [64.0, 64.0], false, None);
+    let angle = |id: i64| {
+        updates
+            .iter()
+            .find(|u| u.object_id == id && u.target == PropTarget::Angles)
+            .and_then(|u| kirie_render::scene::scripting::as_vec3(&u.value))
+            .unwrap_or_else(|| panic!("angles update for {id}"))[2]
+    };
+    assert!(
+        (angle(3) - (-236.0_f32).to_radians()).abs() < 1e-3,
+        "dial: {}",
+        angle(3)
+    );
+    assert!(
+        (angle(4) - std::f32::consts::PI).abs() < 1e-5,
+        "hand: {}",
+        angle(4)
+    );
+}

@@ -982,7 +982,10 @@ fn text_layer_exposes_we_named_font_and_pointsize() {
         ..Default::default()
     };
     let out = e.tick(frame, vec![]).unwrap();
-    assert_eq!(out.property_results[0].1, ScriptValue::Str("fonts/a.ttf:96".into()));
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("fonts/a.ttf:96".into())
+    );
     assert!(
         out.ops.iter().any(|op| matches!(op,
         SceneOp::SetProperty { layer_id: 9, name, value: ScriptValue::Int(96) } if name == "pointsize")),

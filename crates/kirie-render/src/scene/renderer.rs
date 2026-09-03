@@ -2510,7 +2510,7 @@ impl Renderer for SceneRenderer {
                     l.scale[0] * l.base_size[0] / 2.0,
                     l.scale[1] * l.base_size[1] / 2.0,
                 );
-                let (sn, cs) = (-l.angles[2].to_radians()).sin_cos();
+                let (sn, cs) = (-l.angles[2]).sin_cos();
                 let corner = |dx: f32, dy: f32| {
                     [
                         (cx + dx * cs - dy * sn) / (sw / 2.0),
