@@ -1,7 +1,7 @@
 use kirie_scene::object::{Effect, ObjectKind};
 use kirie_scene::value::DynamicValue;
 use kirie_scene::{PlayMode, PropertyAnimation, SceneModel, UserSetting};
-use kirie_script::ScriptValue;
+use kirie_script::{AnimationState, ScriptValue};
 
 use super::scripting::{PropTarget, PropUpdate};
 
@@ -31,6 +31,13 @@ pub struct AnimatedProp {
 }
 
 impl AnimatedProp {
+    fn script_key(&self) -> String {
+        match &self.target {
+            AnimTarget::EffectConstant { effect, name } => format!("fx{effect}{name}_{}", self.object_id),
+            _ => format!("{}_{}", self.key, self.object_id),
+        }
+    }
+
     fn frame(&self) -> f32 {
         let len = self.anim.length.max(0.0);
         match self.anim.mode {
@@ -317,6 +324,42 @@ impl PropertyAnimator {
             }
         }
         out
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<AnimationState> {
+        (0..self.tracks.len())
+            .map(|i| {
+                let t = &self.tracks[i];
+                let r = &self.tracks[self.root(i)];
+                AnimationState {
+                    id: t.object_id,
+                    key: t.script_key(),
+                    name: t.anim.name.clone().unwrap_or_default(),
+                    fps: t.anim.fps,
+                    frames: t.anim.length,
+                    duration: if t.anim.fps > 0.0 {
+                        t.anim.length / t.anim.fps
+                    } else {
+                        0.0
+                    },
+                    rate: r.rate,
+                    playing: r.playing,
+                    frame: r.frame(),
+                }
+            })
+            .collect()
+    }
+
+    pub fn command(&mut self, idx: usize, cmd: &str, value: f32) {
+        match cmd {
+            "play" => self.play(idx),
+            "pause" => self.pause(idx),
+            "stop" => self.stop(idx),
+            "frame" => self.set_frame(idx, value),
+            "rate" => self.set_rate(idx, value),
+            _ => {}
+        }
     }
 
     #[must_use]

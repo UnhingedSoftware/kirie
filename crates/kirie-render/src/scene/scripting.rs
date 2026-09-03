@@ -5,7 +5,8 @@ use kirie_scene::object::ObjectKind;
 use kirie_scene::user::ScriptBinding;
 use kirie_scene::{PropertyValue, SceneModel};
 use kirie_script::{
-    AudioBuffers, HostFrame, LayerState, SceneOp, SceneState, ScriptEngine, ScriptValue, TickOutput,
+    AnimationState, AudioBuffers, HostFrame, LayerState, SceneOp, SceneState, ScriptEngine, ScriptValue,
+    TickOutput,
 };
 use serde_json::{Map, Value};
 
@@ -106,6 +107,9 @@ pub struct ScriptHost {
     material_ops: Vec<(i64, usize, String, kirie_script::ScriptValue)>,
     scene_ops: Vec<(String, kirie_script::ScriptValue)>,
     video_ops: Vec<(i64, String, f64)>,
+    anim_ops: Vec<(u32, String, f64)>,
+    animations: Vec<AnimationState>,
+    animation_events: Vec<(i64, String, f32)>,
     wants_media: bool,
     media_prev: Option<MediaPrev>,
     camera_op: Option<CameraOp>,
@@ -275,6 +279,9 @@ impl ScriptHost {
             material_ops: Vec::new(),
             scene_ops: Vec::new(),
             video_ops: Vec::new(),
+            anim_ops: Vec::new(),
+            animations: Vec::new(),
+            animation_events: Vec::new(),
             wants_media,
             media_prev: None,
             camera_op: None,
@@ -376,6 +383,9 @@ impl ScriptHost {
             frame.scene.clone_from(&self.scene);
             self.scene_dirty = false;
         }
+        std::mem::swap(&mut frame.animations, &mut self.animations);
+        std::mem::swap(&mut frame.animation_events, &mut self.animation_events);
+        self.animation_events.clear();
 
         let overrides = std::mem::take(&mut self.overrides);
         let output = match self.engine.tick_reuse(frame, overrides) {
@@ -413,6 +423,11 @@ impl ScriptHost {
             self.record_layer(u.object_id, u.target, &u.value);
         }
         self.overrides.extend_from_slice(overrides);
+    }
+
+    pub fn note_animation_state(&mut self, states: Vec<AnimationState>, events: Vec<(i64, String, f32)>) {
+        self.animations = states;
+        self.animation_events = events;
     }
 
     fn process_output(&mut self, output: TickOutput) -> Vec<PropUpdate> {
@@ -510,6 +525,9 @@ impl ScriptHost {
                 SceneOp::VideoCommand { layer_id, cmd, value } => {
                     self.video_ops.push((layer_id, cmd, value));
                 }
+                SceneOp::AnimationCommand { index, cmd, value } => {
+                    self.anim_ops.push((index, cmd, value));
+                }
                 SceneOp::SetMaterialProperty {
                     layer_id,
                     effect,
@@ -573,6 +591,10 @@ impl ScriptHost {
 
     pub fn take_video_ops(&mut self) -> Vec<(i64, String, f64)> {
         std::mem::take(&mut self.video_ops)
+    }
+
+    pub fn take_anim_ops(&mut self) -> Vec<(u32, String, f64)> {
+        std::mem::take(&mut self.anim_ops)
     }
 
     pub fn take_material_ops(&mut self) -> Vec<(i64, usize, String, kirie_script::ScriptValue)> {

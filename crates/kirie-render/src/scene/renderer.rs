@@ -1772,9 +1772,10 @@ impl Renderer for SceneRenderer {
         let media_state = self.media.as_ref().map(|m| m.latest());
         let anim = match self.animator.as_mut() {
             Some(a) => {
-                let out = a.tick(dt, super::scripting::time_of_day_now(self.tz_offset_secs) as f32);
+                let mut out = a.tick(dt, super::scripting::time_of_day_now(self.tz_offset_secs) as f32);
                 if let Some(script) = self.script.as_mut() {
                     script.note_animation(&out.updates, &out.overrides);
+                    script.note_animation_state(a.snapshot(), std::mem::take(&mut out.events));
                 }
                 out
             }
@@ -1792,6 +1793,11 @@ impl Renderer for SceneRenderer {
             ),
             None => Vec::new(),
         });
+        if let (Some(script), Some(a)) = (self.script.as_mut(), self.animator.as_mut()) {
+            for (index, cmd, value) in script.take_anim_ops() {
+                a.command(index as usize, &cmd, value as f32);
+            }
+        }
         self.apply_animation_side_effects(anim.effect, anim.particle, anim.zoom, anim.text_width);
         self.apply_script_scene_ops();
         if !updates.is_empty() {
