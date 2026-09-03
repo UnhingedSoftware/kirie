@@ -13,6 +13,7 @@ impl BundleKey {
         h.update(&BAKE_FORMAT_VERSION.to_le_bytes());
         h.update(&kirie_shader::TRANSLATOR_VERSION.to_le_bytes());
         h.update(&assets_fingerprint());
+        h.update(&binary_fingerprint());
         BundleKey(*h.finalize().as_bytes())
     }
 
@@ -45,6 +46,24 @@ fn assets_fingerprint() -> [u8; 32] {
         for e in &entries {
             h.update(e.as_bytes());
             h.update(&[0]);
+        }
+        *h.finalize().as_bytes()
+    })
+}
+
+fn binary_fingerprint() -> [u8; 32] {
+    use std::sync::OnceLock;
+    static FP: OnceLock<[u8; 32]> = OnceLock::new();
+    *FP.get_or_init(|| {
+        let mut h = blake3::Hasher::new();
+        if let Some(meta) = std::env::current_exe().ok().and_then(|p| p.metadata().ok()) {
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |d| d.as_nanos());
+            h.update(&meta.len().to_le_bytes());
+            h.update(&mtime.to_le_bytes());
         }
         *h.finalize().as_bytes()
     })
