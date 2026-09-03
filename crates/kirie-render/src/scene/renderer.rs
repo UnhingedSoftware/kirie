@@ -2070,6 +2070,7 @@ impl Renderer for SceneRenderer {
                 }
                 SceneItem::Text(tg)
                     if !tg.visible
+                        || tg.blank
                         || !ancestors_visible(
                             parent_by_id,
                             visible_by_id,

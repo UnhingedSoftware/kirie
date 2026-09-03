@@ -26,6 +26,7 @@ pub struct ParticleGpu {
 pub struct TextGpu {
     pub id: i64,
     pub visible: bool,
+    pub blank: bool,
     pub bind: wgpu::BindGroup,
     pub vertex_buffer: wgpu::Buffer,
     _texture: GpuTexture,
@@ -124,11 +125,14 @@ impl TextGpu {
             rb.padding,
             rb.bundled.as_deref(),
         ) else {
+            self.blank = true;
             return;
         };
         if !raster.any_coverage {
+            self.blank = true;
             return;
         }
+        self.blank = false;
         let texture = text::upload(device, queue, &raster);
         self.rebuild.raster_size = (raster.width, raster.height);
         self.rebuild_quad(device);
@@ -445,6 +449,7 @@ pub fn build_text(
     Some(TextGpu {
         id: object.base.id,
         visible: true,
+        blank: false,
         bind,
         vertex_buffer,
         _texture: texture,
