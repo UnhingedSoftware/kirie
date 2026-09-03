@@ -60,6 +60,63 @@ impl IncludeResolver for SourceIncludes<'_> {
     }
 }
 
+struct RecordingSource<'a> {
+    inner: &'a dyn AssetSource,
+    seen: std::sync::Mutex<HashMap<String, Option<Vec<u8>>>>,
+}
+
+impl RecordingSource<'_> {
+    fn worth_keeping(path: &str) -> bool {
+        path.starts_with("shaders/") || path.ends_with(".json")
+    }
+
+    fn into_memory(self) -> MemorySource {
+        MemorySource(
+            self.seen
+                .into_inner()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+}
+
+impl AssetSource for RecordingSource<'_> {
+    fn load(&self, path: &str) -> Option<Vec<u8>> {
+        let bytes = self.inner.load(path);
+        if Self::worth_keeping(path) {
+            self.seen
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(path.to_owned(), bytes.clone());
+        }
+        bytes
+    }
+}
+
+struct MemorySource(HashMap<String, Option<Vec<u8>>>);
+
+impl AssetSource for MemorySource {
+    fn load(&self, path: &str) -> Option<Vec<u8>> {
+        self.0.get(path).cloned().flatten()
+    }
+}
+
+struct RebuildContext {
+    source: MemorySource,
+    registry: TextureRegistry,
+    fbo_sampler: wgpu::Sampler,
+    cross: HashMap<String, wgpu::TextureView>,
+    param_cache: std::sync::Mutex<ParamCache>,
+    fbo_scale: f32,
+    no_snapshot: Fbo,
+}
+
+struct TextLayer {
+    rebuild: extras::TextRebuild,
+    texture: Arc<super::texture::GpuTexture>,
+    image: ImageObject,
+    object: Object,
+}
+
 struct PassGpu {
     pipeline: wgpu::RenderPipeline,
     g0_bind: wgpu::BindGroup,
@@ -105,6 +162,7 @@ struct ObjectGpu {
     atlas: Option<Arc<super::texture::AtlasTexture>>,
     image_size: (u32, u32),
     anchor: [f32; 2],
+    text: Option<Box<TextLayer>>,
 }
 
 struct AtlasSlot {
@@ -203,6 +261,7 @@ pub struct SceneRenderer {
     visibility_bindings: Vec<VisBinding>,
     effect_vis_bindings: Vec<EffectVisBinding>,
     structural_props: std::collections::HashSet<String>,
+    rebuild: Option<RebuildContext>,
 }
 
 struct VisBinding {
@@ -228,6 +287,11 @@ impl SceneRenderer {
         let device = target.device;
         let queue = target.queue;
         let scene = &model.scene;
+        let recording = RecordingSource {
+            inner: source,
+            seen: std::sync::Mutex::new(HashMap::new()),
+        };
+        let source: &dyn AssetSource = &recording;
 
         let mut bag = kirie_scene::PropertyBag::new();
         for (name, value) in user_props {
@@ -519,6 +583,30 @@ impl SceneRenderer {
                         items.push(SceneItem::Particle(Box::new(pg)));
                     }
                 }
+                ObjectKind::Text(tobj) if tobj.effects.iter().any(|e| e.resolved.is_some()) => {
+                    let fonts = text_fonts.get_or_insert_with(TextFonts::new);
+                    let world = world_xf(object.base.id, &local_xf);
+                    if let Some(obj) = build_text_layer(
+                        device,
+                        queue,
+                        fonts,
+                        object,
+                        tobj,
+                        (proj_w, proj_h),
+                        &screen_mvp,
+                        source,
+                        &resolver,
+                        &registry,
+                        &fbo_sampler,
+                        &scene_snapshot,
+                        world,
+                        &cross,
+                        &param_cache,
+                        rs,
+                    ) {
+                        items.push(SceneItem::Image(Box::new(obj)));
+                    }
+                }
                 ObjectKind::Text(tobj) => {
                     let tp = text_pipeline.get_or_insert_with(|| extras::build_text_pipeline(device));
                     let fonts = text_fonts.get_or_insert_with(TextFonts::new);
@@ -618,6 +706,28 @@ impl SceneRenderer {
 
         let runtime_templates = collect_runtime_templates(model, source, user_props, &registry);
         let runtime_white = registry.white();
+        let video_names = registry.peek_video_names();
+        let video_textures = registry.take_videos();
+        let atlas_textures = registry
+            .take_atlases()
+            .into_iter()
+            .map(|atlas| AtlasSlot {
+                atlas,
+                uploaded_page: 0,
+            })
+            .collect();
+        let rebuild = items
+            .iter()
+            .any(|it| matches!(it, SceneItem::Image(o) if o.text.is_some()))
+            .then(|| RebuildContext {
+                source: recording.into_memory(),
+                registry,
+                fbo_sampler,
+                cross,
+                param_cache,
+                fbo_scale: rs,
+                no_snapshot: Fbo::new(device, "kirie-scene-no-snapshot", 1, 1),
+            });
 
         Ok(SceneRenderer {
             device: device.clone(),
@@ -627,8 +737,7 @@ impl SceneRenderer {
             clear_color,
             screen_mvp,
             video_users: {
-                let videos = registry.peek_video_names();
-                videos
+                video_names
                     .iter()
                     .map(|name| {
                         items
@@ -651,15 +760,8 @@ impl SceneRenderer {
             items,
             sprite_scratch: Vec::new(),
             pack_scratch: Vec::new(),
-            video_textures: registry.take_videos(),
-            atlas_textures: registry
-                .take_atlases()
-                .into_iter()
-                .map(|atlas| AtlasSlot {
-                    atlas,
-                    uploaded_page: 0,
-                })
-                .collect(),
+            video_textures,
+            atlas_textures,
             pointer: [0.5, 0.5],
             pointer_last: [0.5, 0.5],
             pointer_left: false,
@@ -707,6 +809,7 @@ impl SceneRenderer {
             visibility_bindings: collect_visibility_bindings(scene),
             effect_vis_bindings: collect_effect_vis_bindings(scene),
             structural_props: collect_structural_props(scene),
+            rebuild,
         })
     }
 
@@ -741,7 +844,13 @@ impl SceneRenderer {
     pub fn debug_text_count(&self) -> usize {
         self.items
             .iter()
-            .filter(|it| matches!(it, SceneItem::Text(_)))
+            .filter(|it| {
+                matches!(it, SceneItem::Text(_) | SceneItem::Image(_))
+                    && match it {
+                        SceneItem::Image(o) => o.text.is_some(),
+                        _ => true,
+                    }
+            })
             .count()
     }
 
@@ -791,29 +900,12 @@ impl SceneRenderer {
             if !transform_affected(id, &dirty, &self.locals) {
                 continue;
             }
-            let (origin, scale, angle_z) = world_xf(id, &self.locals);
-            let SceneItem::Image(o) = item else {
-                if let SceneItem::Text(tg) = item {
-                    tg.set_transform(&self.device, origin, scale);
-                }
-                continue;
-            };
-            let origin = anchored_origin(origin, o.image_size, scale, angle_z, o.anchor);
-            let quad = scene_space_quad(origin, o.image_size, scale, angle_z, (sw, sh));
-            for pass in &o.passes {
-                if pass.geometry != Geometry::Scene {
-                    continue;
-                }
-                let mut verts = quad;
-                if pass.uv_crop != [1.0, 1.0] {
-                    apply_uv_crop(&mut verts, pass.uv_crop);
-                }
-                self.queue
-                    .write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+            let world = world_xf(id, &self.locals);
+            match item {
+                SceneItem::Image(o) => retransform(o, &self.queue, world, (sw, sh)),
+                SceneItem::Text(tg) => tg.set_transform(&self.device, world.0, world.1),
+                _ => {}
             }
-            o.scene_center = [origin[0] - sw as f32 / 2.0, origin[1] - sh as f32 / 2.0];
-            o.local_to_scene = local_to_scene(origin, o.image_size, scale, angle_z, (sw, sh));
-            o.angle_z = angle_z;
         }
     }
 
@@ -948,14 +1040,33 @@ impl SceneRenderer {
             self.window_for = None;
         }
         if !text_width.is_empty()
-            && let (Some(tp), Some(fonts)) = (self.text_pipeline.as_ref(), self.text_fonts.as_mut())
+            && let Some(fonts) = self.text_fonts.as_mut()
         {
             for (id, w) in text_width {
                 for item in &mut self.items {
-                    if let SceneItem::Text(tg) = item
-                        && tg.id == id
-                    {
-                        tg.set_max_width(&self.device, &self.queue, tp, fonts, w);
+                    match item {
+                        SceneItem::Text(tg) if tg.id == id => {
+                            if let Some(tp) = self.text_pipeline.as_ref() {
+                                tg.set_max_width(&self.device, &self.queue, tp, fonts, w);
+                            }
+                        }
+                        SceneItem::Image(o) if o.id == id && o.text.is_some() => {
+                            let changed = o.text.as_mut().is_some_and(|t| t.rebuild.set_max_width(w));
+                            if let (true, Some(ctx)) = (changed, self.rebuild.as_ref()) {
+                                refresh_text_layer(
+                                    &self.device,
+                                    &self.queue,
+                                    fonts,
+                                    ctx,
+                                    self.scene_snapshot.as_ref(),
+                                    &self.locals,
+                                    (self.proj_w, self.proj_h),
+                                    &self.screen_mvp,
+                                    o,
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1607,7 +1718,175 @@ fn build_object(
         atlas: layer_atlas,
         image_size: (iw, ih),
         anchor,
+        text: None,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_text_layer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fonts: &mut TextFonts,
+    object: &Object,
+    tobj: &kirie_scene::object::TextObject,
+    scene_size: (u32, u32),
+    screen_mvp: &Mat4,
+    source: &dyn AssetSource,
+    resolver: &dyn IncludeResolver,
+    registry: &TextureRegistry,
+    fbo_sampler: &wgpu::Sampler,
+    scene_snapshot: &Fbo,
+    world: WorldXf,
+    cross: &std::collections::HashMap<String, wgpu::TextureView>,
+    param_cache: &std::sync::Mutex<ParamCache>,
+    fbo_scale: f32,
+) -> Option<ObjectGpu> {
+    use kirie_scene::user::UserSetting;
+    let (rebuild, raster) = extras::text_layout(fonts, tobj, source, (world.0, world.1))?;
+    let texture = Arc::new(super::text::upload(device, queue, &raster));
+    let name = text_texture_name(object.base.id);
+    registry.insert(&name, texture.clone());
+    let mut material = source
+        .load(FONT_MATERIAL)
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .map(|v| kirie_scene::material::Material::from_value(&v))?;
+    let pass = material.passes.first_mut()?;
+    pass.textures = vec![Some(name.clone())];
+    let image = ImageObject {
+        image: name,
+        model: None,
+        material: Some(material),
+        scale: tobj.scale.clone(),
+        angles: UserSetting::literal([0.0; 3]),
+        visible: tobj.visible.clone(),
+        alpha: tobj.alpha.clone(),
+        color: tobj.color.clone(),
+        alignment: "center".to_owned(),
+        size: [raster.width as f32, raster.height as f32],
+        parallax_depth: UserSetting::literal([0.0; 2]),
+        color_blend_mode: UserSetting::literal(0),
+        brightness: UserSetting::literal(1.0),
+        effects: tobj.effects.clone(),
+        animationlayers: Vec::new(),
+        instance: None,
+    };
+    let mut built = build_object(
+        device,
+        object,
+        &image,
+        scene_size,
+        screen_mvp,
+        source,
+        resolver,
+        registry,
+        fbo_sampler,
+        scene_snapshot,
+        (world.0, rebuild.quad_scale(world.1), world.2),
+        false,
+        cross,
+        param_cache,
+        fbo_scale,
+    )?;
+    built.anchor = extras::text_anchor(&raster, &tobj.horizontalalign, &tobj.verticalalign);
+    built.text = Some(Box::new(TextLayer {
+        rebuild,
+        texture,
+        image,
+        object: object.clone(),
+    }));
+    retransform(&mut built, queue, world, scene_size);
+    Some(built)
+}
+
+const FONT_MATERIAL: &str = "materials/fonts/basefont.json";
+
+fn text_texture_name(id: i64) -> String {
+    format!("_text_{id}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn refresh_text_layer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    fonts: &mut TextFonts,
+    ctx: &RebuildContext,
+    scene_snapshot: Option<&Fbo>,
+    locals: &HashMap<i64, LocalXf>,
+    scene_size: (u32, u32),
+    screen_mvp: &Mat4,
+    o: &mut ObjectGpu,
+) {
+    let Some(mut text) = o.text.take() else {
+        return;
+    };
+    let raster = text.rebuild.rasterize(fonts);
+    let world = world_xf(o.id, locals);
+    let (halign, valign) = match &text.object.kind {
+        ObjectKind::Text(t) => (t.horizontalalign.clone(), t.verticalalign.clone()),
+        _ => (String::new(), String::new()),
+    };
+    let anchor = extras::text_anchor(&raster, &halign, &valign);
+    if (raster.width, raster.height) == (text.texture.width, text.texture.height) {
+        super::text::write(queue, &text.texture, &raster);
+        o.anchor = anchor;
+        o.text = Some(text);
+        retransform(o, queue, world, scene_size);
+        return;
+    }
+    let texture = Arc::new(super::text::upload(device, queue, &raster));
+    ctx.registry.insert(&text_texture_name(o.id), texture.clone());
+    text.image.size = [raster.width as f32, raster.height as f32];
+    let Some(mut built) = build_object(
+        device,
+        &text.object,
+        &text.image,
+        scene_size,
+        screen_mvp,
+        &ctx.source,
+        &SourceIncludes(&ctx.source),
+        &ctx.registry,
+        &ctx.fbo_sampler,
+        scene_snapshot.unwrap_or(&ctx.no_snapshot),
+        (world.0, text.rebuild.quad_scale(world.1), world.2),
+        false,
+        &ctx.cross,
+        &ctx.param_cache,
+        ctx.fbo_scale,
+    ) else {
+        o.text = Some(text);
+        return;
+    };
+    built.anchor = anchor;
+    built.visible = o.visible;
+    built.alpha = o.alpha;
+    built.color = o.color;
+    built.brightness = o.brightness;
+    text.texture = texture;
+    built.text = Some(text);
+    retransform(&mut built, queue, world, scene_size);
+    *o = built;
+}
+
+fn retransform(o: &mut ObjectGpu, queue: &wgpu::Queue, world: WorldXf, scene: (u32, u32)) {
+    let (origin, mut scale, angle_z) = world;
+    if let Some(text) = o.text.as_ref() {
+        scale = text.rebuild.quad_scale(scale);
+    }
+    let origin = anchored_origin(origin, o.image_size, scale, angle_z, o.anchor);
+    let quad = scene_space_quad(origin, o.image_size, scale, angle_z, scene);
+    for pass in &o.passes {
+        if pass.geometry != Geometry::Scene {
+            continue;
+        }
+        let mut verts = quad;
+        if pass.uv_crop != [1.0, 1.0] {
+            apply_uv_crop(&mut verts, pass.uv_crop);
+        }
+        queue.write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+    }
+    o.scene_center = [origin[0] - scene.0 as f32 / 2.0, origin[1] - scene.1 as f32 / 2.0];
+    o.local_to_scene = local_to_scene(origin, o.image_size, scale, angle_z, scene);
+    o.angle_z = angle_z;
 }
 
 fn collect_visibility_bindings(scene: &kirie_scene::Scene) -> Vec<VisBinding> {
@@ -1805,7 +2084,7 @@ impl Renderer for SceneRenderer {
             }
         }
 
-        if let (Some(tp), Some(fonts)) = (self.text_pipeline.as_ref(), self.text_fonts.as_mut()) {
+        if let Some(fonts) = self.text_fonts.as_mut() {
             for u in &updates {
                 if u.target != PropTarget::Text {
                     continue;
@@ -1814,11 +2093,32 @@ impl Renderer for SceneRenderer {
                     continue;
                 };
                 for item in &mut self.items {
-                    if let SceneItem::Text(tg) = item
-                        && tg.id == u.object_id
-                        && tg.current_text() != s.as_str()
-                    {
-                        tg.retext(&self.device, &self.queue, tp, fonts, s);
+                    match item {
+                        SceneItem::Text(tg) if tg.id == u.object_id && tg.current_text() != s.as_str() => {
+                            if let Some(tp) = self.text_pipeline.as_ref() {
+                                tg.retext(&self.device, &self.queue, tp, fonts, s);
+                            }
+                        }
+                        SceneItem::Image(o)
+                            if o.id == u.object_id
+                                && o.text.as_ref().is_some_and(|t| t.rebuild.current != *s) =>
+                        {
+                            if let (Some(ctx), Some(text)) = (self.rebuild.as_ref(), o.text.as_mut()) {
+                                text.rebuild.current = s.clone();
+                                refresh_text_layer(
+                                    &self.device,
+                                    &self.queue,
+                                    fonts,
+                                    ctx,
+                                    self.scene_snapshot.as_ref(),
+                                    &self.locals,
+                                    (self.proj_w, self.proj_h),
+                                    &self.screen_mvp,
+                                    o,
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }

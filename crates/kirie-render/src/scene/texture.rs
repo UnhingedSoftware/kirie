@@ -353,6 +353,16 @@ impl TextureRegistry {
         self.white.clone()
     }
 
+    pub fn insert(&self, name: &str, texture: std::sync::Arc<GpuTexture>) {
+        self.cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                name.to_owned(),
+                std::sync::Arc::new(std::sync::OnceLock::from(Some(texture))),
+            );
+    }
+
     pub fn get_wrapping(&self, name: &str, source: &dyn AssetSource) -> std::sync::Arc<GpuTexture> {
         let key = format!("\u{0}wrap:{name}");
         let slot = self
