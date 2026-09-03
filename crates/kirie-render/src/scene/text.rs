@@ -3,13 +3,12 @@ use std::sync::Arc;
 
 use cosmic_text::fontdb;
 use cosmic_text::{
-    Align, Attrs, Buffer, Color as CtColor, Family, FontSystem, Metrics, Shaping, SwashCache, Wrap,
+    Align, Attrs, Buffer, CacheKeyFlags, Color as CtColor, Family, FontSystem, Hinting, Metrics, Shaping,
+    SwashCache, Wrap,
 };
 use kirie_scene::resolve::AssetSource;
 
 use super::texture::GpuTexture;
-
-const LINE_HEIGHT_RATIO: f32 = 1.2;
 
 const MAX_EDGE: u32 = 4096;
 
@@ -71,6 +70,7 @@ pub struct TextRaster {
     pub height: u32,
     pub line_count: usize,
     pub any_coverage: bool,
+    pub anchor_box: [f32; 2],
 }
 
 impl TextRaster {
@@ -82,7 +82,38 @@ impl TextRaster {
             height: 1,
             line_count: 0,
             any_coverage: false,
+            anchor_box: [0.0, 1.0],
         }
+    }
+}
+
+struct LineMetrics {
+    ascent: f32,
+    height: f32,
+}
+
+fn line_metrics(fonts: &mut TextFonts, buffer: &Buffer, point_size: f32) -> LineMetrics {
+    let fallback = LineMetrics {
+        ascent: point_size * 0.8,
+        height: point_size * 1.2,
+    };
+    let Some((id, weight)) = buffer
+        .layout_runs()
+        .find_map(|run| run.glyphs.first().map(|g| (g.font_id, g.font_weight)))
+    else {
+        return fallback;
+    };
+    let Some(font) = fonts.font_system.get_font(id, weight) else {
+        return fallback;
+    };
+    let m = font.metrics();
+    let upm = f32::from(m.units_per_em).max(1.0);
+    let ascent = m.ascent / upm * point_size;
+    let descent = -m.descent / upm * point_size;
+    let leading = m.leading / upm * point_size;
+    LineMetrics {
+        ascent,
+        height: (ascent + descent + leading).round().max(1.0),
     }
 }
 
@@ -183,7 +214,6 @@ pub fn rasterize(
     }
     let point_size = point_size.max(1.0);
     let pad = padding.max(0.0);
-    let metrics = Metrics::new(point_size, point_size * LINE_HEIGHT_RATIO);
 
     let has_box_w = box_size[0] > 1.0;
     let has_box_h = box_size[1] > 1.0;
@@ -192,24 +222,35 @@ pub fn rasterize(
     let hint = family_hint(font);
     let family_name = bundled_family.or(hint.as_deref());
     let family = family_name.map_or(Family::SansSerif, Family::Name);
-    let attrs = Attrs::new().family(family);
+    let attrs = Attrs::new()
+        .family(family)
+        .cache_key_flags(CacheKeyFlags::DISABLE_HINTING);
 
     let mut buffer = {
         let fs = &mut fonts.font_system;
-        let mut buffer = Buffer::new(fs, metrics);
+        let mut buffer = Buffer::new(fs, Metrics::new(point_size, point_size));
+        buffer.set_hinting(Hinting::Enabled);
         buffer.set_size(inner_w, None);
         buffer.set_wrap(if has_box_w { Wrap::WordOrGlyph } else { Wrap::None });
         buffer.set_text(text, &attrs, Shaping::Advanced, Some(h_align(horizontalalign)));
         buffer.shape_until_scroll(fs, false);
         buffer
     };
+    let line = line_metrics(fonts, &buffer, point_size);
+    buffer.set_metrics(Metrics::new(point_size, line.height));
+    buffer.shape_until_scroll(&mut fonts.font_system, false);
 
     let mut text_w = 0.0f32;
     let mut text_h = 0.0f32;
     let mut line_count = 0usize;
+    let mut first_baseline = line.ascent;
     for run in buffer.layout_runs() {
+        if line_count == 0 {
+            first_baseline = run.line_y;
+        }
         line_count += 1;
-        text_w = text_w.max(run.line_w);
+        let ink_w = run.glyphs.iter().map(|g| g.x + g.w).fold(0.0f32, f32::max);
+        text_w = text_w.max(if ink_w > 0.0 { ink_w } else { run.line_w });
         text_h = text_h.max(run.line_top + run.line_height);
     }
     if line_count == 0 {
@@ -221,21 +262,24 @@ pub fn rasterize(
     } else {
         text_w + 2.0 * pad
     });
-    let out_h = ceil_clamp(if has_box_h {
+    let box_h = ceil_clamp(if has_box_h {
         box_size[1]
     } else {
         text_h + 2.0 * pad
     });
+    let out_h = (box_h + HEADROOM).min(MAX_EDGE);
 
     let x_off = pad.round() as i32;
-    let avail = out_h as f32 - 2.0 * pad - text_h;
-    let y_off = (pad
+    let avail = box_h as f32 - 2.0 * pad - text_h;
+    let box_top = HEADROOM as f32
+        + pad
         + if avail > 0.0 {
             avail * v_align_factor(verticalalign)
         } else {
             0.0
-        })
-    .round() as i32;
+        };
+    let y_off = (box_top + line.ascent).trunc() as i32 - first_baseline.trunc() as i32;
+    let anchor_box = [box_top, (line_count as f32 - 1.0) * line.height + line.ascent];
 
     let mut pixels = vec![0u8; (out_w as usize) * (out_h as usize) * 4];
     let mut any_coverage = false;
@@ -274,8 +318,11 @@ pub fn rasterize(
         height: out_h,
         line_count,
         any_coverage,
+        anchor_box,
     })
 }
+
+const HEADROOM: u32 = 1;
 
 fn ceil_clamp(v: f32) -> u32 {
     if !v.is_finite() || v <= 0.0 {
@@ -384,12 +431,35 @@ mod tests {
         )
         .expect("non-empty text rasterizes");
         assert_eq!(r.line_count, 3, "three newline-separated lines");
-        assert!(
-            r.height >= (32.0 * LINE_HEIGHT_RATIO * 2.0) as u32,
-            "height {} spans multiple lines",
-            r.height
-        );
+        assert!(r.height >= 3 * 32, "height {} spans three lines", r.height);
         assert!(r.width > 0 && r.height > 0, "non-degenerate bounds");
+    }
+
+    #[test]
+    fn anchor_box_runs_from_the_first_ascender_to_the_last_baseline() {
+        let mut fonts = TextFonts::new();
+        if fonts.face_count() == 0 {
+            return;
+        }
+        let one =
+            rasterize(&mut fonts, "Hg", "", 40.0, [0.0, 0.0], "left", "top", 0.0, None).expect("rasterizes");
+        let two = rasterize(
+            &mut fonts,
+            "Hg\nHg",
+            "",
+            40.0,
+            [0.0, 0.0],
+            "left",
+            "top",
+            0.0,
+            None,
+        )
+        .expect("rasterizes");
+        assert_eq!(one.anchor_box[0], HEADROOM as f32);
+        assert!(one.anchor_box[1] > 0.0 && one.anchor_box[1] < one.height as f32);
+        let pitch = two.anchor_box[1] - one.anchor_box[1];
+        assert_eq!(pitch, pitch.round());
+        assert_eq!(two.height - HEADROOM, (one.height - HEADROOM) * 2);
     }
 
     #[test]
@@ -431,7 +501,7 @@ mod tests {
         )
         .expect("rasterizes");
         assert_eq!(r.width, 200);
-        assert_eq!(r.height, 120);
+        assert_eq!(r.height, 120 + HEADROOM);
     }
 
     #[test]

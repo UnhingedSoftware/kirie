@@ -45,6 +45,7 @@ struct TextRebuild {
     quad_scale: [f32; 2],
     raster_scale: f32,
     raster_size: (u32, u32),
+    anchor_box: [f32; 2],
     origin: [f32; 2],
     scene_size: (u32, u32),
     bundled: Option<String>,
@@ -71,7 +72,11 @@ impl TextGpu {
         let rb = &self.rebuild;
         let sx = rb.raster_size.0 as f32 * rb.quad_scale[0];
         let sy = rb.raster_size.1 as f32 * rb.quad_scale[1];
-        let [cx, cy] = anchored_center(rb.origin, [sx, sy], &rb.halign, &rb.valign);
+        let anchor = [
+            rb.anchor_box[0] * rb.quad_scale[1],
+            rb.anchor_box[1] * rb.quad_scale[1],
+        ];
+        let [cx, cy] = anchored_center(rb.origin, [sx, sy], anchor, &rb.halign, &rb.valign);
         let quad = scene_space_quad(cx, cy, sx, sy, rb.scene_size);
         let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let mut verts = Vec::with_capacity(4 * 20);
@@ -162,6 +167,7 @@ impl TextGpu {
         self.blank = false;
         let texture = text::upload(device, queue, &raster);
         self.rebuild.raster_size = (raster.width, raster.height);
+        self.rebuild.anchor_box = raster.anchor_box;
         self.rebuild_quad(device);
         self.bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kirie-scene-text-bg"),
@@ -397,7 +403,17 @@ pub fn build_text(
     let quad_scale = [world_scale[0] / raster_scale, world_scale[1] / raster_scale];
     let sx = raster.width as f32 * quad_scale[0];
     let sy = raster.height as f32 * quad_scale[1];
-    let [cx, cy] = anchored_center(world_origin, [sx, sy], &tobj.horizontalalign, &tobj.verticalalign);
+    let anchor = [
+        raster.anchor_box[0] * quad_scale[1],
+        raster.anchor_box[1] * quad_scale[1],
+    ];
+    let [cx, cy] = anchored_center(
+        world_origin,
+        [sx, sy],
+        anchor,
+        &tobj.horizontalalign,
+        &tobj.verticalalign,
+    );
     let quad = scene_space_quad(cx, cy, sx, sy, scene_size);
     let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
 
@@ -466,6 +482,7 @@ pub fn build_text(
             quad_scale,
             raster_scale,
             raster_size: (raster.width, raster.height),
+            anchor_box: raster.anchor_box,
             origin: [world_origin[0], world_origin[1]],
             scene_size,
             bundled,
@@ -506,24 +523,31 @@ pub fn draw_text(
     rp.draw(0..4, 0..1);
 }
 
-fn anchored_center(origin: [f32; 2], size: [f32; 2], halign: &str, valign: &str) -> [f32; 2] {
+fn anchored_center(
+    origin: [f32; 2],
+    size: [f32; 2],
+    anchor_box: [f32; 2],
+    halign: &str,
+    valign: &str,
+) -> [f32; 2] {
     let x = match halign {
         "left" => origin[0] + size[0] / 2.0,
         "right" => origin[0] - size[0] / 2.0,
         _ => origin[0],
     };
-    let y = match valign {
-        "top" => origin[1] - size[1] / 2.0,
-        "bottom" => origin[1] + size[1] / 2.0,
-        _ => origin[1],
+    let along = match valign {
+        "top" => 0.0,
+        "bottom" => 1.0,
+        _ => 0.5,
     };
+    let y = origin[1] + anchor_box[0] + along * anchor_box[1] - size[1] / 2.0;
     [x, y]
 }
 
 fn scene_space_quad(ox: f32, oy: f32, sx: f32, sy: f32, scene: (u32, u32)) -> [[f32; 3]; 4] {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
-    let left = (ox - sw / 2.0 - sx / 2.0).round();
-    let top = (oy - sh / 2.0 + sy / 2.0).round();
+    let left = (ox - sw / 2.0 - sx / 2.0 + 0.5).floor();
+    let top = (oy - sh / 2.0 + sy / 2.0).floor();
     [
         [left, top, 0.0],
         [left, top - sy, 0.0],
@@ -596,33 +620,51 @@ mod tests {
 
     #[test]
     fn left_aligned_text_starts_at_its_origin() {
-        let c = anchored_center([-158.0, 62.0], [80.0, 30.0], "left", "center");
+        let c = anchored_center([-158.0, 62.0], [80.0, 30.0], [0.0, 30.0], "left", "center");
         assert_eq!(c, [-118.0, 62.0]);
     }
 
     #[test]
     fn right_aligned_text_ends_at_its_origin() {
-        let c = anchored_center([375.0, -177.0], [200.0, 30.0], "right", "center");
+        let c = anchored_center([375.0, -177.0], [200.0, 30.0], [0.0, 30.0], "right", "center");
         assert_eq!(c, [275.0, -177.0]);
     }
 
     #[test]
     fn top_and_bottom_aligned_text_hang_from_their_origin() {
         assert_eq!(
-            anchored_center([0.0, 10.0], [4.0, 20.0], "center", "top"),
+            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], "center", "top"),
             [0.0, 0.0]
         );
         assert_eq!(
-            anchored_center([0.0, 10.0], [4.0, 20.0], "center", "bottom"),
+            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], "center", "bottom"),
             [0.0, 20.0]
+        );
+    }
+
+    #[test]
+    fn text_aligns_by_its_ascender_box_not_its_bitmap() {
+        let size = [100.0, 84.0];
+        let ascender_box = [0.0, 56.0];
+        assert_eq!(
+            anchored_center([0.0, 0.0], size, ascender_box, "center", "top"),
+            [0.0, -42.0]
+        );
+        assert_eq!(
+            anchored_center([0.0, 0.0], size, ascender_box, "center", "center"),
+            [0.0, -14.0]
+        );
+        assert_eq!(
+            anchored_center([0.0, 0.0], size, ascender_box, "center", "bottom"),
+            [0.0, 14.0]
         );
     }
 
     #[test]
     fn text_quads_snap_to_whole_scene_pixels() {
         let q = scene_space_quad(1763.0, 967.0, 37.0, 39.0, (1920, 1080));
-        assert_eq!(q[0], [785.0, 447.0, 0.0]);
-        assert_eq!(q[3], [822.0, 408.0, 0.0]);
+        assert_eq!(q[0], [785.0, 446.0, 0.0]);
+        assert_eq!(q[3], [822.0, 407.0, 0.0]);
     }
 
     #[test]
