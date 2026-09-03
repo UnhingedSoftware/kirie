@@ -221,7 +221,7 @@ impl World {
                 if *inited {
                     continue;
                 }
-                bind_this_layer(&ctx, *owner);
+                bind_this_layer(&ctx, *owner, key);
                 set_workshop_id(&ctx, workshop.as_deref());
                 let arg = match current.to_js(&ctx) {
                     Ok(v) => v,
@@ -251,9 +251,11 @@ impl World {
                 }
             }
 
+            dispatch_animation_events(&ctx, &metas, frame, &mut out);
+
             let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
             for (key, owner, _, current, workshop, _, _) in &metas {
-                bind_this_layer(&ctx, *owner);
+                bind_this_layer(&ctx, *owner, key);
                 set_workshop_id(&ctx, workshop.as_deref());
                 let arg = match current.to_js(&ctx) {
                     Ok(v) => v,
@@ -332,7 +334,7 @@ impl World {
                 }
             };
             for (mkey, owner) in &keys {
-                bind_this_layer(&ctx, *owner);
+                bind_this_layer(&ctx, *owner, mkey);
                 if let Err(msg) = call_export(&ctx, mkey, "applyUserProperties", payload.clone()) {
                     out.errors.push(ScriptError::Runtime {
                         key: mkey.clone(),
@@ -468,13 +470,13 @@ fn call_ret2<'js, A: rquickjs::function::IntoArgs<'js>>(
         .map_err(|e| ScriptError::Internal(e.to_string()))
 }
 
-fn bind_this_layer(ctx: &Ctx<'_>, owner: Option<i64>) {
+fn bind_this_layer(ctx: &Ctx<'_>, owner: Option<i64>, key: &str) {
     if let Ok(f) = global::<Function>(ctx, "__bindThisLayer") {
         let arg = match owner {
             Some(id) => Value::new_number(ctx.clone(), id as f64),
             None => Value::new_null(ctx.clone()),
         };
-        let _ = f.call::<_, ()>((arg,));
+        let _ = f.call::<_, ()>((arg, key));
     }
 }
 
@@ -531,7 +533,7 @@ fn dispatch_cursor(
         let was_hit = st.hit.get(id).copied().unwrap_or(false);
         new_hit.push((*id, hit));
 
-        bind_this_layer(ctx, *owner);
+        bind_this_layer(ctx, *owner, key);
         let mut fire = |name: &'static str, bit: u8| {
             if flags & bit == 0 {
                 return;
@@ -633,7 +635,7 @@ fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, o
         if *media_flags == 0 {
             continue;
         }
-        bind_this_layer(ctx, *owner);
+        bind_this_layer(ctx, *owner, key);
         for (payload, name, fires, bit) in &events {
             if !fires || media_flags & bit == 0 {
                 continue;
@@ -656,6 +658,47 @@ fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, o
                 out.errors.push(ScriptError::Runtime {
                     key: key.clone(),
                     phase: name,
+                    message: msg,
+                });
+            }
+        }
+    }
+}
+
+fn dispatch_animation_events(
+    ctx: &Ctx<'_>,
+    metas: &[ModuleTickState],
+    frame: &HostFrame,
+    out: &mut TickOutput,
+) {
+    for (object_id, name, at) in &frame.animation_events {
+        for (key, owner, _, current, workshop, _, _) in metas {
+            if *owner != Some(*object_id) {
+                continue;
+            }
+            bind_this_layer(ctx, *owner, key);
+            set_workshop_id(ctx, workshop.as_deref());
+            let event = match Object::new(ctx.clone())
+                .and_then(|o| o.set("name", name.as_str()).map(|()| o))
+                .and_then(|o| o.set("frame", f64::from(*at)).map(|()| o))
+            {
+                Ok(o) => o.into_value(),
+                Err(e) => {
+                    out.errors.push(ScriptError::Internal(e.to_string()));
+                    continue;
+                }
+            };
+            let value = match current.to_js(ctx) {
+                Ok(v) => v,
+                Err(e) => {
+                    out.errors.push(ScriptError::Internal(e.to_string()));
+                    continue;
+                }
+            };
+            if let Err(msg) = call_export2(ctx, key, "animationEvent", event, value) {
+                out.errors.push(ScriptError::Runtime {
+                    key: key.clone(),
+                    phase: "animationEvent",
                     message: msg,
                 });
             }
@@ -713,6 +756,20 @@ fn cursor_event<'js>(ctx: &Ctx<'js>, world: [f32; 3], layer: &LayerState) -> Res
 
 fn call_export<'js>(ctx: &Ctx<'js>, key: &str, name: &str, arg: Value<'js>) -> Result<(), String> {
     call_export_ret(ctx, key, name, arg).map(|_| ())
+}
+
+fn call_export2<'js>(
+    ctx: &Ctx<'js>,
+    key: &str,
+    name: &str,
+    arg: Value<'js>,
+    arg2: Value<'js>,
+) -> Result<(), String> {
+    let f: Function = ctx.globals().get("__callExport").map_err(|e| e.to_string())?;
+    f.call::<_, Value>((key, name, arg, arg2))
+        .catch(ctx)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn call_export_ret<'js>(
@@ -850,6 +907,11 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
         "setScene" => Some(SceneOp::SetSceneProperty {
             name: obj.get("name").ok()?,
             value: op_value(&obj.get::<_, Value>("value").ok()?),
+        }),
+        "animCmd" => Some(SceneOp::AnimationCommand {
+            index: obj.get::<_, f64>("index").ok()?.max(0.0) as u32,
+            cmd: obj.get("cmd").ok()?,
+            value: obj.get::<_, f64>("value").unwrap_or(0.0),
         }),
         _ => None,
     }

@@ -1,4 +1,6 @@
-use kirie_script::{AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue};
+use kirie_script::{
+    AnimationState, AudioBuffers, HostFrame, LayerState, MediaFrame, SceneOp, ScriptEngine, ScriptValue,
+};
 
 fn num(v: &ScriptValue) -> f64 {
     match v {
@@ -833,4 +835,115 @@ fn this_object_aliases_this_layer() {
     let out = e.tick(frame, vec![]).unwrap();
     assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
     assert_eq!(num(&out.property_results[0].1), 1.0);
+}
+
+fn anim(id: i64, key: &str, name: &str) -> AnimationState {
+    AnimationState {
+        id,
+        key: key.into(),
+        name: name.into(),
+        fps: 30.0,
+        frames: 60.0,
+        duration: 2.0,
+        rate: 1.0,
+        playing: false,
+        frame: 12.0,
+    }
+}
+
+#[test]
+fn animation_handles_resolve_by_property_and_name() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_7",
+        "var log = [];
+         export function init(){
+           var own = thisObject.getAnimation();
+           var named = thisScene.getAnimation('fade');
+           var eff = thisLayer.getEffect(0).getAnimation();
+           log.push(own ? own.name + ':' + own.frameCount + ':' + own.duration + ':' + own.getFrame() : 'none');
+           log.push(named ? named.fps : 'none');
+           log.push(eff ? eff.name : 'none');
+           log.push(thisScene.getAnimation('missing') === undefined);
+           own.play(); log.push(own.isPlaying());
+           named.setFrame(29); named.rate = 2; log.push(named.getFrame() + ':' + named.rate);
+           eff.stop();
+         }
+         export function update(v){ return log.join(','); }",
+        Some(7),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let frame = HostFrame {
+        animations: vec![
+            anim(7, "alpha_7", "own"),
+            anim(9, "alpha_9", "fade"),
+            anim(7, "fx0multiply_7", "glow"),
+        ],
+        layers: vec![LayerState {
+            id: 7,
+            name: "L".into(),
+            effects: Some(vec![("glow".into(), 1)]),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("own:60:2:12,30,glow,true,true,29:2".into())
+    );
+    let cmds: Vec<_> = out
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            SceneOp::AnimationCommand { index, cmd, value } => Some((*index, cmd.as_str(), *value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cmds,
+        vec![
+            (0, "play", 0.0),
+            (1, "frame", 29.0),
+            (1, "rate", 2.0),
+            (2, "stop", 0.0)
+        ]
+    );
+}
+
+#[test]
+fn animation_events_reach_the_owning_object() {
+    let e = ScriptEngine::new().unwrap();
+    for (key, id) in [("alpha_7", 7), ("visible_7", 7), ("alpha_8", 8)] {
+        e.load_property_script(
+            key,
+            "var seen = '';
+             export function animationEvent(ev, value){ seen += ev.name + '@' + ev.frame + '/' + value + ';'; }
+             export function update(v){ return seen; }",
+            Some(id),
+            ScriptValue::Str("base".into()),
+            serde_json::json!({}),
+        )
+        .unwrap();
+    }
+    let _ = e.tick(HostFrame::default(), vec![]).unwrap();
+    let frame = HostFrame {
+        animation_events: vec![(7, "yeshu".into(), 30.0)],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert!(out.errors.is_empty(), "errors: {:?}", out.errors);
+    let by_key = |k: &str| {
+        out.property_results
+            .iter()
+            .find(|(key, _)| key == k)
+            .map(|(_, v)| v.clone())
+            .unwrap()
+    };
+    assert_eq!(by_key("alpha_7"), ScriptValue::Str("yeshu@30/;".into()));
+    assert_eq!(by_key("visible_7"), ScriptValue::Str("yeshu@30/;".into()));
+    assert_eq!(by_key("alpha_8"), ScriptValue::Str(String::new()));
 }

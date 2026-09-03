@@ -19,6 +19,7 @@ globalThis.__host = {
   audio: null,
   scene: { bloom: false, bloomstrength: 0, bloomthreshold: 0, clearenabled: false, clearcolor: [0, 0, 0], ambientcolor: [0, 0, 0], skylightcolor: [0, 0, 0], fov: 45, nearz: 0.1, farz: 10000, camerafade: false, camerashake: false, camerashakespeed: 0, camerashakeamplitude: 0, camerashakeroughness: 0, cameraparallax: false, cameraparallaxamount: 0, cameraparallaxdelay: 0, cameraparallaxmouseinfluence: 0, camera: { eye: [0, 0, 0], center: [0, 0, -1], up: [0, 1, 0], fov: 45 } },
   layers: [],
+  animations: [],
   ops: [],
   console: [],
   workshopId: null,
@@ -214,6 +215,7 @@ function __makeLayer(id) {
     get volume() { return 1; },
     set volume(v) { __stubWarn('sound'); },
     // ---- IEffectLayer (d.ts): effect handles by authored index or name.
+    getAnimation: function (name) { return __findAnim(id, name); },
     getEffectCount: function () { var l = __layerById(id); return (l && l.effects) ? l.effects.length : 0; },
     getEffect: function (arg) {
       var l = __layerById(id);
@@ -273,11 +275,46 @@ function __makeLayer(id) {
   return self;
 }
 globalThis.__makeLayer = __makeLayer;
-globalThis.__bindThisLayer = function (id) {
+globalThis.__bindThisLayer = function (id, key) {
   var layer = (id == null) ? undefined : __makeLayer(id);
   globalThis.thisLayer = layer;
   globalThis.thisObject = layer;
+  __host.__curKey = key;
 };
+
+function __findAnim(objectId, name, effectIdx) {
+  var A = __host.animations || [];
+  var named = typeof name === 'string' && name.length > 0;
+  var prefix = (effectIdx === undefined) ? null : 'fx' + effectIdx;
+  var first = -1;
+  for (var i = 0; i < A.length; i++) {
+    var a = A[i];
+    if (objectId !== null && a.id !== objectId) continue;
+    if (prefix !== null && a.key.indexOf(prefix) !== 0) continue;
+    if (named ? a.name === name : a.key === __host.__curKey) return __makeAnimation(i);
+    if (first < 0) first = i;
+  }
+  return (!named && prefix !== null && first >= 0) ? __makeAnimation(first) : undefined;
+}
+
+function __makeAnimation(i) {
+  function st() { return __host.animations[i]; }
+  function cmd(c, v) { __host.ops.push({ op: 'animCmd', index: i, cmd: c, value: (v === undefined ? 0 : +v) }); }
+  return {
+    get fps() { return st().fps; },
+    get frameCount() { return st().frames; },
+    get duration() { return st().duration; },
+    get name() { return st().name; },
+    get rate() { return st().rate; },
+    set rate(v) { st().rate = +v; cmd('rate', +v); },
+    play: function () { st().playing = true; cmd('play'); },
+    pause: function () { st().playing = false; cmd('pause'); },
+    stop: function () { st().playing = false; st().frame = 0; cmd('stop'); },
+    isPlaying: function () { return st().playing; },
+    getFrame: function () { return st().frame; },
+    setFrame: function (f) { st().frame = +f || 0; cmd('frame', +f || 0); },
+  };
+}
 // Live layer-prop read for the tick loop: a property script's update(value)
 // must receive the CURRENT value — including writes other exports just made
 // (init()'s `thisLayer.visible = false`), which the host-side cache misses.
@@ -299,6 +336,7 @@ var __scene = {
     throw new Error('thisScene.getLayer: invalid argument');
   },
   getLayerCount: function () { return __host.layers.length; },
+  getAnimation: function (name) { return __findAnim(null, name); },
   getLayerIndex: function (layer) { if (!layer || layer.__id === undefined) return -1; for (var i = 0; i < __host.layers.length; i++) if (__host.layers[i].id === layer.__id) return i; return -1; },
   getLayerByID: function (idString) { var id = parseInt(idString, 10); var l = __layerById(id); return l ? __makeLayer(id) : undefined; },
   enumerateLayers: function () { return __host.layers.map(function (l) { return __makeLayer(l.id); }); },
@@ -390,6 +428,7 @@ function __makeEffect(layerId, idx) {
     executeMaterialFunction: function () { /* material functions are editor-side; inert */ },
     getMaterialCount: function () { var l = __layerById(layerId); var e = l && l.effects && l.effects[idx]; return e ? e[1] : 0; },
     getMaterial: function () { return { setMaterialProperty: eff.setMaterialProperty }; },
+    getAnimation: function (name) { return __findAnim(layerId, name, idx); },
     get name() { var l = __layerById(layerId); var e = l && l.effects && l.effects[idx]; return e ? e[0] : ''; },
     get visible() { return true; },
     set visible(v) { if (!__host.__warnedEffectVis) { __host.__warnedEffectVis = true; __host.console.push('Eeffect.visible is not applied live (pass chain planned at build)'); } },
@@ -582,12 +621,12 @@ globalThis.createScriptProperties = function () {
 // Rust stores each evaluated module namespace under its key; these helpers keep
 // all JS handles inside the JS heap (no Rust-side Persistent needed).
 globalThis.__registerModule = function (key, ns) { __host.modules[key] = ns; };
-globalThis.__callExport = function (key, name, arg) {
+globalThis.__callExport = function (key, name, arg, arg2) {
   var ns = __host.modules[key];
   if (!ns) return { __missing: true };
   var fn = ns[name];
   if (typeof fn !== 'function') return { __missing: true };
-  return { value: fn.call(ns, arg) };
+  return { value: fn.call(ns, arg, arg2) };
 };
 globalThis.__moduleWorkshopId = function (key) { var ns = __host.modules[key]; return ns && typeof ns.__workshopId === 'string' ? ns.__workshopId : null; };
 

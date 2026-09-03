@@ -146,6 +146,19 @@ pub struct AudioBuffers {
     pub audio64: Vec<f32>,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct AnimationState {
+    pub id: i64,
+    pub key: String,
+    pub name: String,
+    pub fps: f32,
+    pub frames: f32,
+    pub duration: f32,
+    pub rate: f32,
+    pub playing: bool,
+    pub frame: f32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct HostFrame {
     pub runtime: f64,
@@ -173,6 +186,9 @@ pub struct HostFrame {
     pub workshop_id: Option<String>,
     #[serde(skip)]
     pub media: Option<MediaFrame>,
+    pub animations: Vec<AnimationState>,
+    #[serde(skip)]
+    pub animation_events: Vec<(i64, String, f32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -211,6 +227,8 @@ impl Default for HostFrame {
             layers: Vec::new(),
             workshop_id: None,
             media: None,
+            animations: Vec::new(),
+            animation_events: Vec::new(),
         }
     }
 }
@@ -273,6 +291,11 @@ pub enum SceneOp {
     SetSceneProperty {
         name: String,
         value: ScriptValue,
+    },
+    AnimationCommand {
+        index: u32,
+        cmd: String,
+        value: f64,
     },
 }
 
