@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::animation::PropertyAnimation;
 use crate::value::{Color, Vec2, Vec3, coerce_bool, coerce_f64, coerce_i64, parse_color, parse_vec};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +31,7 @@ pub struct UserSetting<T> {
     pub value: T,
     pub user: Option<UserRef>,
     pub script: Option<ScriptBinding>,
+    pub animation: Option<PropertyAnimation>,
 }
 
 impl<T> UserSetting<T> {
@@ -38,6 +40,7 @@ impl<T> UserSetting<T> {
             value,
             user: None,
             script: None,
+            animation: None,
         }
     }
 
@@ -82,13 +85,14 @@ pub fn read_user<T>(
         Some(Value::Object(obj)) => {
             let (user, script) = parse_bindings(obj);
             let value = obj.get("value").and_then(&parse).unwrap_or(default);
-            UserSetting { value, user, script }
+            UserSetting {
+                value,
+                user,
+                script,
+                animation: PropertyAnimation::parse(obj),
+            }
         }
-        Some(other) => UserSetting {
-            value: parse(other).unwrap_or(default),
-            user: None,
-            script: None,
-        },
+        Some(other) => UserSetting::literal(parse(other).unwrap_or(default)),
     }
 }
 

@@ -294,7 +294,7 @@ pub struct TextObject {
     pub verticalalign: String,
     pub padding: i64,
     pub limitwidth: bool,
-    pub maxwidth: f32,
+    pub maxwidth: UserSetting<f32>,
     pub effects: Vec<Effect>,
 }
 
@@ -313,7 +313,7 @@ pub struct ModelObject {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ObjectKind {
     Image(Box<ImageObject>),
-    Sound(SoundObject),
+    Sound(Box<SoundObject>),
     Particle(Box<ParticleObject>),
     Text(Box<TextObject>),
     Model(ModelObject),
@@ -454,10 +454,7 @@ fn parse_text(obj: &Map<String, Value>) -> TextObject {
             .to_owned(),
         padding: obj.get("padding").and_then(coerce_i64).unwrap_or(0),
         limitwidth: obj.get("limitwidth").and_then(Value::as_bool).unwrap_or(false),
-        maxwidth: obj
-            .get("maxwidth")
-            .and_then(Value::as_f64)
-            .map_or(500.0, |v| v as f32),
+        maxwidth: user_f32(obj, "maxwidth", 500.0),
         effects: parse_effects(obj),
     }
 }
@@ -478,11 +475,11 @@ fn parse_sound(obj: &Map<String, Value>) -> ObjectKind {
         Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(str::to_owned).collect(),
         _ => Vec::new(),
     };
-    ObjectKind::Sound(SoundObject {
+    ObjectKind::Sound(Box::new(SoundObject {
         sound,
         playbackmode: obj.get("playbackmode").and_then(Value::as_str).map(str::to_owned),
         volume: user_f32(obj, "volume", 1.0),
-    })
+    }))
 }
 
 fn parse_particle(obj: &Map<String, Value>) -> ParticleObject {

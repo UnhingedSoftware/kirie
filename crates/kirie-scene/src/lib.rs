@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod animation;
 pub mod error;
 pub mod material;
 pub mod object;
@@ -10,6 +11,7 @@ pub mod scene;
 pub mod user;
 pub mod value;
 
+pub use animation::{AnimationEvent, Handle, Keyframe, PlayMode, PropertyAnimation};
 pub use error::SceneError;
 pub use property::{PropertyBag, PropertyValue};
 pub use resolve::{AssetProblem, AssetSource, SceneModel};

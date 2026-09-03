@@ -112,10 +112,7 @@ impl Object {
                 }
             }
             ObjectKind::Sound(snd) => resolve_us(&mut snd.volume, bag),
-            ObjectKind::Model(_)
-            | ObjectKind::Light(_)
-            | ObjectKind::Shape(_)
-            | ObjectKind::Group => {}
+            ObjectKind::Model(_) | ObjectKind::Light(_) | ObjectKind::Shape(_) | ObjectKind::Group => {}
         }
     }
 }
@@ -347,6 +344,7 @@ mod tests {
                 source: "export function update() {}".to_owned(),
                 properties,
             }),
+            animation: None,
         }
     }
 

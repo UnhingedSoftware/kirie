@@ -96,6 +96,7 @@ pub struct General {
     pub camerashakeroughness: UserSetting<f32>,
     pub camerashakespeed: UserSetting<f32>,
     pub customsortorder: bool,
+    pub zoom: UserSetting<f32>,
     pub extra: Map<String, Value>,
 }
 
@@ -119,6 +120,7 @@ impl General {
             camerashakeroughness: user_f32(map, "camerashakeroughness", 0.0),
             camerashakespeed: user_f32(map, "camerashakespeed", 0.0),
             customsortorder: map.get("customsortorder").and_then(coerce_bool).unwrap_or(false),
+            zoom: user_f32(map, "zoom", 1.0),
             extra: map.clone(),
         }
     }
