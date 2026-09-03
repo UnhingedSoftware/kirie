@@ -176,6 +176,33 @@ fn apply_user_properties_fires_on_every_module() {
 }
 
 #[test]
+fn apply_user_properties_fires_once_with_every_property_at_load() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "origin_5",
+        "let seen = 0;\
+         export function init(v){ console.log('init'); }\
+         export function applyUserProperties(changed){ seen += 1; console.log('props:' + Object.keys(changed).sort().join(',') + ':' + changed.foo); }\
+         export function update(v){ console.log('update:' + seen); return v; }",
+        None,
+        ScriptValue::Int(0),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let mut frame = HostFrame::default();
+    frame.user_props.insert("foo".to_owned(), ScriptValue::Int(7));
+    frame
+        .user_props
+        .insert("label".to_owned(), ScriptValue::Str(String::new()));
+    let out = e.tick(frame.clone(), vec![]).unwrap();
+    let logs: Vec<&str> = out.logs.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(logs, ["init", "props:foo,label:7", "update:1"]);
+    let out = e.tick(frame, vec![]).unwrap();
+    let logs: Vec<&str> = out.logs.iter().map(|l| l.message.as_str()).collect();
+    assert_eq!(logs, ["update:1"]);
+}
+
+#[test]
 fn we_modules_import_and_compute() {
     let e = ScriptEngine::new().unwrap();
     e.load_property_script(

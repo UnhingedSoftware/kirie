@@ -249,6 +249,18 @@ impl World {
                     }
                     Err(e) => out.errors.push(ScriptError::Internal(e)),
                 }
+                match build_all(&ctx, &frame.user_props) {
+                    Ok(payload) => {
+                        if let Err(msg) = call_export(&ctx, key, "applyUserProperties", payload) {
+                            out.errors.push(ScriptError::Runtime {
+                                key: key.clone(),
+                                phase: "applyUserProperties",
+                                message: msg,
+                            });
+                        }
+                    }
+                    Err(e) => out.errors.push(e),
+                }
             }
 
             dispatch_animation_events(&ctx, &metas, frame, &mut out);
@@ -804,6 +816,14 @@ fn apply_frame(ctx: &Ctx<'_>, frame: &HostFrame) -> Result<(), ScriptError> {
 fn build_single<'js>(ctx: &Ctx<'js>, key: &str, value: &ScriptValue) -> Result<Value<'js>, ScriptError> {
     let obj = Object::new(ctx.clone()).internal()?;
     obj.set(key, value.to_js(ctx).internal()?).internal()?;
+    Ok(obj.into_value())
+}
+
+fn build_all<'js>(ctx: &Ctx<'js>, props: &BTreeMap<String, ScriptValue>) -> Result<Value<'js>, ScriptError> {
+    let obj = Object::new(ctx.clone()).internal()?;
+    for (key, value) in props {
+        obj.set(key.as_str(), value.to_js(ctx).internal()?).internal()?;
+    }
     Ok(obj.into_value())
 }
 
