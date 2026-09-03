@@ -65,6 +65,7 @@ pub struct World {
     _runtime: Runtime,
     context: Context,
     modules: BTreeMap<String, ModuleMeta>,
+    order: Vec<String>,
     next_layer_handle: u32,
     cursor: CursorState,
     prev_res: Option<[f64; 2]>,
@@ -100,6 +101,7 @@ impl World {
             _runtime: runtime,
             context,
             modules: BTreeMap::new(),
+            order: Vec::new(),
             next_layer_handle: 0,
             cursor: CursorState::default(),
             prev_res: None,
@@ -172,6 +174,7 @@ impl World {
                 media_exports,
             },
         );
+        self.order.push(key.to_owned());
         Ok(())
     }
 
@@ -182,8 +185,9 @@ impl World {
             }
         }
         let metas: Vec<ModuleTickState> = self
-            .modules
+            .order
             .iter()
+            .filter_map(|k| self.modules.get(k).map(|m| (k, m)))
             .map(|(k, m)| {
                 (
                     k.clone(),
@@ -213,8 +217,10 @@ impl World {
             dispatch_cursor(&ctx, &metas, frame, cursor, &mut out);
             dispatch_media(&ctx, &metas, frame, &mut out);
 
-            let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
             for (key, owner, inited, current, workshop, _, _) in &metas {
+                if *inited {
+                    continue;
+                }
                 bind_this_layer(&ctx, *owner);
                 set_workshop_id(&ctx, workshop.as_deref());
                 let arg = match current.to_js(&ctx) {
@@ -224,27 +230,38 @@ impl World {
                         continue;
                     }
                 };
-                if !inited {
-                    if let Err(msg) = call_export(&ctx, key, "init", arg.clone()) {
-                        out.errors.push(ScriptError::Runtime {
-                            key: key.clone(),
-                            phase: "init",
-                            message: msg,
-                        });
-                    }
-                    match general_settings(&ctx, &language) {
-                        Ok(payload) => {
-                            if let Err(msg) = call_export(&ctx, key, "applyGeneralSettings", payload) {
-                                out.errors.push(ScriptError::Runtime {
-                                    key: key.clone(),
-                                    phase: "applyGeneralSettings",
-                                    message: msg,
-                                });
-                            }
-                        }
-                        Err(e) => out.errors.push(ScriptError::Internal(e)),
-                    }
+                if let Err(msg) = call_export(&ctx, key, "init", arg) {
+                    out.errors.push(ScriptError::Runtime {
+                        key: key.clone(),
+                        phase: "init",
+                        message: msg,
+                    });
                 }
+                match general_settings(&ctx, &language) {
+                    Ok(payload) => {
+                        if let Err(msg) = call_export(&ctx, key, "applyGeneralSettings", payload) {
+                            out.errors.push(ScriptError::Runtime {
+                                key: key.clone(),
+                                phase: "applyGeneralSettings",
+                                message: msg,
+                            });
+                        }
+                    }
+                    Err(e) => out.errors.push(ScriptError::Internal(e)),
+                }
+            }
+
+            let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
+            for (key, owner, _, current, workshop, _, _) in &metas {
+                bind_this_layer(&ctx, *owner);
+                set_workshop_id(&ctx, workshop.as_deref());
+                let arg = match current.to_js(&ctx) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        out.errors.push(ScriptError::Internal(e.to_string()));
+                        continue;
+                    }
+                };
                 if res_changed {
                     match call_ret2(&ctx, "__vec2", (frame.res_x, frame.res_y)) {
                         Ok(size) => {
@@ -301,9 +318,9 @@ impl World {
 
     pub fn dispatch_user_property(&mut self, key: &str, value: &ScriptValue) -> TickOutput {
         let keys: Vec<(String, Option<i64>)> = self
-            .modules
+            .order
             .iter()
-            .map(|(k, m)| (k.clone(), m.owner_id))
+            .filter_map(|k| self.modules.get(k).map(|m| (k.clone(), m.owner_id)))
             .collect();
         self.context.with(|ctx| {
             let mut out = TickOutput::default();
