@@ -60,19 +60,10 @@ impl TextGpu {
         &self.rebuild.current
     }
 
-    pub fn set_transform(
-        &mut self,
-        device: &wgpu::Device,
-        origin: Option<[f32; 2]>,
-        scale: Option<[f32; 2]>,
-    ) {
+    pub fn set_transform(&mut self, device: &wgpu::Device, origin: [f32; 2], scale: [f32; 2]) {
         let rb = &mut self.rebuild;
-        if let Some(o) = origin {
-            rb.origin = o;
-        }
-        if let Some(s) = scale {
-            rb.quad_scale = [s[0] / rb.raster_scale, s[1] / rb.raster_scale];
-        }
+        rb.origin = origin;
+        rb.quad_scale = [scale[0] / rb.raster_scale, scale[1] / rb.raster_scale];
         self.rebuild_quad(device);
     }
 

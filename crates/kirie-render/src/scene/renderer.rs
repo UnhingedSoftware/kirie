@@ -777,43 +777,26 @@ impl SceneRenderer {
             }
             dirty.push(u.object_id);
         }
-        for u in updates {
-            let (origin, scale) = match u.target {
-                PropTarget::Origin => (as_vec3(&u.value).map(|v| [v[0], v[1]]), None),
-                PropTarget::Scale => (None, as_vec3(&u.value).map(|v| [v[0], v[1]])),
-                _ => continue,
-            };
-            if origin.is_none() && scale.is_none() {
-                continue;
-            }
-            for item in &mut self.items {
-                if let SceneItem::Text(tg) = item
-                    && tg.id == u.object_id
-                {
-                    tg.set_transform(&self.device, origin, scale);
-                }
-            }
-        }
         if dirty.is_empty() {
             return;
         }
         let (sw, sh) = (self.proj_w, self.proj_h);
         for item in &mut self.items {
-            let SceneItem::Image(o) = item else { continue };
-            let mut affected = dirty.contains(&o.id);
-            let mut cur = self.locals.get(&o.id).and_then(|l| l.parent);
-            for _ in 0..64 {
-                if affected {
-                    break;
-                }
-                let Some(c) = cur else { break };
-                affected = dirty.contains(&c);
-                cur = self.locals.get(&c).and_then(|l| l.parent);
-            }
-            if !affected {
+            let id = match item {
+                SceneItem::Image(o) => o.id,
+                SceneItem::Text(tg) => tg.id,
+                _ => continue,
+            };
+            if !transform_affected(id, &dirty, &self.locals) {
                 continue;
             }
-            let (origin, scale, angle_z) = world_xf(o.id, &self.locals);
+            let (origin, scale, angle_z) = world_xf(id, &self.locals);
+            let SceneItem::Image(o) = item else {
+                if let SceneItem::Text(tg) = item {
+                    tg.set_transform(&self.device, origin, scale);
+                }
+                continue;
+            };
             let quad = scene_space_quad(origin, o.image_size, scale, angle_z, (sw, sh));
             for pass in &o.passes {
                 if pass.geometry != Geometry::Scene {
@@ -827,6 +810,7 @@ impl SceneRenderer {
                     .write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
             }
             o.scene_center = [origin[0] - sw as f32 / 2.0, origin[1] - sh as f32 / 2.0];
+            o.local_to_scene = local_to_scene(origin, o.image_size, scale, angle_z, (sw, sh));
             o.angle_z = angle_z;
         }
     }
@@ -3112,6 +3096,18 @@ struct LocalXf {
 }
 
 type WorldXf = ([f32; 2], [f32; 2], f32);
+
+fn transform_affected(id: i64, dirty: &[i64], locals: &HashMap<i64, LocalXf>) -> bool {
+    let mut cur = Some(id);
+    for _ in 0..64 {
+        let Some(c) = cur else { break };
+        if dirty.contains(&c) {
+            return true;
+        }
+        cur = locals.get(&c).and_then(|l| l.parent);
+    }
+    false
+}
 
 fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     let mut chain: Vec<LocalXf> = Vec::new();
