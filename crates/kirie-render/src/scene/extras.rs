@@ -522,14 +522,13 @@ fn anchored_center(origin: [f32; 2], size: [f32; 2], halign: &str, valign: &str)
 
 fn scene_space_quad(ox: f32, oy: f32, sx: f32, sy: f32, scene: (u32, u32)) -> [[f32; 3]; 4] {
     let (sw, sh) = (scene.0 as f32, scene.1 as f32);
-    let (hw, hh) = (sx / 2.0, sy / 2.0);
-    let cx = ox - sw / 2.0;
-    let cy = oy - sh / 2.0;
+    let left = (ox - sw / 2.0 - sx / 2.0).round();
+    let top = (oy - sh / 2.0 + sy / 2.0).round();
     [
-        [cx - hw, cy + hh, 0.0],
-        [cx - hw, cy - hh, 0.0],
-        [cx + hw, cy + hh, 0.0],
-        [cx + hw, cy - hh, 0.0],
+        [left, top, 0.0],
+        [left, top - sy, 0.0],
+        [left + sx, top, 0.0],
+        [left + sx, top - sy, 0.0],
     ]
 }
 
@@ -617,6 +616,13 @@ mod tests {
             anchored_center([0.0, 10.0], [4.0, 20.0], "center", "bottom"),
             [0.0, 20.0]
         );
+    }
+
+    #[test]
+    fn text_quads_snap_to_whole_scene_pixels() {
+        let q = scene_space_quad(1763.0, 967.0, 37.0, 39.0, (1920, 1080));
+        assert_eq!(q[0], [785.0, 447.0, 0.0]);
+        assert_eq!(q[3], [822.0, 408.0, 0.0]);
     }
 
     #[test]
