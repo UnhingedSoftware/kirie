@@ -71,6 +71,7 @@ pub struct TextRaster {
     pub line_count: usize,
     pub any_coverage: bool,
     pub anchor_box: [f32; 2],
+    pub inset: f32,
 }
 
 impl TextRaster {
@@ -83,6 +84,7 @@ impl TextRaster {
             line_count: 0,
             any_coverage: false,
             anchor_box: [0.0, 1.0],
+            inset: 0.0,
         }
     }
 }
@@ -269,6 +271,7 @@ pub fn rasterize(
     });
     let out_h = (box_h + HEADROOM).min(MAX_EDGE);
 
+    let inset = if has_box_w { 0.0 } else { pad };
     let x_off = pad.round() as i32;
     let avail = box_h as f32 - 2.0 * pad - text_h;
     let box_top = HEADROOM as f32
@@ -301,10 +304,7 @@ pub fn rasterize(
                     }
                     let idx = ((py as u32 * out_w + px as u32) * 4) as usize;
                     if a > pixels[idx + 3] {
-                        pixels[idx] = 0xFF;
-                        pixels[idx + 1] = 0xFF;
-                        pixels[idx + 2] = 0xFF;
-                        pixels[idx + 3] = a;
+                        pixels[idx..idx + 4].fill(a);
                         any_coverage = true;
                     }
                 }
@@ -319,6 +319,7 @@ pub fn rasterize(
         line_count,
         any_coverage,
         anchor_box,
+        inset,
     })
 }
 
@@ -349,28 +350,6 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, raster: &TextRaster) -
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let need = (width * height * 4) as usize;
-    if raster.pixels.len() >= need {
-        queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            &raster.pixels[..need],
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * width),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("kirie-scene-text-sampler"),
@@ -381,7 +360,7 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, raster: &TextRaster) -
         min_filter: wgpu::FilterMode::Linear,
         ..wgpu::SamplerDescriptor::default()
     });
-    GpuTexture {
+    let texture = GpuTexture {
         texture,
         view,
         sampler,
@@ -389,7 +368,36 @@ pub fn upload(device: &wgpu::Device, queue: &wgpu::Queue, raster: &TextRaster) -
         height,
         uv_crop: [1.0, 1.0],
         real_size: [width as f32, height as f32],
+    };
+    write(queue, &texture, raster);
+    texture
+}
+
+pub fn write(queue: &wgpu::Queue, texture: &GpuTexture, raster: &TextRaster) {
+    let (width, height) = (texture.width, texture.height);
+    let need = (width * height * 4) as usize;
+    if raster.pixels.len() < need {
+        return;
     }
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &raster.pixels[..need],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 #[cfg(test)]

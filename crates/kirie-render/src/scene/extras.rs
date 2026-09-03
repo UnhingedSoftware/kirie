@@ -31,28 +31,124 @@ pub struct TextGpu {
     pub vertex_buffer: wgpu::Buffer,
     _texture: GpuTexture,
     rebuild: TextRebuild,
+    quad: TextQuad,
     ubo: wgpu::Buffer,
 }
 
-struct TextRebuild {
-    current: String,
+pub struct TextRebuild {
+    pub current: String,
     font: String,
     raster_px: f32,
     box_w: f32,
     halign: String,
     valign: String,
     padding: f32,
-    quad_scale: [f32; 2],
     raster_scale: f32,
-    raster_size: (u32, u32),
-    anchor_box: [f32; 2],
-    origin: [f32; 2],
-    scene_size: (u32, u32),
     bundled: Option<String>,
     box_scale: f32,
+}
+
+impl TextRebuild {
+    #[must_use]
+    pub fn rasterize(&self, fonts: &mut TextFonts) -> text::TextRaster {
+        text::rasterize(
+            fonts,
+            &self.current,
+            &self.font,
+            self.raster_px,
+            [self.box_w, 0.0],
+            &self.halign,
+            &self.valign,
+            self.padding,
+            self.bundled.as_deref(),
+        )
+        .filter(|r| r.any_coverage)
+        .unwrap_or_else(text::TextRaster::blank)
+    }
+
+    pub fn set_max_width(&mut self, maxwidth: f32) -> bool {
+        let w = maxwidth * self.box_scale;
+        if (w - self.box_w).abs() < f32::EPSILON {
+            return false;
+        }
+        self.box_w = w;
+        true
+    }
+
+    pub fn quad_scale(&self, world_scale: [f32; 2]) -> [f32; 2] {
+        [
+            world_scale[0] / self.raster_scale,
+            world_scale[1] / self.raster_scale,
+        ]
+    }
+}
+
+struct TextQuad {
+    quad_scale: [f32; 2],
+    raster_size: (u32, u32),
+    anchor_box: [f32; 2],
+    inset: f32,
+    origin: [f32; 2],
+    scene_size: (u32, u32),
     tint: [f32; 3],
     alpha: f32,
     color_alpha: f32,
+}
+
+#[must_use]
+pub fn text_layout(
+    fonts: &mut TextFonts,
+    tobj: &TextObject,
+    source: &dyn AssetSource,
+    world: ([f32; 2], [f32; 2]),
+) -> Option<(TextRebuild, text::TextRaster)> {
+    let bundled = fonts.bundled_family(&tobj.font, source);
+    const WE_PT_TO_PX: f32 = 300.0 / 72.0;
+    let scale_x = tobj.scale.value[0];
+    let scale_y = tobj.scale.value[1];
+    if scale_x <= 0.0 || scale_y <= 0.0 {
+        return None;
+    }
+    let (_, world_scale) = world;
+    let raster_scale = ((world_scale[0] + world_scale[1]) * 0.5).clamp(0.05, 32.0);
+    let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
+    let box_scale = if tobj.limitwidth {
+        raster_scale / world_scale[0]
+    } else {
+        0.0
+    };
+    let rebuild = TextRebuild {
+        current: tobj.text.value.clone(),
+        font: tobj.font.clone(),
+        raster_px,
+        box_w: tobj.maxwidth.value * box_scale,
+        halign: tobj.horizontalalign.clone(),
+        valign: tobj.verticalalign.clone(),
+        padding: tobj.padding as f32 * raster_scale,
+        raster_scale,
+        bundled,
+        box_scale,
+    };
+    let raster = rebuild.rasterize(fonts);
+    Some((rebuild, raster))
+}
+
+#[must_use]
+pub fn text_anchor(raster: &text::TextRaster, halign: &str, valign: &str) -> [f32; 2] {
+    let (w, h) = (raster.width.max(1) as f32, raster.height.max(1) as f32);
+    let reach = 1.0 - 2.0 * raster.inset / w;
+    let x = match halign {
+        "left" => reach,
+        "right" => -reach,
+        _ => 0.0,
+    };
+    let along = match valign {
+        "top" => 0.0,
+        "bottom" => 1.0,
+        _ => 0.5,
+    };
+    let y = 2.0 * (raster.anchor_box[0] + along * raster.anchor_box[1]) / h - 1.0;
+    [x, y]
 }
 
 impl TextGpu {
@@ -62,22 +158,28 @@ impl TextGpu {
     }
 
     pub fn set_transform(&mut self, device: &wgpu::Device, origin: [f32; 2], scale: [f32; 2]) {
-        let rb = &mut self.rebuild;
-        rb.origin = origin;
-        rb.quad_scale = [scale[0] / rb.raster_scale, scale[1] / rb.raster_scale];
+        self.quad.origin = origin;
+        self.quad.quad_scale = self.rebuild.quad_scale(scale);
         self.rebuild_quad(device);
     }
 
     fn rebuild_quad(&mut self, device: &wgpu::Device) {
-        let rb = &self.rebuild;
-        let sx = rb.raster_size.0 as f32 * rb.quad_scale[0];
-        let sy = rb.raster_size.1 as f32 * rb.quad_scale[1];
+        let q = &self.quad;
+        let sx = q.raster_size.0 as f32 * q.quad_scale[0];
+        let sy = q.raster_size.1 as f32 * q.quad_scale[1];
         let anchor = [
-            rb.anchor_box[0] * rb.quad_scale[1],
-            rb.anchor_box[1] * rb.quad_scale[1],
+            q.anchor_box[0] * q.quad_scale[1],
+            q.anchor_box[1] * q.quad_scale[1],
         ];
-        let [cx, cy] = anchored_center(rb.origin, [sx, sy], anchor, &rb.halign, &rb.valign);
-        let quad = scene_space_quad(cx, cy, sx, sy, rb.scene_size);
+        let [cx, cy] = anchored_center(
+            q.origin,
+            [sx, sy],
+            anchor,
+            q.inset * q.quad_scale[0],
+            &self.rebuild.halign,
+            &self.rebuild.valign,
+        );
+        let quad = scene_space_quad(cx, cy, sx, sy, q.scene_size);
         let uvs: [[f32; 2]; 4] = [[0.0, 0.0], [0.0, 1.0], [1.0, 0.0], [1.0, 1.0]];
         let mut verts = Vec::with_capacity(4 * 20);
         for (p, uv) in quad.iter().zip(uvs.iter()) {
@@ -96,14 +198,14 @@ impl TextGpu {
     }
 
     pub fn set_tint(&mut self, queue: &wgpu::Queue, color: Option<[f32; 3]>, alpha: Option<f32>) {
-        let rb = &mut self.rebuild;
+        let q = &mut self.quad;
         if let Some(c) = color {
-            rb.tint = c;
+            q.tint = c;
         }
         if let Some(a) = alpha {
-            rb.alpha = a;
+            q.alpha = a;
         }
-        let data = [rb.tint[0], rb.tint[1], rb.tint[2], rb.alpha * rb.color_alpha];
+        let data = [q.tint[0], q.tint[1], q.tint[2], q.alpha * q.color_alpha];
         queue.write_buffer(&self.ubo, 64, bytemuck::cast_slice(&data));
     }
 
@@ -115,12 +217,9 @@ impl TextGpu {
         fonts: &mut TextFonts,
         maxwidth: f32,
     ) {
-        let w = maxwidth * self.rebuild.box_scale;
-        if (w - self.rebuild.box_w).abs() < f32::EPSILON {
-            return;
+        if self.rebuild.set_max_width(maxwidth) {
+            self.rerasterize(device, queue, tp, fonts);
         }
-        self.rebuild.box_w = w;
-        self.rerasterize(device, queue, tp, fonts);
     }
 
     pub fn retext(
@@ -145,29 +244,16 @@ impl TextGpu {
         tp: &TextPipeline,
         fonts: &mut TextFonts,
     ) {
-        let rb = &self.rebuild;
-        let Some(raster) = text::rasterize(
-            fonts,
-            &rb.current,
-            &rb.font,
-            rb.raster_px,
-            [rb.box_w, 0.0],
-            &rb.halign,
-            &rb.valign,
-            rb.padding,
-            rb.bundled.as_deref(),
-        ) else {
-            self.blank = true;
-            return;
-        };
+        let raster = self.rebuild.rasterize(fonts);
         if !raster.any_coverage {
             self.blank = true;
             return;
         }
         self.blank = false;
         let texture = text::upload(device, queue, &raster);
-        self.rebuild.raster_size = (raster.width, raster.height);
-        self.rebuild.anchor_box = raster.anchor_box;
+        self.quad.raster_size = (raster.width, raster.height);
+        self.quad.anchor_box = raster.anchor_box;
+        self.quad.inset = raster.inset;
         self.rebuild_quad(device);
         self.bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kirie-scene-text-bg"),
@@ -362,45 +448,12 @@ pub fn build_text(
     world: ([f32; 2], [f32; 2]),
 ) -> Option<TextGpu> {
     let visible = tobj.visible.value && object.base.visible.value;
-
-    let bundled = fonts.bundled_family(&tobj.font, source);
-    const WE_PT_TO_PX: f32 = 300.0 / 72.0;
-    let scale_x = tobj.scale.value[0];
-    let scale_y = tobj.scale.value[1];
-    if scale_x <= 0.0 || scale_y <= 0.0 {
-        return None;
-    }
+    let (rebuild, raster) = text_layout(fonts, tobj, source, world)?;
     let (world_origin, world_scale) = world;
-    let raster_scale = ((world_scale[0] + world_scale[1]) * 0.5).clamp(0.05, 32.0);
-    let raster_px = tobj.pointsize.value * WE_PT_TO_PX * raster_scale;
-    let box_scale = if tobj.limitwidth {
-        raster_scale / world_scale[0]
-    } else {
-        0.0
-    };
-    let box_w = tobj.maxwidth.value * box_scale;
-    let padding = if tobj.limitwidth {
-        tobj.padding as f32 * raster_scale
-    } else {
-        0.0
-    };
-    let raster = text::rasterize(
-        fonts,
-        &tobj.text.value,
-        &tobj.font,
-        raster_px,
-        [box_w, 0.0],
-        &tobj.horizontalalign,
-        &tobj.verticalalign,
-        padding,
-        bundled.as_deref(),
-    )
-    .filter(|r| r.any_coverage)
-    .unwrap_or_else(text::TextRaster::blank);
     let blank = !raster.any_coverage;
     let texture = text::upload(device, queue, &raster);
 
-    let quad_scale = [world_scale[0] / raster_scale, world_scale[1] / raster_scale];
+    let quad_scale = rebuild.quad_scale(world_scale);
     let sx = raster.width as f32 * quad_scale[0];
     let sy = raster.height as f32 * quad_scale[1];
     let anchor = [
@@ -411,6 +464,7 @@ pub fn build_text(
         world_origin,
         [sx, sy],
         anchor,
+        raster.inset * quad_scale[0],
         &tobj.horizontalalign,
         &tobj.verticalalign,
     );
@@ -471,22 +525,14 @@ pub fn build_text(
         bind,
         vertex_buffer,
         _texture: texture,
-        rebuild: TextRebuild {
-            current: tobj.text.value.clone(),
-            font: tobj.font.clone(),
-            raster_px,
-            box_w,
-            halign: tobj.horizontalalign.clone(),
-            valign: tobj.verticalalign.clone(),
-            padding,
+        rebuild,
+        quad: TextQuad {
             quad_scale,
-            raster_scale,
             raster_size: (raster.width, raster.height),
             anchor_box: raster.anchor_box,
+            inset: raster.inset,
             origin: [world_origin[0], world_origin[1]],
             scene_size,
-            bundled,
-            box_scale,
             tint: [color[0], color[1], color[2]],
             alpha: tobj.alpha.value,
             color_alpha: color[3],
@@ -527,12 +573,13 @@ fn anchored_center(
     origin: [f32; 2],
     size: [f32; 2],
     anchor_box: [f32; 2],
+    inset: f32,
     halign: &str,
     valign: &str,
 ) -> [f32; 2] {
     let x = match halign {
-        "left" => origin[0] + size[0] / 2.0,
-        "right" => origin[0] - size[0] / 2.0,
+        "left" => origin[0] + size[0] / 2.0 - inset,
+        "right" => origin[0] - size[0] / 2.0 + inset,
         _ => origin[0],
     };
     let along = match valign {
@@ -620,24 +667,31 @@ mod tests {
 
     #[test]
     fn left_aligned_text_starts_at_its_origin() {
-        let c = anchored_center([-158.0, 62.0], [80.0, 30.0], [0.0, 30.0], "left", "center");
+        let c = anchored_center([-158.0, 62.0], [80.0, 30.0], [0.0, 30.0], 0.0, "left", "center");
         assert_eq!(c, [-118.0, 62.0]);
     }
 
     #[test]
     fn right_aligned_text_ends_at_its_origin() {
-        let c = anchored_center([375.0, -177.0], [200.0, 30.0], [0.0, 30.0], "right", "center");
+        let c = anchored_center(
+            [375.0, -177.0],
+            [200.0, 30.0],
+            [0.0, 30.0],
+            0.0,
+            "right",
+            "center",
+        );
         assert_eq!(c, [275.0, -177.0]);
     }
 
     #[test]
     fn top_and_bottom_aligned_text_hang_from_their_origin() {
         assert_eq!(
-            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], "center", "top"),
+            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], 0.0, "center", "top"),
             [0.0, 0.0]
         );
         assert_eq!(
-            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], "center", "bottom"),
+            anchored_center([0.0, 10.0], [4.0, 20.0], [0.0, 20.0], 0.0, "center", "bottom"),
             [0.0, 20.0]
         );
     }
@@ -647,15 +701,15 @@ mod tests {
         let size = [100.0, 84.0];
         let ascender_box = [0.0, 56.0];
         assert_eq!(
-            anchored_center([0.0, 0.0], size, ascender_box, "center", "top"),
+            anchored_center([0.0, 0.0], size, ascender_box, 0.0, "center", "top"),
             [0.0, -42.0]
         );
         assert_eq!(
-            anchored_center([0.0, 0.0], size, ascender_box, "center", "center"),
+            anchored_center([0.0, 0.0], size, ascender_box, 0.0, "center", "center"),
             [0.0, -14.0]
         );
         assert_eq!(
-            anchored_center([0.0, 0.0], size, ascender_box, "center", "bottom"),
+            anchored_center([0.0, 0.0], size, ascender_box, 0.0, "center", "bottom"),
             [0.0, 14.0]
         );
     }
