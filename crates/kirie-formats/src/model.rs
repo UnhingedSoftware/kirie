@@ -53,10 +53,10 @@ pub struct Mesh {
 }
 
 impl Mesh {
-    fn layout(&self) -> PuppetLayout {
-        let layout = PuppetLayout::for_flags(self.flags as u32);
+    fn layout(&self) -> VertexLayout {
+        let layout = VertexLayout::for_flags(self.flags as u32);
         if layout.stride == 0 {
-            PuppetLayout::for_flags(MODEL_DEFAULT_FLAGS)
+            VertexLayout::for_flags(MODEL_DEFAULT_FLAGS)
         } else {
             layout
         }
@@ -124,7 +124,7 @@ impl Model {
             } else {
                 header_flags
             };
-            let stride = PuppetLayout::for_flags(flags as u32).stride;
+            let stride = VertexLayout::for_flags(flags as u32).stride;
 
             let vertex_bytes = cur.read_i32("vertexBytes")?;
             if vertex_bytes <= 0
@@ -207,7 +207,7 @@ fn skip_mesh_trailers(cur: &mut Cursor<'_>) -> Result<(), ModelError> {
     Ok(())
 }
 
-fn decode_vertex(chunk: &[u8], layout: PuppetLayout) -> Vertex {
+fn decode_vertex(chunk: &[u8], layout: VertexLayout) -> Vertex {
     let f = |off: usize| f32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
     let vec3 = |at: Option<usize>| at.map_or([0.0; 3], |off| [f(off), f(off + 4), f(off + 8)]);
     Vertex {
@@ -357,7 +357,7 @@ const TEXCOORD_ATTRIBUTES: u32 = 0x8
     | 0x0040_0000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-struct PuppetLayout {
+struct VertexLayout {
     stride: usize,
     position: Option<usize>,
     normal: Option<usize>,
@@ -367,9 +367,9 @@ struct PuppetLayout {
     uv: Option<usize>,
 }
 
-impl PuppetLayout {
+impl VertexLayout {
     fn for_flags(flags: u32) -> Self {
-        let mut layout = PuppetLayout::default();
+        let mut layout = VertexLayout::default();
         let mut offset = 0;
         for (mask, size) in VERTEX_ATTRIBUTES {
             if flags & mask == 0 {
@@ -1093,7 +1093,7 @@ impl PuppetMesh {
             .find(|block| block.flags & ATTR_SKINNED == ATTR_SKINNED)
             .or_else(|| blocks.first())
             .ok_or(PuppetError::NoMeshBlock)?;
-        let layout = PuppetLayout::for_flags(block.flags);
+        let layout = VertexLayout::for_flags(block.flags);
         if layout.stride == 0 || !block.vertex_bytes.is_multiple_of(layout.stride) {
             return Err(PuppetError::NoMeshBlock);
         }
@@ -1215,7 +1215,7 @@ fn read_puppet_mesh_blocks(data: &[u8], version: u32, blocks: &mut Vec<PuppetMes
     Some(())
 }
 
-fn decode_puppet_vertex(chunk: &[u8], layout: PuppetLayout) -> PuppetVertex {
+fn decode_puppet_vertex(chunk: &[u8], layout: VertexLayout) -> PuppetVertex {
     let f = |off: usize| f32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
     let u = |off: usize| u32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
     let vec3 = |at: Option<usize>| at.map_or([0.0; 3], |off| [f(off), f(off + 4), f(off + 8)]);
@@ -1625,7 +1625,7 @@ mod tests {
     }
 
     fn synth_legacy_puppet(verts: u32, tris: u32) -> Vec<u8> {
-        let layout = PuppetLayout::for_flags(SYNTH_LEGACY_FLAGS);
+        let layout = VertexLayout::for_flags(SYNTH_LEGACY_FLAGS);
         assert_eq!(layout.stride, PUPPET_LEGACY_VERTEX_STRIDE);
         let mut b = Vec::new();
         b.extend_from_slice(b"MDLV0013");
@@ -1976,7 +1976,7 @@ mod tests {
 
     #[test]
     fn vertex_flags_lay_out_the_strides_the_corpus_uses() {
-        let skinned = PuppetLayout::for_flags(0x0180_000F);
+        let skinned = VertexLayout::for_flags(0x0180_000F);
         assert_eq!(skinned.stride, PUPPET_VERTEX_STRIDE);
         assert_eq!(skinned.position, Some(PUPPET_POSITION_OFFSET));
         assert_eq!(skinned.normal, Some(PUPPET_NORMAL_OFFSET));
@@ -1985,7 +1985,7 @@ mod tests {
         assert_eq!(skinned.bone_weights, Some(PUPPET_BONE_WEIGHT_OFFSET));
         assert_eq!(skinned.uv, Some(PUPPET_UV_OFFSET));
 
-        let legacy = PuppetLayout::for_flags(0x0180_0009);
+        let legacy = VertexLayout::for_flags(0x0180_0009);
         assert_eq!(legacy.stride, PUPPET_LEGACY_VERTEX_STRIDE);
         assert_eq!(legacy.position, Some(0));
         assert_eq!(legacy.bone_indices, Some(12));
@@ -1993,7 +1993,7 @@ mod tests {
         assert_eq!(legacy.uv, Some(44));
         assert_eq!(legacy.normal, None);
 
-        let channels = PuppetLayout::for_flags(0x0080_0021);
+        let channels = VertexLayout::for_flags(0x0080_0021);
         assert_eq!(channels.stride, 44);
         assert_eq!(channels.bone_indices, Some(12));
         assert_eq!(channels.uv, Some(28));
@@ -2003,7 +2003,7 @@ mod tests {
     fn legacy_puppet_reads_four_wide_bone_indices() {
         let mut bytes = synth_legacy_puppet(6, 4);
         let block = &parse_puppet_mesh_blocks(&bytes, 13)[0];
-        let layout = PuppetLayout::for_flags(block.flags);
+        let layout = VertexLayout::for_flags(block.flags);
         assert_eq!(layout.bone_indices, Some(12));
         let slot = block.vertices_offset + 3 * PUPPET_LEGACY_VERTEX_STRIDE + 12;
         bytes[slot..slot + 4].copy_from_slice(&5u32.to_le_bytes());
