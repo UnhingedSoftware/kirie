@@ -12,6 +12,8 @@ pub enum ProjectError {
     Io { path: PathBuf, source: std::io::Error },
     #[error("invalid JSON: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("no data ({len} byte(s), all blank) — the Workshop download is incomplete, re-download the item")]
+    Blank { len: usize },
     #[error("project.json root is not a JSON object")]
     NotAnObject,
     #[error("project title missing")]
@@ -196,6 +198,9 @@ impl Project {
             path: path.to_path_buf(),
             source,
         })?;
+        if bytes.iter().all(|b| *b == 0 || b.is_ascii_whitespace()) {
+            return Err(ProjectError::Blank { len: bytes.len() });
+        }
         let value: Value = serde_json::from_slice(&bytes)?;
         Self::from_value(value)
     }
@@ -833,6 +838,27 @@ mod tests {
         }
         out.sort();
         Some(out)
+    }
+
+    #[test]
+    fn a_zero_filled_download_reports_itself_as_blank() {
+        let dir = std::env::temp_dir().join(format!("kirie-blank-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("project.json");
+        std::fs::write(&path, vec![0u8; 480]).expect("write");
+
+        match Project::from_path(&path) {
+            Err(ProjectError::Blank { len, .. }) => assert_eq!(len, 480),
+            other => panic!("expected Blank, got {other:?}"),
+        }
+
+        std::fs::write(&path, b"   \n\t  ").expect("write");
+        assert!(matches!(Project::from_path(&path), Err(ProjectError::Blank { .. })));
+
+        std::fs::write(&path, b"{bad").expect("write");
+        assert!(matches!(Project::from_path(&path), Err(ProjectError::Json(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn parse(json: &str) -> Project {
