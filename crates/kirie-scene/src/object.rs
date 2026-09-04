@@ -235,6 +235,8 @@ impl PassOverride {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct AnimationLayer {
     pub id: i64,
+    pub name: String,
+    pub additive: bool,
     pub rate: UserSetting<f32>,
     pub visible: UserSetting<bool>,
     pub blend: UserSetting<f32>,
@@ -246,6 +248,8 @@ impl AnimationLayer {
         let id = obj.get("id").and_then(coerce_i64)?;
         Some(AnimationLayer {
             id,
+            name: obj.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            additive: obj.get("additive").and_then(Value::as_bool).unwrap_or(false),
             rate: user_f32(obj, "rate", 1.0),
             visible: user_bool(obj, "visible", false),
             blend: user_f32(obj, "blend", 1.0),
