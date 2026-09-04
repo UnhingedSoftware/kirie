@@ -196,8 +196,16 @@ function __makeLayer(id) {
     // skeletal animation layers, bones, attachments, sound layers, puppet
     // data). Each returns the documented shape so scripts run to completion;
     // the first use logs one console warning per category.
-    getAnimationLayerCount: function () { return 0; },
-    getAnimationLayer: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
+    getAnimationLayerCount: function () { return __puppetLayers(id).length; },
+    getAnimationLayer: function (arg) {
+      var list = __puppetLayers(id);
+      var pick;
+      if (typeof arg === 'number') pick = list[arg];
+      else if (typeof arg === 'string') { for (var i = 0; i < list.length; i++) if (list[i].name === arg) { pick = list[i]; break; } }
+      else pick = list[0];
+      if (!pick) { __stubWarn('animation'); return __makeAnimationLayer(); }
+      return __makePuppetLayer(id, pick.name);
+    },
     createAnimationLayer: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
     playSingleAnimation: function () { __stubWarn('animation'); return __makeAnimationLayer(); },
     destroyAnimationLayer: function () { return false; },
@@ -537,6 +545,54 @@ function __stubWarn(cat) {
 
 // Inert IAnimationLayer (d.ts shape): playback state is tracked locally so
 // scripted play/pause logic runs; nothing renders from it.
+function __puppetLayers(objectId) {
+  var all = __host.puppetLayers || [];
+  var out = [];
+  for (var i = 0; i < all.length; i++) if (all[i].id === objectId) out.push(all[i]);
+  return out;
+}
+
+function __puppetState(objectId, name) {
+  var all = __host.puppetLayers || [];
+  for (var i = 0; i < all.length; i++) if (all[i].id === objectId && all[i].name === name) return all[i];
+  return null;
+}
+
+var __puppetEndedCallbacks = [];
+
+globalThis.__puppetEnded = function (objectId, name) {
+  for (var i = 0; i < __puppetEndedCallbacks.length; i++) {
+    var c = __puppetEndedCallbacks[i];
+    if (c[0] !== objectId || c[1] !== name) continue;
+    try { c[2](); } catch (e) { __host.console.push('E' + String(e && e.stack || e)); }
+  }
+};
+
+function __makePuppetLayer(objectId, name) {
+  function st() { return __puppetState(objectId, name) || {}; }
+  function cmd(c, v) { __host.ops.push({ op: 'puppetCmd', id: objectId, layer: name, cmd: c, value: (v === undefined ? 0 : +v) }); }
+  var self = {
+    get fps() { return st().fps || 0; },
+    get frameCount() { return st().frames || 0; },
+    get duration() { return st().duration || 0; },
+    get name() { return name; },
+    get rate() { var s = st(); return s.rate === undefined ? 1 : s.rate; },
+    set rate(v) { var s = st(); if (s) s.rate = +v; cmd('rate', +v); },
+    get blend() { var s = st(); return s.blend === undefined ? 1 : s.blend; },
+    set blend(v) { var s = st(); if (s) s.blend = +v; cmd('blend', +v); },
+    get visible() { var s = st(); return s.visible !== false; },
+    set visible(v) { var s = st(); if (s) s.visible = !!v; cmd('visible', v ? 1 : 0); },
+    play: function () { var s = st(); if (s) s.playing = true; cmd('play'); },
+    pause: function () { var s = st(); if (s) s.playing = false; cmd('pause'); },
+    stop: function () { var s = st(); if (s) { s.playing = false; s.frame = 0; } cmd('stop'); },
+    isPlaying: function () { return st().playing === true; },
+    getFrame: function () { return st().frame || 0; },
+    setFrame: function (f) { var s = st(); if (s) s.frame = +f || 0; cmd('frame', +f || 0); },
+    addEndedCallback: function (fn) { if (typeof fn === 'function') __puppetEndedCallbacks.push([objectId, name, fn]); },
+  };
+  return self;
+}
+
 function __makeAnimationLayer() {
   var playing = false, frame = 0;
   return {

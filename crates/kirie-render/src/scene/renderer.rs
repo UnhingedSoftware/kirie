@@ -961,13 +961,91 @@ impl SceneRenderer {
         }
     }
 
+    fn apply_puppet_ops(&mut self) {
+        let Some(script) = self.script.as_mut() else { return };
+        let ops = script.take_puppet_ops();
+        if ops.is_empty() {
+            return;
+        }
+        let (sw, sh) = (self.proj_w, self.proj_h);
+        for (id, name, cmd, value) in ops {
+            for item in &mut self.items {
+                let SceneItem::Image(o) = item else { continue };
+                if o.id != id {
+                    continue;
+                }
+                let Some(rig) = o.puppet.as_mut() else { continue };
+                let Some(layer) = rig.player.layer_named_mut(&name) else { continue };
+                let clip = layer.clip;
+                match cmd.as_str() {
+                    "play" => {
+                        if !layer.playing {
+                            layer.time = 0.0;
+                            layer.reverse = false;
+                        }
+                        layer.playing = true;
+                    }
+                    "pause" => layer.playing = false,
+                    "stop" => {
+                        layer.playing = false;
+                        layer.time = 0.0;
+                        layer.reverse = false;
+                    }
+                    "rate" => layer.rate = value as f32,
+                    "blend" => layer.blend = value as f32,
+                    "visible" => layer.visible = value != 0.0,
+                    "frame" => {
+                        let fps = clip
+                            .and_then(|at| rig.mesh.animations.get(at))
+                            .map_or(0.0, |c| c.fps);
+                        if fps > 0.0 {
+                            rig.player.layer_named_mut(&name).expect("layer exists").time =
+                                value as f32 / fps;
+                        }
+                    }
+                    _ => {}
+                }
+                rig.pose = rig.player.pose(&rig.mesh);
+                rig.reskin(&o.passes, &self.queue, o.image_size, (sw, sh));
+            }
+        }
+    }
+
+    fn puppet_layer_states(&self) -> Vec<kirie_script::PuppetLayerState> {
+        let mut out = Vec::new();
+        for item in &self.items {
+            let SceneItem::Image(o) = item else { continue };
+            let Some(rig) = o.puppet.as_ref() else { continue };
+            for layer in &rig.player.layers {
+                let clip = layer.clip.and_then(|at| rig.mesh.animations.get(at));
+                let fps = clip.map_or(0.0, |c| c.fps);
+                out.push(kirie_script::PuppetLayerState {
+                    id: o.id,
+                    name: layer.name.clone(),
+                    fps,
+                    frames: clip.map_or(0.0, |c| c.frames as f32),
+                    duration: clip.map_or(0.0, kirie_formats::model::PuppetAnimation::duration),
+                    rate: layer.rate,
+                    blend: layer.blend,
+                    visible: layer.visible,
+                    playing: layer.playing,
+                    frame: layer.time * fps,
+                });
+            }
+        }
+        out
+    }
+
     fn advance_puppets(&mut self, dt: f32) {
         let (sw, sh) = (self.proj_w, self.proj_h);
         let mut dirty: Vec<i64> = Vec::new();
+        let mut ended: Vec<(i64, String)> = Vec::new();
         for item in &mut self.items {
             let SceneItem::Image(o) = item else { continue };
             let Some(rig) = o.puppet.as_mut() else { continue };
-            if !rig.player.advance(&rig.mesh, dt) {
+            let moved = rig.player.advance(&rig.mesh, dt);
+            ended.extend(rig.player.take_ended().into_iter().map(|name| (o.id, name)));
+            if !moved {
                 continue;
             }
             rig.pose = rig.player.pose(&rig.mesh);
@@ -984,6 +1062,12 @@ impl SceneRenderer {
             }
         }
         self.retransform_dirty(&dirty);
+        if self.script.is_some() {
+            let states = self.puppet_layer_states();
+            if let Some(script) = self.script.as_mut() {
+                script.note_puppet_layers(states, ended);
+            }
+        }
     }
 
     fn apply_scene_property(&mut self, name: &str, value: &kirie_script::ScriptValue) {
@@ -2246,6 +2330,7 @@ impl Renderer for SceneRenderer {
                 a.command(index as usize, &cmd, value as f32);
             }
         }
+        self.apply_puppet_ops();
         self.apply_animation_side_effects(anim.effect, anim.particle, anim.zoom, anim.text_width);
         self.apply_script_scene_ops();
         self.advance_puppets(dt);

@@ -669,6 +669,103 @@ fn stubbed_surface_never_crashes() {
 }
 
 #[test]
+fn animation_layers_read_state_and_emit_commands() {
+    let e = ScriptEngine::new().unwrap();
+    e.load_property_script(
+        "alpha_9",
+        r#"
+        export function update(v) {
+            var bad = [];
+            if (thisLayer.getAnimationLayerCount() !== 2) bad.push('count');
+            var l = thisLayer.getAnimationLayer('siche');
+            if (l.name !== 'siche') bad.push('name');
+            if (l.frameCount !== 195 || l.fps !== 30) bad.push('clip');
+            if (l.isPlaying()) bad.push('playing');
+            if (Math.abs(l.getFrame() - 12) > 1e-3) bad.push('frame');
+            l.play();
+            l.rate = 2;
+            l.setFrame(4);
+            thisLayer.getAnimationLayer(0).visible = false;
+            l.addEndedCallback(function () { console.log('ended-siche'); });
+            return bad.length ? bad.join(',') : 'ok';
+        }
+        "#,
+        Some(7),
+        ScriptValue::Str(String::new()),
+        serde_json::json!({}),
+    )
+    .unwrap();
+    let layer = |name: &str, frames: f32, frame: f32| kirie_script::PuppetLayerState {
+        id: 7,
+        name: name.to_owned(),
+        fps: 30.0,
+        frames,
+        duration: frames / 30.0,
+        rate: 1.0,
+        blend: 1.0,
+        visible: true,
+        playing: false,
+        frame,
+    };
+    let frame = HostFrame {
+        layers: vec![LayerState {
+            id: 7,
+            name: "P".into(),
+            ..Default::default()
+        }],
+        puppet_layers: vec![layer("idle", 120.0, 0.0), layer("siche", 195.0, 12.0)],
+        ..Default::default()
+    };
+    let out = e.tick(frame, vec![]).unwrap();
+    assert_eq!(
+        out.property_results[0].1,
+        ScriptValue::Str("ok".into()),
+        "errors: {:?} logs: {:?}",
+        out.errors,
+        out.logs
+    );
+    let cmds: Vec<(&str, &str, f64)> = out
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            SceneOp::PuppetCommand {
+                layer_id: 7,
+                layer,
+                cmd,
+                value,
+            } => Some((layer.as_str(), cmd.as_str(), *value)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        cmds,
+        vec![
+            ("siche", "play", 0.0),
+            ("siche", "rate", 2.0),
+            ("siche", "frame", 4.0),
+            ("idle", "visible", 0.0),
+        ]
+    );
+
+    let ended = HostFrame {
+        layers: vec![LayerState {
+            id: 7,
+            name: "P".into(),
+            ..Default::default()
+        }],
+        puppet_layers: vec![layer("idle", 120.0, 0.0), layer("siche", 195.0, 195.0)],
+        puppet_events: vec![(7, "siche".to_owned())],
+        ..Default::default()
+    };
+    let out = e.tick(ended, vec![]).unwrap();
+    assert!(
+        out.logs.iter().any(|l| l.message == "ended-siche"),
+        "logs: {:?}",
+        out.logs
+    );
+}
+
+#[test]
 fn engine_interval_fires_by_frame_clock() {
     let e = ScriptEngine::new().unwrap();
     e.load_property_script(

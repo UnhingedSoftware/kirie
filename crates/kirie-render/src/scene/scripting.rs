@@ -117,6 +117,9 @@ pub struct ScriptHost {
     anim_ops: Vec<(u32, String, f64)>,
     animations: Vec<AnimationState>,
     animation_events: Vec<(i64, String, f32)>,
+    puppet_ops: Vec<(i64, String, String, f64)>,
+    puppet_layers: Vec<kirie_script::PuppetLayerState>,
+    puppet_events: Vec<(i64, String)>,
     wants_media: bool,
     media_prev: Option<MediaPrev>,
     camera_op: Option<CameraOp>,
@@ -291,6 +294,9 @@ impl ScriptHost {
             video_ops: Vec::new(),
             anim_ops: Vec::new(),
             animations: Vec::new(),
+            puppet_ops: Vec::new(),
+            puppet_layers: Vec::new(),
+            puppet_events: Vec::new(),
             animation_events: Vec::new(),
             wants_media,
             media_prev: None,
@@ -375,6 +381,9 @@ impl ScriptHost {
         std::mem::swap(&mut frame.animations, &mut self.animations);
         std::mem::swap(&mut frame.animation_events, &mut self.animation_events);
         self.animation_events.clear();
+        frame.puppet_layers.clone_from(&self.puppet_layers);
+        std::mem::swap(&mut frame.puppet_events, &mut self.puppet_events);
+        self.puppet_events.clear();
 
         let overrides = std::mem::take(&mut self.overrides);
         let output = match self.engine.tick_reuse(frame, overrides) {
@@ -534,6 +543,14 @@ impl ScriptHost {
                 SceneOp::AnimationCommand { index, cmd, value } => {
                     self.anim_ops.push((index, cmd, value));
                 }
+                SceneOp::PuppetCommand {
+                    layer_id,
+                    layer,
+                    cmd,
+                    value,
+                } => {
+                    self.puppet_ops.push((layer_id, layer, cmd, value));
+                }
                 SceneOp::SetMaterialProperty {
                     layer_id,
                     effect,
@@ -601,6 +618,19 @@ impl ScriptHost {
 
     pub fn take_anim_ops(&mut self) -> Vec<(u32, String, f64)> {
         std::mem::take(&mut self.anim_ops)
+    }
+
+    pub fn take_puppet_ops(&mut self) -> Vec<(i64, String, String, f64)> {
+        std::mem::take(&mut self.puppet_ops)
+    }
+
+    pub fn note_puppet_layers(
+        &mut self,
+        layers: Vec<kirie_script::PuppetLayerState>,
+        ended: Vec<(i64, String)>,
+    ) {
+        self.puppet_layers = layers;
+        self.puppet_events.extend(ended);
     }
 
     pub fn take_material_ops(&mut self) -> Vec<(i64, usize, String, kirie_script::ScriptValue)> {

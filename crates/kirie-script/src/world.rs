@@ -262,6 +262,7 @@ impl World {
             }
 
             dispatch_animation_events(&ctx, &metas, frame, &mut out);
+            dispatch_puppet_events(&ctx, frame, &mut out);
 
             let mut results: Vec<(String, ScriptValue, bool)> = Vec::new();
             for (key, owner, _, current, workshop, _, _) in &metas {
@@ -627,6 +628,14 @@ fn dispatch_media(ctx: &Ctx<'_>, metas: &[ModuleTickState], frame: &HostFrame, o
     }
 }
 
+fn dispatch_puppet_events(ctx: &Ctx<'_>, frame: &HostFrame, out: &mut TickOutput) {
+    for (object_id, name) in &frame.puppet_events {
+        if let Err(e) = call_ret2(ctx, "__puppetEnded", (*object_id as f64, name.as_str())) {
+            out.errors.push(e);
+        }
+    }
+}
+
 fn dispatch_animation_events(
     ctx: &Ctx<'_>,
     metas: &[ModuleTickState],
@@ -878,6 +887,12 @@ fn parse_op(v: &Value<'_>) -> Option<SceneOp> {
         "setScene" => Some(SceneOp::SetSceneProperty {
             name: obj.get("name").ok()?,
             value: op_value(&obj.get::<_, Value>("value").ok()?),
+        }),
+        "puppetCmd" => Some(SceneOp::PuppetCommand {
+            layer_id: obj.get::<_, f64>("id").ok()? as i64,
+            layer: obj.get("layer").ok()?,
+            cmd: obj.get("cmd").ok()?,
+            value: obj.get::<_, f64>("value").unwrap_or(0.0),
         }),
         "animCmd" => Some(SceneOp::AnimationCommand {
             index: obj.get::<_, f64>("index").ok()?.max(0.0) as u32,

@@ -164,6 +164,20 @@ pub struct AnimationState {
     pub frame: f32,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PuppetLayerState {
+    pub id: i64,
+    pub name: String,
+    pub fps: f32,
+    pub frames: f32,
+    pub duration: f32,
+    pub rate: f32,
+    pub blend: f32,
+    pub visible: bool,
+    pub playing: bool,
+    pub frame: f32,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct HostFrame {
     pub runtime: f64,
@@ -194,6 +208,10 @@ pub struct HostFrame {
     pub animations: Vec<AnimationState>,
     #[serde(skip)]
     pub animation_events: Vec<(i64, String, f32)>,
+    #[serde(rename = "puppetLayers")]
+    pub puppet_layers: Vec<PuppetLayerState>,
+    #[serde(skip)]
+    pub puppet_events: Vec<(i64, String)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -234,6 +252,8 @@ impl Default for HostFrame {
             media: None,
             animations: Vec::new(),
             animation_events: Vec::new(),
+            puppet_layers: Vec::new(),
+            puppet_events: Vec::new(),
         }
     }
 }
@@ -300,6 +320,12 @@ pub enum SceneOp {
     },
     AnimationCommand {
         index: u32,
+        cmd: String,
+        value: f64,
+    },
+    PuppetCommand {
+        layer_id: i64,
+        layer: String,
         cmd: String,
         value: f64,
     },
