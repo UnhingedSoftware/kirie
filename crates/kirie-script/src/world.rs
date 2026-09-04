@@ -61,8 +61,44 @@ struct ModuleMeta {
     media_exports: u8,
 }
 
+pub const SCRIPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+
+#[derive(Clone)]
+struct Deadline(std::sync::Arc<std::sync::atomic::AtomicU64>);
+
+impl Deadline {
+    fn new() -> Self {
+        Deadline(std::sync::Arc::new(std::sync::atomic::AtomicU64::new(u64::MAX)))
+    }
+
+    fn arm(&self, budget: std::time::Duration) {
+        let at = std::time::Instant::now() + budget;
+        let micros = at
+            .duration_since(*START)
+            .as_micros()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        self.0.store(micros, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn disarm(&self) {
+        self.0.store(u64::MAX, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn expired(&self) -> bool {
+        let at = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        at != u64::MAX
+            && u64::try_from(std::time::Instant::now().duration_since(*START).as_micros())
+                .unwrap_or(u64::MAX)
+                > at
+    }
+}
+
+static START: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
 pub struct World {
     _runtime: Runtime,
+    deadline: Deadline,
     context: Context,
     modules: BTreeMap<String, ModuleMeta>,
     order: Vec<String>,
@@ -71,9 +107,20 @@ pub struct World {
     language: String,
 }
 
+struct DeadlineGuard(Deadline);
+
+impl Drop for DeadlineGuard {
+    fn drop(&mut self) {
+        self.0.disarm();
+    }
+}
+
 impl World {
     pub fn new() -> Result<Self, ScriptError> {
         let runtime = Runtime::new().map_err(|e| ScriptError::Internal(e.to_string()))?;
+        let deadline = Deadline::new();
+        let watch = deadline.clone();
+        runtime.set_interrupt_handler(Some(Box::new(move || watch.expired())));
         let resolver = BuiltinResolver::default()
             .with_module("WEMath")
             .with_module("WEColor")
@@ -98,6 +145,7 @@ impl World {
 
         Ok(World {
             _runtime: runtime,
+            deadline,
             context,
             modules: BTreeMap::new(),
             order: Vec::new(),
@@ -177,6 +225,8 @@ impl World {
     }
 
     pub fn tick(&mut self, frame: &HostFrame, overrides: &[(String, ScriptValue)]) -> TickOutput {
+        self.deadline.arm(SCRIPT_BUDGET);
+        let _guard = DeadlineGuard(self.deadline.clone());
         for (k, v) in overrides {
             if let Some(m) = self.modules.get_mut(k) {
                 m.current = v.clone();
@@ -330,6 +380,8 @@ impl World {
     }
 
     pub fn dispatch_user_property(&mut self, key: &str, value: &ScriptValue) -> TickOutput {
+        self.deadline.arm(SCRIPT_BUDGET);
+        let _guard = DeadlineGuard(self.deadline.clone());
         let keys: Vec<(String, Option<i64>)> = self
             .order
             .iter()
