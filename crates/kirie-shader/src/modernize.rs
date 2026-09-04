@@ -135,7 +135,7 @@ pub(crate) enum Tri {
     Unknown,
 }
 
-fn collect_defines(src: &str) -> std::collections::HashMap<String, Option<i64>> {
+pub(crate) fn collect_defines(src: &str) -> std::collections::HashMap<String, Option<i64>> {
     let mut out = std::collections::HashMap::new();
     for line in src.lines() {
         let Some(rest) = line.trim_start().strip_prefix("#define ") else {
@@ -173,67 +173,214 @@ fn drop_stray_endifs(source: &str) -> String {
 
 fn eval_directive(directive: &str, defines: &std::collections::HashMap<String, Option<i64>>) -> Tri {
     let d = directive.split("//").next().unwrap_or("").trim();
-    let defined = |name: &str| defines.contains_key(name);
     if let Some(name) = d.strip_prefix("#ifdef ") {
-        return tri(defined(name.trim()));
+        return tri(defines.contains_key(name.trim()));
     }
     if let Some(name) = d.strip_prefix("#ifndef ") {
-        return tri(!defined(name.trim()));
+        return tri(!defines.contains_key(name.trim()));
     }
     let Some(expr) = d.strip_prefix("#if ").or_else(|| d.strip_prefix("#elif ")) else {
         return Tri::Unknown;
     };
-    let expr = expr.trim();
-    if let Ok(n) = expr.parse::<i64>() {
-        return tri(n != 0);
+    let tokens = tokenize(expr);
+    let mut parser = ExprParser {
+        tokens: &tokens,
+        pos: 0,
+        defines,
+    };
+    let value = parser.or();
+    if parser.pos != tokens.len() {
+        return Tri::Unknown;
     }
-    if let Some(inner) = expr.strip_prefix("defined(").and_then(|s| s.strip_suffix(')')) {
-        return tri(defined(inner.trim()));
-    }
-    if !expr.is_empty() && expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return match defines.get(expr) {
-            None => Tri::False,
-            Some(Some(v)) => tri(*v != 0),
-            Some(None) => Tri::Unknown,
-        };
-    }
-    compare(expr, defines)
+    value.truth()
 }
 
-fn compare(expr: &str, defines: &std::collections::HashMap<String, Option<i64>>) -> Tri {
-    for op in [">=", "<=", "==", "!=", ">", "<"] {
-        let Some((left, right)) = expr.split_once(op) else {
-            continue;
-        };
-        let (Some(a), Some(b)) = (number(left, defines), number(right, defines)) else {
-            return Tri::Unknown;
-        };
-        return tri(match op {
-            ">=" => a >= b,
-            "<=" => a <= b,
-            "==" => a == b,
-            "!=" => a != b,
-            ">" => a > b,
-            _ => a < b,
-        });
-    }
-    Tri::Unknown
+#[derive(Clone, Copy, PartialEq)]
+enum Val {
+    Num(i64),
+    Unknown,
 }
 
-fn number(token: &str, defines: &std::collections::HashMap<String, Option<i64>>) -> Option<i64> {
-    let token = token.trim();
-    if token.is_empty() {
-        return None;
+impl Val {
+    fn truth(self) -> Tri {
+        match self {
+            Val::Num(n) => tri(n != 0),
+            Val::Unknown => Tri::Unknown,
+        }
     }
-    if let Ok(n) = token.parse::<i64>() {
-        return Some(n);
+
+    fn from_tri(t: Tri) -> Val {
+        match t {
+            Tri::True => Val::Num(1),
+            Tri::False => Val::Num(0),
+            Tri::Unknown => Val::Unknown,
+        }
     }
-    if !token.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
-        return None;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Tok {
+    Ident(String),
+    Num(i64),
+    Op(&'static str),
+}
+
+fn tokenize(expr: &str) -> Vec<Tok> {
+    const OPS: [&str; 12] = ["&&", "||", ">=", "<=", "==", "!=", ">", "<", "!", "(", ")", ","];
+    let mut out = Vec::new();
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c.is_ascii_whitespace() {
+            i += 1;
+        } else if c.is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+            match expr[start..i].parse::<i64>() {
+                Ok(n) => out.push(Tok::Num(n)),
+                Err(_) => out.push(Tok::Ident(expr[start..i].to_owned())),
+            }
+        } else if is_ident_start(c) {
+            let start = i;
+            while i < bytes.len() && is_ident_byte(bytes[i]) {
+                i += 1;
+            }
+            out.push(Tok::Ident(expr[start..i].to_owned()));
+        } else if let Some(op) = OPS.iter().find(|op| expr[i..].starts_with(**op)) {
+            out.push(Tok::Op(op));
+            i += op.len();
+        } else {
+            out.push(Tok::Ident(String::new()));
+            i += 1;
+        }
     }
-    match defines.get(token) {
-        None => Some(0),
-        Some(value) => *value,
+    out
+}
+
+fn is_ident_start(c: u8) -> bool {
+    c.is_ascii_alphabetic() || c == b'_'
+}
+
+fn is_ident_byte(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+struct ExprParser<'a> {
+    tokens: &'a [Tok],
+    pos: usize,
+    defines: &'a std::collections::HashMap<String, Option<i64>>,
+}
+
+impl ExprParser<'_> {
+    fn peek(&self) -> Option<&Tok> {
+        self.tokens.get(self.pos)
+    }
+
+    fn eat(&mut self, op: &str) -> bool {
+        if matches!(self.peek(), Some(Tok::Op(o)) if *o == op) {
+            self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn or(&mut self) -> Val {
+        let mut acc = self.and().truth();
+        while self.eat("||") {
+            let rhs = self.and().truth();
+            acc = match (acc, rhs) {
+                (Tri::True, _) | (_, Tri::True) => Tri::True,
+                (Tri::False, Tri::False) => Tri::False,
+                _ => Tri::Unknown,
+            };
+        }
+        Val::from_tri(acc)
+    }
+
+    fn and(&mut self) -> Val {
+        let mut acc = self.not().truth();
+        while self.eat("&&") {
+            let rhs = self.not().truth();
+            acc = match (acc, rhs) {
+                (Tri::False, _) | (_, Tri::False) => Tri::False,
+                (Tri::True, Tri::True) => Tri::True,
+                _ => Tri::Unknown,
+            };
+        }
+        Val::from_tri(acc)
+    }
+
+    fn not(&mut self) -> Val {
+        if self.eat("!") {
+            return match self.not().truth() {
+                Tri::True => Val::Num(0),
+                Tri::False => Val::Num(1),
+                Tri::Unknown => Val::Unknown,
+            };
+        }
+        self.cmp()
+    }
+
+    fn cmp(&mut self) -> Val {
+        let lhs = self.prim();
+        for op in [">=", "<=", "==", "!=", ">", "<"] {
+            if self.eat(op) {
+                let rhs = self.prim();
+                let (Val::Num(a), Val::Num(b)) = (lhs, rhs) else {
+                    return Val::Unknown;
+                };
+                return Val::from_tri(tri(match op {
+                    ">=" => a >= b,
+                    "<=" => a <= b,
+                    "==" => a == b,
+                    "!=" => a != b,
+                    ">" => a > b,
+                    _ => a < b,
+                }));
+            }
+        }
+        lhs
+    }
+
+    fn prim(&mut self) -> Val {
+        if self.eat("(") {
+            let inner = self.or();
+            if !self.eat(")") {
+                return Val::Unknown;
+            }
+            return inner;
+        }
+        match self.peek().cloned() {
+            Some(Tok::Num(n)) => {
+                self.pos += 1;
+                Val::Num(n)
+            }
+            Some(Tok::Ident(name)) if name == "defined" => {
+                self.pos += 1;
+                let paren = self.eat("(");
+                let Some(Tok::Ident(target)) = self.peek().cloned() else {
+                    return Val::Unknown;
+                };
+                self.pos += 1;
+                if paren && !self.eat(")") {
+                    return Val::Unknown;
+                }
+                Val::Num(i64::from(self.defines.contains_key(&target)))
+            }
+            Some(Tok::Ident(name)) => {
+                self.pos += 1;
+                match self.defines.get(&name) {
+                    None => Val::Num(0),
+                    Some(Some(v)) => Val::Num(*v),
+                    Some(None) => Val::Unknown,
+                }
+            }
+            _ => Val::Unknown,
+        }
     }
 }
 
@@ -384,6 +531,52 @@ mod tests {
         let known = defines(&[("LIGHTS", Some(2))]);
         assert!(matches!(eval_directive("#if LIGHTS == 2", &known), Tri::True));
         assert!(matches!(eval_directive("#if LIGHTS != 2", &known), Tri::False));
+    }
+
+    #[test]
+    fn logical_operators_follow_c_precedence() {
+        let known = defines(&[
+            ("REFLECTION", Some(0)),
+            ("NORMALMAP", Some(1)),
+            ("BLENDMODE", Some(0)),
+        ]);
+        assert!(matches!(
+            eval_directive("#if REFLECTION && NORMALMAP", &known),
+            Tri::False
+        ));
+        assert!(matches!(
+            eval_directive("#if REFLECTION && NORMALMAP || BLENDMODE || CLIPPINGUVS", &known),
+            Tri::False
+        ));
+        assert!(matches!(
+            eval_directive("#if (REFLECTION || NORMALMAP) && BLENDMODE == 0", &known),
+            Tri::True
+        ));
+        assert!(matches!(
+            eval_directive("#if !(NORMALMAP && SHADERVERSION >= 70)", &known),
+            Tri::True
+        ));
+        assert!(matches!(
+            eval_directive("#if NORMALMAP == 1 && !defined(BLENDMODE)", &known),
+            Tri::False
+        ));
+    }
+
+    #[test]
+    fn an_unknown_operand_only_taints_what_depends_on_it() {
+        let known = defines(&[("LIGHTING", None), ("BLENDMODE", Some(1))]);
+        assert!(matches!(
+            eval_directive("#if LIGHTING || BLENDMODE", &known),
+            Tri::True
+        ));
+        assert!(matches!(
+            eval_directive("#if LIGHTING && BLENDMODE", &known),
+            Tri::Unknown
+        ));
+        assert!(matches!(
+            eval_directive("#if LIGHTING && REFLECTION", &known),
+            Tri::False
+        ));
     }
     use crate::preprocess::Assembled;
     use crate::reflect::{Reflection, SamplerSlot};

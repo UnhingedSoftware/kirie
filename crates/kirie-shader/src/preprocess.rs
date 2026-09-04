@@ -251,10 +251,8 @@ pub fn preprocess(
 
     let active = resolve_combos(&discovered, &combo_requires, inputs);
 
-    let active_defs: std::collections::HashMap<String, Option<i64>> = active
-        .iter()
-        .map(|(k, v)| (k.clone(), Some(i64::from(*v))))
-        .collect();
+    let mut active_defs = crate::modernize::collect_defines(&expanded);
+    active_defs.extend(active.iter().map(|(k, v)| (k.clone(), Some(i64::from(*v)))));
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cond_stack: Vec<crate::modernize::Tri> = Vec::new();
     for line in expanded.lines() {
