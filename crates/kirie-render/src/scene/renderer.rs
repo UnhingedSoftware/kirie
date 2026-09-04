@@ -1921,7 +1921,7 @@ fn retransform(o: &mut ObjectGpu, queue: &wgpu::Queue, world: WorldXf, scene: (u
     let origin = anchored_origin(origin, o.image_size, scale, angle_z, o.anchor);
     let quad = scene_space_quad(origin, o.image_size, scale, angle_z, scene);
     for pass in &o.passes {
-        if pass.geometry != Geometry::Scene {
+        if !matches!(pass.geometry, Geometry::Scene | Geometry::SceneCopy) {
             continue;
         }
         let mut verts = quad;
