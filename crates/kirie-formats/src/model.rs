@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const VERTEX_STRIDE: usize = 48;
+const MODEL_DEFAULT_FLAGS: u32 = 0xF;
 
 pub const POSITION_OFFSET: usize = 0;
 pub const NORMAL_OFFSET: usize = 12;
@@ -52,17 +53,25 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    fn layout(&self) -> PuppetLayout {
+        let layout = PuppetLayout::for_flags(self.flags as u32);
+        if layout.stride == 0 {
+            PuppetLayout::for_flags(MODEL_DEFAULT_FLAGS)
+        } else {
+            layout
+        }
+    }
+
     #[must_use]
     pub fn vertex_count(&self) -> usize {
-        self.vertex_data.len() / VERTEX_STRIDE
+        self.vertex_data.len() / self.layout().stride
     }
 
     pub fn vertices(&self) -> impl Iterator<Item = Vertex> + '_ {
+        let layout = self.layout();
         self.vertex_data
-            .as_chunks::<VERTEX_STRIDE>()
-            .0
-            .iter()
-            .map(decode_vertex)
+            .chunks_exact(layout.stride)
+            .map(move |chunk| decode_vertex(chunk, layout))
     }
 
     #[must_use]
@@ -87,9 +96,10 @@ impl Model {
         if !version.starts_with("MDLV") {
             return Err(ModelError::BadMagic { header: version });
         }
+        let number = puppet_version_number(&version).unwrap_or(u32::MAX);
 
-        let header0 = cur.read_i32("header0")?;
-        let header1 = cur.read_i32("header1")?;
+        let header_flags = cur.read_i32("header0")?;
+        let material_count = cur.read_i32("header1")?;
         let mesh_count = cur.read_i32("meshCount")?;
         if mesh_count < 0 {
             return Err(ModelError::InvalidMeshCount { count: mesh_count });
@@ -97,26 +107,29 @@ impl Model {
 
         let mut meshes = Vec::new();
         for index in 0..mesh_count as usize {
-            if index > 0
-                && !mesh_header_here(data, cur.offset)
-                && let Some(resync) = (1..=MAX_MESH_TRAILER)
-                    .map(|skip| cur.offset + skip)
-                    .find(|at| mesh_header_here(data, *at))
-            {
-                cur.offset = resync;
+            let mut material_ref = String::new();
+            for _ in 0..material_count.max(0) {
+                material_ref = cur.read_cstring("materialRef")?;
             }
-            let material_ref = cur.read_cstring("materialRef")?;
-            let _reserved = cur.read_i32("mesh reserved word")?;
-            let bbox = if puppet_version_number(&version).is_none_or(|number| number >= 17) {
+            if number >= 4 && cur.read_i32("mesh reserved word")? & 2 != 0 {
+                cur.read_i32("mesh reserved extra")?;
+            }
+            let bbox = if number >= 17 {
                 cur.read_f32x6("bbox")?
             } else {
                 [0.0; 6]
             };
-            let flags = cur.read_i32("flags")?;
+            let flags = if number > 14 {
+                cur.read_i32("flags")?
+            } else {
+                header_flags
+            };
+            let stride = PuppetLayout::for_flags(flags as u32).stride;
 
             let vertex_bytes = cur.read_i32("vertexBytes")?;
             if vertex_bytes <= 0
-                || !(vertex_bytes as usize).is_multiple_of(VERTEX_STRIDE)
+                || stride == 0
+                || !(vertex_bytes as usize).is_multiple_of(stride)
                 || cur.remaining() < vertex_bytes as usize
             {
                 return Err(ModelError::InvalidVertexBlock { index, vertex_bytes });
@@ -135,6 +148,10 @@ impl Model {
                 .map(|&[lo, hi]| u16::from_le_bytes([lo, hi]))
                 .collect();
 
+            if number >= 21 {
+                skip_mesh_trailers(&mut cur)?;
+            }
+
             meshes.push(Mesh {
                 material_ref,
                 bbox_min: [bbox[0], bbox[1], bbox[2]],
@@ -147,8 +164,8 @@ impl Model {
 
         Ok(Self {
             version,
-            header0,
-            header1,
+            header0: header_flags,
+            header1: material_count,
             meshes,
         })
     }
@@ -164,43 +181,42 @@ impl Model {
     }
 }
 
-const MAX_MESH_TRAILER: usize = 16;
-
-fn mesh_header_here(data: &[u8], at: usize) -> bool {
-    let Some(rest) = data.get(at..) else {
-        return false;
-    };
-    let Some(end) = rest.iter().position(|byte| *byte == 0) else {
-        return false;
-    };
-    if !rest[..end]
-        .iter()
-        .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
-    {
-        return false;
+fn skip_mesh_trailers(cur: &mut Cursor<'_>) -> Result<(), ModelError> {
+    if cur.read_u8("shape flag")? != 0 {
+        for _ in 0..cur.read_i32("shape count")?.max(0) {
+            let bytes = cur.read_i32("shape bytes")?;
+            if bytes < 0 || cur.remaining() < bytes as usize {
+                return Err(ModelError::InvalidVertexBlock {
+                    index: 0,
+                    vertex_bytes: bytes,
+                });
+            }
+            cur.take(bytes as usize);
+        }
     }
-    let header = at + end + 1 + 4 + 24 + 4;
-    let Some(field) = data.get(header..header + 4) else {
-        return false;
-    };
-    let vertex_bytes = i32::from_le_bytes([field[0], field[1], field[2], field[3]]);
-    vertex_bytes > 0
-        && (vertex_bytes as usize).is_multiple_of(VERTEX_STRIDE)
-        && data.len().saturating_sub(header + 4) >= vertex_bytes as usize
+    if cur.read_u8("bone range flag")? != 0 {
+        let bytes = cur.read_i32("bone range bytes")?;
+        if bytes < 0 || cur.remaining() < bytes as usize {
+            return Err(ModelError::InvalidIndexBlock {
+                index: 0,
+                index_bytes: bytes,
+            });
+        }
+        cur.take(bytes as usize);
+    }
+    Ok(())
 }
 
-fn decode_vertex(chunk: &[u8; VERTEX_STRIDE]) -> Vertex {
+fn decode_vertex(chunk: &[u8], layout: PuppetLayout) -> Vertex {
     let f = |off: usize| f32::from_le_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+    let vec3 = |at: Option<usize>| at.map_or([0.0; 3], |off| [f(off), f(off + 4), f(off + 8)]);
     Vertex {
-        position: [f(POSITION_OFFSET), f(POSITION_OFFSET + 4), f(POSITION_OFFSET + 8)],
-        normal: [f(NORMAL_OFFSET), f(NORMAL_OFFSET + 4), f(NORMAL_OFFSET + 8)],
-        tangent: [
-            f(TANGENT_OFFSET),
-            f(TANGENT_OFFSET + 4),
-            f(TANGENT_OFFSET + 8),
-            f(TANGENT_OFFSET + 12),
-        ],
-        uv: [f(UV_OFFSET), f(UV_OFFSET + 4)],
+        position: vec3(layout.position),
+        normal: vec3(layout.normal),
+        tangent: layout.tangent.map_or([0.0, 0.0, 0.0, 1.0], |at| {
+            [f(at), f(at + 4), f(at + 8), f(at + 12)]
+        }),
+        uv: layout.uv.map_or([0.0; 2], |at| [f(at), f(at + 4)]),
     }
 }
 
@@ -234,6 +250,11 @@ impl<'a> Cursor<'a> {
             });
         }
         Ok(())
+    }
+
+    fn read_u8(&mut self, what: &'static str) -> Result<u8, ModelError> {
+        self.need(what, 1)?;
+        Ok(self.take(1)[0])
     }
 
     fn read_i32(&mut self, what: &'static str) -> Result<i32, ModelError> {
@@ -1218,7 +1239,7 @@ fn decode_puppet_vertex(chunk: &[u8], layout: PuppetLayout) -> PuppetVertex {
 mod tests {
     use super::*;
 
-    fn synth_two_mesh_model(trailer: usize, material: &str) -> Vec<u8> {
+    fn synth_two_mesh_model(shapes: &[usize], ranges: usize, material: &str) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(b"MDLV0023");
         b.push(0);
@@ -1238,14 +1259,30 @@ mod tests {
             b.resize(b.len() + verts * VERTEX_STRIDE, 0);
             b.extend_from_slice(&6i32.to_le_bytes());
             b.extend_from_slice(&[0u8; 6]);
-            b.resize(b.len() + trailer, 0);
+            if shapes.is_empty() {
+                b.push(0);
+            } else {
+                b.push(1);
+                b.extend_from_slice(&(shapes.len() as i32).to_le_bytes());
+                for bytes in shapes {
+                    b.extend_from_slice(&(*bytes as i32).to_le_bytes());
+                    b.resize(b.len() + bytes, 0);
+                }
+            }
+            if ranges == 0 {
+                b.push(0);
+            } else {
+                b.push(1);
+                b.extend_from_slice(&(ranges as i32).to_le_bytes());
+                b.resize(b.len() + ranges, 0);
+            }
         }
         b
     }
 
     #[test]
-    fn a_mesh_trailer_does_not_derail_the_next_mesh() {
-        let bytes = synth_two_mesh_model(6, "materials/test.json");
+    fn a_mesh_shape_block_does_not_derail_the_next_mesh() {
+        let bytes = synth_two_mesh_model(&[24], 16, "materials/test.json");
         let model = Model::parse(&bytes).expect("both meshes are read");
         assert_eq!(model.meshes.len(), 2);
         assert_eq!(model.meshes[1].vertex_count(), 2);
@@ -1253,14 +1290,15 @@ mod tests {
 
     #[test]
     fn a_material_path_with_a_space_is_still_a_mesh_header() {
-        let bytes = synth_two_mesh_model(6, "materials/little head.json");
+        let bytes = synth_two_mesh_model(&[], 0, "materials/little head.json");
         let model = Model::parse(&bytes).expect("a spaced path is a path");
         assert_eq!(model.meshes.len(), 2);
+        assert_eq!(model.meshes[0].material_ref, "materials/little head.json");
     }
 
     #[test]
-    fn a_model_with_no_trailer_still_reads() {
-        let bytes = synth_two_mesh_model(0, "materials/test.json");
+    fn a_model_with_empty_trailers_still_reads() {
+        let bytes = synth_two_mesh_model(&[], 0, "materials/test.json");
         let model = Model::parse(&bytes).expect("meshes back to back");
         assert_eq!(model.meshes.len(), 2);
     }
