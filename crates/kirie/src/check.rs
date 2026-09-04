@@ -389,6 +389,7 @@ fn check_scene(r: &mut Report, dir: &Path, assets: Option<&Path>, gpu: Option<&H
         fit_render_to_output: false,
         only_objects: Vec::new(),
         skip_objects: Vec::new(),
+        skip_effects: Vec::new(),
     };
 
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));

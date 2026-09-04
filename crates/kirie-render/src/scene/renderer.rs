@@ -35,6 +35,7 @@ pub struct SceneOptions {
     pub fit_render_to_output: bool,
     pub only_objects: Vec<i64>,
     pub skip_objects: Vec<i64>,
+    pub skip_effects: Vec<i64>,
 }
 
 impl Default for SceneOptions {
@@ -47,6 +48,7 @@ impl Default for SceneOptions {
             fit_render_to_output: false,
             only_objects: Vec::new(),
             skip_objects: Vec::new(),
+            skip_effects: Vec::new(),
         }
     }
 }

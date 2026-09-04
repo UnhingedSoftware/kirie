@@ -5,6 +5,7 @@ use kirie_audio::AudioCapture;
 use kirie_formats::pkg::OwnedPkg;
 use kirie_formats::project::Project;
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
+use kirie_scene::object::ObjectKind;
 use kirie_scene::resolve::AssetSource;
 use kirie_scene::{PropertyBag, PropertyValue, Scene, SceneModel};
 
@@ -187,6 +188,7 @@ pub fn load_workshop_scene(
         model
     };
     model.reresolve(&bag);
+    drop_effects(&mut model, &options.skip_effects);
 
     match SceneRenderer::new(target, &model, &source, options, audio, &user_props) {
         Ok(renderer) => Ok(Box::new(renderer)),
@@ -201,6 +203,22 @@ pub fn load_workshop_scene(
             )))
         }
         Err(e) => Err(SceneLoadError::Build(e)),
+    }
+}
+
+fn drop_effects(model: &mut SceneModel, ids: &[i64]) {
+    if ids.is_empty() {
+        return;
+    }
+    for object in &mut model.scene.objects {
+        let effects = match &mut object.kind {
+            ObjectKind::Image(image) => &mut image.effects,
+            ObjectKind::Text(text) => &mut text.effects,
+            _ => continue,
+        };
+        for effect in effects.iter_mut().filter(|e| ids.contains(&e.id)) {
+            effect.resolved = None;
+        }
     }
 }
 

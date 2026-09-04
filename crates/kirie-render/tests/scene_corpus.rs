@@ -274,6 +274,7 @@ fn scene_corpus_renders_simplest_scenes_non_black() {
                 fit_render_to_output: false,
                 only_objects: Vec::new(),
                 skip_objects: Vec::new(),
+                skip_effects: Vec::new(),
             },
             None,
             &[],

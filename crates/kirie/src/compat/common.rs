@@ -17,25 +17,35 @@ pub(crate) fn render_scale() -> f32 {
     f32::from_bits(RENDER_SCALE_BITS.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-static OBJECT_FILTER: std::sync::Mutex<(Vec<i64>, Vec<i64>)> =
-    std::sync::Mutex::new((Vec::new(), Vec::new()));
+#[derive(Clone, Default)]
+pub(crate) struct ObjectFilter {
+    pub(crate) only: Vec<i64>,
+    pub(crate) skip: Vec<i64>,
+    pub(crate) skip_effects: Vec<i64>,
+}
+
+static OBJECT_FILTER: std::sync::Mutex<ObjectFilter> = std::sync::Mutex::new(ObjectFilter {
+    only: Vec::new(),
+    skip: Vec::new(),
+    skip_effects: Vec::new(),
+});
 
 pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
-    let mut only = Vec::new();
-    let mut skip = Vec::new();
+    let mut filter = ObjectFilter::default();
     for entry in debug {
         match entry {
-            super::args::RenderDebug::Object(id) => only.push(*id),
-            super::args::RenderDebug::SkipObject(id) => skip.push(*id),
+            super::args::RenderDebug::Object(id) => filter.only.push(*id),
+            super::args::RenderDebug::SkipObject(id) => filter.skip.push(*id),
+            super::args::RenderDebug::SkipEffect(id) => filter.skip_effects.push(*id),
             _ => {}
         }
     }
     if let Ok(mut slot) = OBJECT_FILTER.lock() {
-        *slot = (only, skip);
+        *slot = filter;
     }
 }
 
-pub(crate) fn object_filter() -> (Vec<i64>, Vec<i64>) {
+pub(crate) fn object_filter() -> ObjectFilter {
     OBJECT_FILTER.lock().map(|slot| slot.clone()).unwrap_or_default()
 }
 

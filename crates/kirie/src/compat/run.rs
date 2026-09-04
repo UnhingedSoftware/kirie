@@ -999,8 +999,9 @@ fn build_for_spec(
                 clamp: to_render_clamp(*clamp),
                 disable_parallax: disable_parallax(),
                 fit_render_to_output: fit_render_to_output(),
-                only_objects: object_filter().0,
-                skip_objects: object_filter().1,
+                only_objects: object_filter().only,
+                skip_objects: object_filter().skip,
+                skip_effects: object_filter().skip_effects,
             };
             match kirie_render::load_workshop_scene(
                 target,
