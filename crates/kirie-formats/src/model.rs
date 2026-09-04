@@ -506,11 +506,11 @@ impl PuppetMesh {
     }
 }
 
-const IDENTITY: [f32; 16] = [
+pub(crate) const IDENTITY: [f32; 16] = [
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
 ];
 
-fn key_matrix(key: PuppetKey) -> [f32; 16] {
+pub(crate) fn key_matrix(key: PuppetKey) -> [f32; 16] {
     let (sx, cx) = key.rotation[0].sin_cos();
     let (sy, cy) = key.rotation[1].sin_cos();
     let (sz, cz) = key.rotation[2].sin_cos();
@@ -546,7 +546,7 @@ fn key_matrix(key: PuppetKey) -> [f32; 16] {
     out
 }
 
-fn matrix_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
+pub(crate) fn matrix_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     let mut out = [0.0_f32; 16];
     for row in 0..4 {
         for column in 0..4 {
@@ -563,7 +563,7 @@ fn matrix_mul(a: [f32; 16], b: [f32; 16]) -> [f32; 16] {
     out
 }
 
-fn matrix_invert(m: [f32; 16]) -> Option<[f32; 16]> {
+pub(crate) fn matrix_invert(m: [f32; 16]) -> Option<[f32; 16]> {
     let at = |row: usize, column: usize| m.get(row * 4 + column).copied().unwrap_or(0.0);
     let determinant = at(0, 0) * (at(1, 1) * at(2, 2) - at(1, 2) * at(2, 1))
         - at(0, 1) * (at(1, 0) * at(2, 2) - at(1, 2) * at(2, 0))
