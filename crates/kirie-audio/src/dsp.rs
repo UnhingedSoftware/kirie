@@ -100,19 +100,26 @@ pub const REF_DECAY_DB: f32 = 0.06;
 #[must_use]
 pub fn bands_from_spectrum(spectrum: &[Complex<f32>], ref_db: f32) -> BandTargets {
     let mut out = BandTargets::zero();
-    for band in 0..BANDS_64 {
-        let idx = band * 2;
-        let c = spectrum[idx];
+    let mut level = [0.0_f32; BANDS_64];
+    for (band, slot) in level.iter_mut().enumerate() {
+        let c = spectrum[band * 2];
         let mag2 = c.re * c.re + c.im * c.im;
-        let f1 = if mag2 > 0.0 {
+        *slot = if mag2 > 0.0 {
             ((10.0 * mag2.log10() - (ref_db - RANGE_DB)) / RANGE_DB).clamp(0.0, 1.0)
         } else {
             0.0
         };
-        let bf = band as f32;
-        out.b64[band] = (f1 * boost(bf / 63.0)).min(1.0);
-        out.b32[band >> 1] = (f1 * boost(bf / 31.0)).min(1.0);
-        out.b16[band >> 2] = (f1 * boost(bf / 15.0)).min(1.0);
+    }
+    for (band, peak) in level.iter().enumerate() {
+        out.b64[band] = (peak * boost(band as f32 / (BANDS_64 - 1) as f32)).min(1.0);
+    }
+    for (band, slot) in out.b32.iter_mut().enumerate() {
+        let peak = level[band * 2..band * 2 + 2].iter().fold(0.0_f32, |m, v| m.max(*v));
+        *slot = (peak * boost(band as f32 / (BANDS_32 - 1) as f32)).min(1.0);
+    }
+    for (band, slot) in out.b16.iter_mut().enumerate() {
+        let peak = level[band * 4..band * 4 + 4].iter().fold(0.0_f32, |m, v| m.max(*v));
+        *slot = (peak * boost(band as f32 / (BANDS_16 - 1) as f32)).min(1.0);
     }
     out
 }
@@ -273,13 +280,28 @@ mod tests {
     }
 
     #[test]
-    fn bands_overwrite_highest_wins() {
+    fn coarse_bands_keep_the_loudest_of_their_range() {
         let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
         spec[2] = Complex::new(10.0, 0.0);
         let out = bands_from_spectrum(&spec, REF_DB_MAX);
         let f1 = (20.0 - (REF_DB_MAX - RANGE_DB)) / RANGE_DB;
-        let expected = f1 * boost(1.0 / 31.0);
-        assert!((out.b32[0] - expected).abs() < 1e-5, "got {}", out.b32[0]);
+
+        assert!((out.b64[1] - f1 * boost(1.0 / 63.0)).abs() < 1e-5, "got {}", out.b64[1]);
+        assert!((out.b32[0] - f1 * boost(0.0)).abs() < 1e-5, "got {}", out.b32[0]);
+        assert!((out.b16[0] - f1 * boost(0.0)).abs() < 1e-5, "got {}", out.b16[0]);
+    }
+
+    #[test]
+    fn a_peak_anywhere_in_a_group_reaches_the_16_band_spectrum() {
+        for band in 0..4 {
+            let mut spec = vec![Complex::new(0.0f32, 0.0); FFT_BINS];
+            spec[band * 2] = Complex::new(10.0, 0.0);
+            let out = bands_from_spectrum(&spec, REF_DB_MAX);
+            assert!(
+                out.b16[0] > 0.0,
+                "energy in 64-band {band} vanished from the 16-band spectrum"
+            );
+        }
     }
 
     #[test]
