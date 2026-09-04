@@ -62,6 +62,7 @@ struct ModuleMeta {
 }
 
 pub const SCRIPT_BUDGET: std::time::Duration = std::time::Duration::from_secs(1);
+pub const SCRIPT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 
 #[derive(Clone)]
 struct Deadline(std::sync::Arc<std::sync::atomic::AtomicU64>);
@@ -121,6 +122,7 @@ impl World {
         let deadline = Deadline::new();
         let watch = deadline.clone();
         runtime.set_interrupt_handler(Some(Box::new(move || watch.expired())));
+        runtime.set_memory_limit(SCRIPT_MEMORY_LIMIT);
         let resolver = BuiltinResolver::default()
             .with_module("WEMath")
             .with_module("WEColor")
