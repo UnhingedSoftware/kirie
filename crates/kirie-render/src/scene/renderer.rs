@@ -747,7 +747,7 @@ impl SceneRenderer {
                 no_snapshot: Fbo::new(device, "kirie-scene-no-snapshot", 1, 1),
             });
 
-        Ok(SceneRenderer {
+        let renderer = SceneRenderer {
             device: device.clone(),
             queue: queue.clone(),
             proj_w,
@@ -828,7 +828,9 @@ impl SceneRenderer {
             effect_vis_bindings: collect_effect_vis_bindings(scene),
             structural_props: collect_structural_props(scene),
             rebuild,
-        })
+        };
+        tracing::info!(hint = ?kirie_platform::Renderer::redraw_hint(&renderer), "scene redraw hint");
+        Ok(renderer)
     }
 
     #[must_use]
@@ -2074,8 +2076,20 @@ fn ancestors_visible(
 
 impl Renderer for SceneRenderer {
     fn redraw_hint(&self) -> kirie_platform::RedrawHint {
+        let reads_any = |names: &[&str]| {
+            self.items.iter().any(|it| match it {
+                SceneItem::Image(o) => o
+                    .passes
+                    .iter()
+                    .any(|p| p.vs_globals.reads_any(names) || p.fs_globals.reads_any(names)),
+                SceneItem::Model(m) => m.reads_any(names),
+                _ => false,
+            })
+        };
         let animated = self.script.is_some()
-            || self.audio.is_some()
+            || self.animator.is_some()
+            || (self.audio.is_some() && reads_any(super::uniforms::AUDIO_GLOBALS))
+            || reads_any(super::uniforms::FRAME_DRIVEN_GLOBALS)
             || !self.video_textures.is_empty()
             || !self.atlas_textures.is_empty()
             || !self.runtime_layers.is_empty()

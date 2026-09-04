@@ -65,6 +65,12 @@ impl ModelGpu {
     pub(super) fn has_animation(&self) -> bool {
         self.angles_animation.is_some()
     }
+
+    pub(super) fn reads_any(&self, names: &[&str]) -> bool {
+        self.meshes
+            .iter()
+            .any(|m| m.vs_globals.reads_any(names) || m.fs_globals.reads_any(names))
+    }
 }
 
 pub(super) struct ModelGpu {

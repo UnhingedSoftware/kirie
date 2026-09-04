@@ -144,7 +144,28 @@ impl GlobalsLayout {
     pub fn is_empty(&self) -> bool {
         self.members.is_empty()
     }
+
+    #[must_use]
+    pub fn reads_any(&self, names: &[&str]) -> bool {
+        self.members.iter().any(|m| names.contains(&m.name.as_str()))
+    }
 }
+
+pub const FRAME_DRIVEN_GLOBALS: &[&str] = &[
+    "g_Time",
+    "g_Daytime",
+    "g_PointerPosition",
+    "g_PointerPositionLast",
+];
+
+pub const AUDIO_GLOBALS: &[&str] = &[
+    "g_AudioSpectrum16Left",
+    "g_AudioSpectrum16Right",
+    "g_AudioSpectrum32Left",
+    "g_AudioSpectrum32Right",
+    "g_AudioSpectrum64Left",
+    "g_AudioSpectrum64Right",
+];
 
 #[derive(Debug, Clone)]
 pub struct Builtins {
@@ -376,6 +397,19 @@ mod tests {
         let layout = GlobalsLayout::build(&names(&["g_AudioSpectrum16Left"]), &BTreeMap::new());
         assert_eq!(layout.members[0].ty, GlType::FloatArray(16));
         assert_eq!(layout.size, 16 * 16);
+    }
+
+    #[test]
+    fn reads_any_matches_frame_and_audio_globals() {
+        let time = GlobalsLayout::build(&names(&["g_Color", "g_Time"]), &BTreeMap::new());
+        let audio = GlobalsLayout::build(&names(&["g_AudioSpectrum32Right"]), &BTreeMap::new());
+        let still = GlobalsLayout::build(&names(&["g_Color", "g_TexelSize"]), &BTreeMap::new());
+        assert!(time.reads_any(FRAME_DRIVEN_GLOBALS));
+        assert!(!time.reads_any(AUDIO_GLOBALS));
+        assert!(audio.reads_any(AUDIO_GLOBALS));
+        assert!(!audio.reads_any(FRAME_DRIVEN_GLOBALS));
+        assert!(!still.reads_any(FRAME_DRIVEN_GLOBALS));
+        assert!(!still.reads_any(AUDIO_GLOBALS));
     }
 
     #[test]
