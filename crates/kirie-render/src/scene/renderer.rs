@@ -179,6 +179,36 @@ struct ObjectGpu {
     image_size: (u32, u32),
     anchor: [f32; 2],
     text: Option<Box<TextLayer>>,
+    puppet: Option<Box<PuppetRig>>,
+}
+
+struct PuppetRig {
+    mesh: Arc<kirie_formats::model::PuppetMesh>,
+    player: kirie_formats::puppet::PuppetPlayer,
+    pose: Vec<[f32; 16]>,
+    scene_origin: [f32; 2],
+    scene_scale: [f32; 2],
+    scene_angle_z: f32,
+}
+
+impl PuppetRig {
+    fn reskin(&self, passes: &[PassGpu], queue: &wgpu::Queue, image_size: (u32, u32), scene: (u32, u32)) {
+        for pass in passes {
+            let verts = match pass.geometry {
+                Geometry::Puppet => puppet_scene_vertices(
+                    &self.mesh,
+                    self.scene_origin,
+                    self.scene_scale,
+                    self.scene_angle_z,
+                    scene,
+                    Some(&self.pose),
+                ),
+                Geometry::PuppetCopy => puppet_copy_vertices(&self.mesh, image_size, pass.uv_crop, Some(&self.pose)),
+                _ => continue,
+            };
+            queue.write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
+        }
+    }
 }
 
 struct AtlasSlot {
@@ -271,6 +301,7 @@ pub struct SceneRenderer {
     model_depth: Option<wgpu::TextureView>,
     parent_by_id: HashMap<i64, Option<i64>>,
     locals: HashMap<i64, LocalXf>,
+    attached: Vec<(i64, i64, String)>,
     media: Option<Arc<crate::media::MediaSource>>,
     zoom: f32,
     visible_by_id: HashMap<i64, bool>,
@@ -358,17 +389,12 @@ impl SceneRenderer {
                 let path = image.model.as_ref()?.puppet.as_ref()?;
                 let bytes = source.load(path)?;
                 let mesh = kirie_formats::model::PuppetMesh::parse(&bytes).ok()?;
-                let wanted = image
-                    .animationlayers
-                    .iter()
-                    .find(|layer| layer.visible.value)
-                    .and_then(|layer| u32::try_from(layer.animation.value).ok());
-                let animation = wanted.and_then(|id| mesh.animation(id));
+                let player = puppet_player(&mesh, &image.animationlayers);
                 let anchors: HashMap<String, [f32; 2]> = mesh
                     .attachments
                     .iter()
                     .filter_map(|point| {
-                        let at = mesh.anchor(&point.name, animation, 0.0)?;
+                        let at = player.anchor(&mesh, &point.name)?;
                         Some((point.name.clone(), [at[0], at[1]]))
                     })
                     .collect();
@@ -391,14 +417,11 @@ impl SceneRenderer {
             .objects
             .iter()
             .map(|o| {
-                let attach = attach_offset(o);
                 (
                     o.base.id,
                     LocalXf {
-                        origin: [
-                            o.base.origin.value[0] + attach[0],
-                            o.base.origin.value[1] + attach[1],
-                        ],
+                        origin: [o.base.origin.value[0], o.base.origin.value[1]],
+                        attach: attach_offset(o),
                         scale: [o.base.scale.value[0], o.base.scale.value[1]],
                         angle_z: o.base.angles.value[2],
                         parent: o.base.parent,
@@ -784,6 +807,11 @@ impl SceneRenderer {
             pointer_last: [0.5, 0.5],
             pointer_left: false,
             locals: local_xf,
+            attached: scene
+                .objects
+                .iter()
+                .filter_map(|o| Some((o.base.id, o.base.parent?, o.base.attachment.clone()?)))
+                .collect(),
             media,
             zoom,
             parallax_disp: [0.0, 0.0],
@@ -907,6 +935,10 @@ impl SceneRenderer {
             }
             dirty.push(u.object_id);
         }
+        self.retransform_dirty(&dirty);
+    }
+
+    fn retransform_dirty(&mut self, dirty: &[i64]) {
         if dirty.is_empty() {
             return;
         }
@@ -917,7 +949,7 @@ impl SceneRenderer {
                 SceneItem::Text(tg) => tg.id,
                 _ => continue,
             };
-            if !transform_affected(id, &dirty, &self.locals) {
+            if !transform_affected(id, dirty, &self.locals) {
                 continue;
             }
             let world = world_xf(id, &self.locals);
@@ -927,6 +959,31 @@ impl SceneRenderer {
                 _ => {}
             }
         }
+    }
+
+    fn advance_puppets(&mut self, dt: f32) {
+        let (sw, sh) = (self.proj_w, self.proj_h);
+        let mut dirty: Vec<i64> = Vec::new();
+        for item in &mut self.items {
+            let SceneItem::Image(o) = item else { continue };
+            let Some(rig) = o.puppet.as_mut() else { continue };
+            if !rig.player.advance(&rig.mesh, dt) {
+                continue;
+            }
+            rig.pose = rig.player.pose(&rig.mesh);
+            rig.reskin(&o.passes, &self.queue, o.image_size, (sw, sh));
+            for (child, parent, name) in &self.attached {
+                if *parent != o.id {
+                    continue;
+                }
+                let Some(at) = rig.player.anchor(&rig.mesh, name) else { continue };
+                if let Some(local) = self.locals.get_mut(child) {
+                    local.attach = [at[0], at[1]];
+                    dirty.push(*child);
+                }
+            }
+        }
+        self.retransform_dirty(&dirty);
     }
 
     fn apply_scene_property(&mut self, name: &str, value: &kirie_script::ScriptValue) {
@@ -1131,6 +1188,7 @@ impl SceneRenderer {
                 id,
                 LocalXf {
                     origin: [object.base.origin.value[0], object.base.origin.value[1]],
+                    attach: [0.0, 0.0],
                     scale: [object.base.scale.value[0], object.base.scale.value[1]],
                     angle_z: object.base.angles.value[2],
                     parent: None,
@@ -1386,14 +1444,17 @@ fn build_object(
             })
     };
 
-    let pose = puppet.as_ref().map(|mesh| {
-        let wanted = image
-            .animationlayers
-            .iter()
-            .find(|layer| layer.visible.value)
-            .and_then(|layer| u32::try_from(layer.animation.value).ok());
-        let animation = wanted.and_then(|id| mesh.animation(id));
-        mesh.pose(animation, 0.0)
+    let puppet = puppet.map(|mesh| {
+        let player = puppet_player(&mesh, &image.animationlayers);
+        let pose = player.pose(&mesh);
+        PuppetRig {
+            mesh: Arc::new(mesh),
+            player,
+            pose,
+            scene_origin: [0.0, 0.0],
+            scene_scale: [1.0, 1.0],
+            scene_angle_z: 0.0,
+        }
     });
 
     let (mut iw, mut ih) = (image.size[0] as u32, image.size[1] as u32);
@@ -1586,20 +1647,20 @@ fn build_object(
         };
         let (vertex_buffer, puppet_indices) = match geometry {
             Geometry::Puppet | Geometry::PuppetCopy => {
-                let mesh = puppet.as_ref().expect("puppet base has a mesh");
+                let rig = puppet.as_ref().expect("puppet base has a mesh");
                 let verts = if matches!(geometry, Geometry::Puppet) {
-                    puppet_scene_vertices(mesh, origin, scale, angle_z, scene_size, pose.as_deref())
+                    puppet_scene_vertices(&rig.mesh, origin, scale, angle_z, scene_size, Some(&rig.pose))
                 } else {
-                    puppet_copy_vertices(mesh, (iw, ih), uv_crop, pose.as_deref())
+                    puppet_copy_vertices(&rig.mesh, (iw, ih), uv_crop, Some(&rig.pose))
                 };
                 (
                     create_buffer_init(
                         device,
                         "kirie-puppet-vb",
                         bytemuck::cast_slice(&verts),
-                        wgpu::BufferUsages::VERTEX,
+                        wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     ),
-                    Some(create_puppet_index_buffer(device, mesh)),
+                    Some(create_puppet_index_buffer(device, &rig.mesh)),
                 )
             }
             _ => {
@@ -1619,7 +1680,7 @@ fn build_object(
         let puppet_index_count = puppet
             .as_ref()
             .filter(|_| puppet_indices.is_some())
-            .map_or(0, |m| m.indices.len() as u32);
+            .map_or(0, |rig| rig.mesh.indices.len() as u32);
 
         let vs_params = resolve_params(&params_vs, &raw_pass);
         let fs_params = resolve_params(&params_fs, &raw_pass);
@@ -1792,7 +1853,42 @@ fn build_object(
         image_size: (iw, ih),
         anchor,
         text: None,
+        puppet: puppet.map(|mut rig| {
+            rig.scene_origin = origin;
+            rig.scene_scale = [scale[0], scale[1]];
+            rig.scene_angle_z = angle_z;
+            Box::new(rig)
+        }),
     })
+}
+
+fn puppet_player(
+    mesh: &kirie_formats::model::PuppetMesh,
+    layers: &[kirie_scene::object::AnimationLayer],
+) -> kirie_formats::puppet::PuppetPlayer {
+    let playable = |layer: &kirie_scene::object::AnimationLayer| {
+        let id = u32::try_from(layer.animation.value).ok()?;
+        let clip = mesh
+            .animations
+            .iter()
+            .position(|clip| clip.id == id && !clip.tracks.is_empty());
+        if clip.is_none() {
+            tracing::warn!(layer = %layer.name, id, "animation layer names a clip the puppet mesh lacks");
+        }
+        clip
+    };
+    let layers = layers
+        .iter()
+        .map(|layer| {
+            let mut out = kirie_formats::puppet::PuppetLayer::new(layer.id, layer.name.clone(), playable(layer));
+            out.rate = layer.rate.value;
+            out.blend = layer.blend.value;
+            out.additive = layer.additive;
+            out.visible = layer.visible.value;
+            out
+        })
+        .collect();
+    kirie_formats::puppet::PuppetPlayer::from_layers(layers)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1963,6 +2059,12 @@ fn retransform(o: &mut ObjectGpu, queue: &wgpu::Queue, world: WorldXf, scene: (u
         }
         queue.write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
     }
+    if let Some(rig) = o.puppet.as_mut() {
+        rig.scene_origin = origin;
+        rig.scene_scale = scale;
+        rig.scene_angle_z = angle_z;
+        rig.reskin(&o.passes, queue, o.image_size, scene);
+    }
     o.scene_center = [origin[0] - scene.0 as f32 / 2.0, origin[1] - scene.1 as f32 / 2.0];
     o.local_to_scene = local_to_scene(origin, o.image_size, scale, angle_z, scene);
     o.angle_z = angle_z;
@@ -2097,6 +2199,7 @@ impl Renderer for SceneRenderer {
             || self.items.iter().any(|it| match it {
                 SceneItem::Particle(_) => true,
                 SceneItem::Model(m) => m.has_animation(),
+                SceneItem::Image(o) => o.puppet.as_ref().is_some_and(|rig| rig.player.is_animating(&rig.mesh)),
                 _ => false,
             });
         if animated {
@@ -2145,6 +2248,7 @@ impl Renderer for SceneRenderer {
         }
         self.apply_animation_side_effects(anim.effect, anim.particle, anim.zoom, anim.text_width);
         self.apply_script_scene_ops();
+        self.advance_puppets(dt);
         if !updates.is_empty() {
             for u in &updates {
                 if matches!(u.target, PropTarget::Visible)
@@ -3533,6 +3637,7 @@ fn ndc_quad(ucrop: f32, vcrop: f32) -> [[f32; 5]; 4] {
 #[derive(Clone, Copy)]
 struct LocalXf {
     origin: [f32; 2],
+    attach: [f32; 2],
     scale: [f32; 2],
     angle_z: f32,
     parent: Option<i64>,
@@ -3572,7 +3677,7 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     let (mut sx, mut sy) = (1.0f32, 1.0f32);
     let mut ang = 0.0f32;
     for l in chain.iter().rev() {
-        let (lx, ly) = (l.origin[0] * sx, l.origin[1] * sy);
+        let (lx, ly) = ((l.origin[0] + l.attach[0]) * sx, (l.origin[1] + l.attach[1]) * sy);
         let (s, c) = ang.sin_cos();
         ox += lx * c - ly * s;
         oy += lx * s + ly * c;
@@ -4279,6 +4384,7 @@ mod tests {
                 1,
                 LocalXf {
                     origin: [1920.0, 1080.0],
+                    attach: [0.0, 0.0],
                     scale: [1.0, 1.0],
                     angle_z: 0.0,
                     parent: None,
@@ -4288,6 +4394,7 @@ mod tests {
                 2,
                 LocalXf {
                     origin: [-3.0, 656.0],
+                    attach: [0.0, 0.0],
                     scale: [1.0, 1.0],
                     angle_z: 0.0,
                     parent: Some(1),
