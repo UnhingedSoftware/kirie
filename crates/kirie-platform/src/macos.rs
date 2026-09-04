@@ -155,7 +155,15 @@ impl MacPlatform {
                     };
                     self.take_back(at);
                     let (name, size, format) = self.shape_of(at);
-                    let renderer = build_local(&device, &queue, format, &name, (size.width, size.height));
+                    let position = self.origin_of(at);
+                    let renderer = build_local(
+                        &device,
+                        &queue,
+                        format,
+                        &name,
+                        (size.width, size.height),
+                        position,
+                    );
                     if renderer.is_placeholder() {
                         tracing::error!(screen = %name, "keeping the wallpaper that is up");
                         continue;
@@ -299,7 +307,15 @@ impl MacPlatform {
         };
         self.take_back(at);
         let (name, size, format) = self.shape_of(at);
-        let renderer = build(&device, &queue, format, &name, (size.width, size.height));
+        let position = self.origin_of(at);
+        let renderer = build(
+            &device,
+            &queue,
+            format,
+            &name,
+            (size.width, size.height),
+            position,
+        );
         if renderer.is_placeholder() {
             tracing::error!(screen = %name, "keeping the wallpaper that is up");
             return;
@@ -320,6 +336,13 @@ impl MacPlatform {
             .iter()
             .position(|output| output.name == screen)
             .or_else(|| (!self.outputs.is_empty()).then_some(0))
+    }
+
+    fn origin_of(&self, at: usize) -> (i32, i32) {
+        self.outputs.get(at).map_or((0, 0), |output| {
+            let origin = output.window.frame().origin;
+            (origin.x as i32, origin.y as i32)
+        })
     }
 
     fn shape_of(&self, at: usize) -> (String, SurfaceSize, wgpu::TextureFormat) {
@@ -440,6 +463,8 @@ impl MacPlatform {
             .create_view(&wgpu::TextureViewDescriptor::default());
 
         let fresh = ctx.renderer.is_none();
+        let frame_origin = ctx.window.frame().origin;
+        let origin = (frame_origin.x as i32, frame_origin.y as i32);
         let renderer = ctx.renderer.get_or_insert_with(|| {
             (self.make_renderer)(&RenderTarget {
                 device: &device,
@@ -447,6 +472,7 @@ impl MacPlatform {
                 format: texture.texture.format(),
                 output_name: &ctx.name,
                 size: (ctx.physical_size.width, ctx.physical_size.height),
+                position: origin,
             })
         });
         if fresh && renderer.is_placeholder() {
