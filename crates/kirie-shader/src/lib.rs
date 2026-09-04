@@ -18,7 +18,7 @@ pub mod translate;
 
 pub use reflect::Reflection;
 
-pub const TRANSLATOR_VERSION: u32 = 16;
+pub const TRANSLATOR_VERSION: u32 = 17;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Stage {
@@ -225,6 +225,85 @@ void main() {\n\
     }
 
     #[test]
+    fn a_sampler_behind_an_off_combo_leaves_the_reflection() {
+        let src = "\
+// [COMBO] {\"material\":\"Blend\",\"combo\":\"BLENDMODE\",\"type\":\"options\",\"default\":0}\n\
+uniform sampler2D g_Texture0; // {\"default\":\"util/white\"}\n\
+#if BLENDMODE\n\
+uniform sampler2D g_Texture4; // {\"hidden\":true,\"default\":\"_rt_FullFrameBuffer\"}\n\
+#endif\n\
+varying vec2 v_TexCoord;\n\
+void main() {\n\
+    vec4 albedo = texSample2D(g_Texture0, v_TexCoord);\n\
+#if BLENDMODE\n\
+    albedo *= texSample2D(g_Texture4, v_TexCoord);\n\
+#endif\n\
+    gl_FragColor = albedo;\n\
+}\n";
+        let ts = translate(
+            Stage::Fragment,
+            "blend.frag",
+            src,
+            &NoIncludes,
+            &ShaderInputs::default(),
+        )
+        .expect("translation should succeed");
+        let names: Vec<&str> = ts.reflection.samplers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["g_Texture0"]);
+
+        let mut inputs = ShaderInputs::default();
+        inputs.override_combos.insert("BLENDMODE".into(), 1);
+        let ts = translate(Stage::Fragment, "blend.frag", src, &NoIncludes, &inputs)
+            .expect("translation should succeed");
+        let names: Vec<&str> = ts.reflection.samplers.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["g_Texture0", "g_Texture4"]);
+    }
+
+    #[test]
+    fn a_sampler_behind_a_compound_condition_follows_its_combos() {
+        let src = "\
+// [COMBO] {\"material\":\"Lighting\",\"combo\":\"LIGHTING\",\"default\":0}\n\
+// [COMBO] {\"material\":\"Reflection\",\"combo\":\"REFLECTION\",\"default\":0}\n\
+uniform sampler2D g_Texture0; // {\"default\":\"util/white\"}\n\
+#if LIGHTING || REFLECTION\n\
+uniform sampler2D g_Texture1; // {\"combo\":\"NORMALMAP\",\"mode\":\"normal\"}\n\
+#endif\n\
+#if REFLECTION && NORMALMAP\n\
+uniform sampler2D g_Texture3; // {\"hidden\":true,\"default\":\"_rt_MipMappedFrameBuffer\"}\n\
+#endif\n\
+varying vec2 v_TexCoord;\n\
+void main() {\n\
+    vec4 albedo = texSample2D(g_Texture0, v_TexCoord);\n\
+#if LIGHTING || REFLECTION\n\
+    albedo.rgb *= texSample2D(g_Texture1, v_TexCoord).rgb;\n\
+#endif\n\
+#if REFLECTION && NORMALMAP\n\
+    albedo += texSample2D(g_Texture3, v_TexCoord);\n\
+#endif\n\
+    gl_FragColor = albedo;\n\
+}\n";
+        let names = |inputs: &ShaderInputs| -> Vec<String> {
+            translate(Stage::Fragment, "lit.frag", src, &NoIncludes, inputs)
+                .expect("translation should succeed")
+                .reflection
+                .samplers
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&ShaderInputs::default()), vec!["g_Texture0"]);
+
+        let mut lit = ShaderInputs::default();
+        lit.override_combos.insert("LIGHTING".into(), 1);
+        assert_eq!(names(&lit), vec!["g_Texture0", "g_Texture1"]);
+
+        let mut mirrored = ShaderInputs::default();
+        mirrored.override_combos.insert("REFLECTION".into(), 1);
+        mirrored.override_combos.insert("NORMALMAP".into(), 1);
+        assert_eq!(names(&mirrored), vec!["g_Texture0", "g_Texture1", "g_Texture3"]);
+    }
+
+    #[test]
     fn translate_minimal_vertex() {
         let src = "\
 attribute vec3 a_Position;\n\
@@ -255,7 +334,7 @@ void main() {\n\
     #[test]
     fn the_translator_version_changes_deliberately() {
         assert_eq!(
-            TRANSLATOR_VERSION, 16,
+            TRANSLATOR_VERSION, 17,
             "translation changed? bump this too — it invalidates every shader cache"
         );
     }

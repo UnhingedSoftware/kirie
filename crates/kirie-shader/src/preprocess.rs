@@ -254,6 +254,7 @@ pub fn preprocess(
     let mut active_defs = crate::modernize::collect_defines(&expanded);
     active_defs.extend(active.iter().map(|(k, v)| (k.clone(), Some(i64::from(*v)))));
     let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut live_samplers: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cond_stack: Vec<crate::modernize::Tri> = Vec::new();
     for line in expanded.lines() {
         let trimmed = line.trim_start();
@@ -263,6 +264,9 @@ pub fn preprocess(
         }
         if cond_stack.contains(&crate::modernize::Tri::False) {
             continue;
+        }
+        if let Ok(Some(UniformAnnotation::Sampler { name, .. })) = annotation::parse_uniform_line(line) {
+            live_samplers.insert(name);
         }
         if parse_attribute(line).is_some() || parse_varying(line).is_some() {
             continue;
@@ -308,6 +312,7 @@ pub fn preprocess(
         }
         unused_io.push(name.clone());
     }
+    samplers.retain(|s| live_samplers.contains(&s.name));
 
     let expanded = booleanize_combo_conditions(&expanded, &active);
     let expanded = screen_space_to_texture_space(&expanded);
