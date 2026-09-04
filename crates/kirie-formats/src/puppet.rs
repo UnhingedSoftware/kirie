@@ -13,6 +13,7 @@ pub struct PuppetLayer {
     pub visible: bool,
     pub playing: bool,
     pub time: f32,
+    pub reverse: bool,
 }
 
 impl PuppetLayer {
@@ -28,6 +29,7 @@ impl PuppetLayer {
             visible: true,
             playing: true,
             time: 0.0,
+            reverse: false,
         }
     }
 
@@ -39,16 +41,28 @@ impl PuppetLayer {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PuppetPlayer {
     pub layers: Vec<PuppetLayer>,
+    ended: Vec<String>,
 }
 
 impl PuppetPlayer {
     #[must_use]
     pub fn from_layers(layers: Vec<PuppetLayer>) -> Self {
-        PuppetPlayer { layers }
+        PuppetPlayer {
+            layers,
+            ended: Vec::new(),
+        }
     }
 
     pub fn layer_mut(&mut self, id: i64) -> Option<&mut PuppetLayer> {
         self.layers.iter_mut().find(|layer| layer.id == id)
+    }
+
+    pub fn layer_named_mut(&mut self, name: &str) -> Option<&mut PuppetLayer> {
+        self.layers.iter_mut().find(|layer| layer.name == name)
+    }
+
+    pub fn take_ended(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.ended)
     }
 
     #[must_use]
@@ -77,17 +91,25 @@ impl PuppetPlayer {
             if duration <= 0.0 {
                 continue;
             }
-            let next = layer.time + dt * layer.rate;
-            layer.time = if clip.loops() {
-                next.rem_euclid(duration)
-            } else if next >= duration {
-                layer.playing = false;
-                duration
-            } else if next <= 0.0 {
-                layer.playing = false;
-                0.0
-            } else {
-                next
+            let step = if layer.reverse { -dt } else { dt } * layer.rate;
+            let next = layer.time + step;
+            layer.time = match clip.playback() {
+                Playback::Single if next >= duration => {
+                    layer.playing = false;
+                    self.ended.push(layer.name.clone());
+                    duration
+                }
+                Playback::Single => next.max(0.0),
+                Playback::Mirror if !layer.reverse && next >= duration => {
+                    layer.reverse = true;
+                    duration - next % duration
+                }
+                Playback::Mirror if layer.reverse && next <= 0.0 => {
+                    layer.reverse = false;
+                    -(next % duration)
+                }
+                Playback::Mirror => next,
+                Playback::Loop => next.rem_euclid(duration),
             };
             moved = true;
         }
@@ -151,7 +173,23 @@ impl PuppetPlayer {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Playback {
+    Loop,
+    Single,
+    Mirror,
+}
+
 impl PuppetAnimation {
+    #[must_use]
+    pub fn playback(&self) -> Playback {
+        match self.mode.as_str() {
+            "single" => Playback::Single,
+            "mirror" => Playback::Mirror,
+            _ => Playback::Loop,
+        }
+    }
+
     #[must_use]
     pub fn loops(&self) -> bool {
         self.mode != "single"
