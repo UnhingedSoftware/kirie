@@ -157,8 +157,15 @@ pub fn web_props_json(dir: &std::path::Path, overrides: &[(String, String)]) -> 
                 format!("\"{}\"", esc(&s))
             }
             PropertyKind::Text => continue,
-            PropertyKind::Combo { value, .. }
-            | PropertyKind::TextInput { value }
+            PropertyKind::Combo { value, options } => {
+                let v = raw.unwrap_or(value);
+                let numeric = options.iter().any(|o| o.numeric && o.value == v);
+                match v.parse::<f64>() {
+                    Ok(n) if numeric && n.is_finite() => format!("{n}"),
+                    _ => format!("\"{}\"", esc(v)),
+                }
+            }
+            PropertyKind::TextInput { value }
             | PropertyKind::UserShortcut { value }
             | PropertyKind::File { value }
             | PropertyKind::Directory { value }
@@ -174,4 +181,41 @@ pub fn web_props_json(dir: &std::path::Path, overrides: &[(String, String)]) -> 
     }
     out.push('}');
     out
+}
+
+#[cfg(all(test, any(feature = "web-cef", feature = "web-webview")))]
+mod tests {
+    use super::web_props_json;
+
+    fn project(props: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("kirie-web-props-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("project.json"),
+            format!(r#"{{"file":"index.html","type":"web","title":"t","general":{{"properties":{props}}}}}"#),
+        )
+        .unwrap();
+        dir
+    }
+
+    #[test]
+    fn combo_values_keep_their_json_type() {
+        let dir = project(
+            r#"{
+              "source": {"type":"combo","order":1,"text":"Source","value":1,
+                         "options":[{"label":"Color","value":1},{"label":"Image","value":2}]},
+              "mode": {"type":"combo","order":2,"text":"Mode","value":"1",
+                       "options":[{"label":"One","value":"1"},{"label":"Two","value":"2"}]}
+            }"#,
+        );
+        let json = web_props_json(&dir, &[]);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["source"]["value"], serde_json::json!(1));
+        assert_eq!(v["mode"]["value"], serde_json::json!("1"));
+
+        let json = web_props_json(&dir, &[("source".to_owned(), "2".to_owned())]);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["source"]["value"], serde_json::json!(2));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

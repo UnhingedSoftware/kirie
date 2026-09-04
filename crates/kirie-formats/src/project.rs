@@ -99,6 +99,7 @@ impl std::fmt::Display for WorkshopId {
 pub struct ComboOption {
     pub label: String,
     pub value: String,
+    pub numeric: bool,
     pub extra: Map<String, Value>,
 }
 
@@ -594,14 +595,14 @@ fn parse_property_entry(value: Value) -> Result<PropertyEntry, PropertyError> {
                         });
                     }
                 };
-                let value = match opt.remove("value") {
+                let (value, numeric) = match opt.remove("value") {
                     None => {
                         return Err(PropertyError::MissingField {
                             field: "options[].value",
                         });
                     }
-                    Some(Value::String(s)) => s,
-                    Some(Value::Number(n)) => number_to_int_string(&n),
+                    Some(Value::String(s)) => (s, false),
+                    Some(Value::Number(n)) => (number_to_int_string(&n), true),
                     Some(_) => {
                         return Err(PropertyError::WrongType {
                             field: "options[].value",
@@ -612,6 +613,7 @@ fn parse_property_entry(value: Value) -> Result<PropertyEntry, PropertyError> {
                 options.push(ComboOption {
                     label,
                     value,
+                    numeric,
                     extra: opt,
                 });
             }
@@ -752,7 +754,11 @@ fn property_entry_to_value(entry: &PropertyEntry) -> Value {
                 .map(|o| {
                     let mut m = o.extra.clone();
                     m.insert("label".to_owned(), Value::String(o.label.clone()));
-                    m.insert("value".to_owned(), Value::String(o.value.clone()));
+                    let value = match o.value.parse::<i64>() {
+                        Ok(n) if o.numeric => Value::from(n),
+                        _ => Value::String(o.value.clone()),
+                    };
+                    m.insert("value".to_owned(), value);
                     Value::Object(m)
                 })
                 .collect();
