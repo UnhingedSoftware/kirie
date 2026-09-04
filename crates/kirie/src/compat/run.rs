@@ -1002,6 +1002,9 @@ fn build_for_spec(
                 only_objects: object_filter().only,
                 skip_objects: object_filter().skip,
                 skip_effects: object_filter().skip_effects,
+                base_only: object_filter().base_only,
+                no_solid_final: object_filter().no_solid_final,
+                pass_log: object_filter().pass_log,
             };
             match kirie_render::load_workshop_scene(
                 target,

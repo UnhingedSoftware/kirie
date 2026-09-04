@@ -373,6 +373,9 @@ pub(crate) fn build_offscreen_renderer(
                 only_objects: super::common::object_filter().only,
                 skip_objects: super::common::object_filter().skip,
                 skip_effects: super::common::object_filter().skip_effects,
+                base_only: super::common::object_filter().base_only,
+                no_solid_final: super::common::object_filter().no_solid_final,
+                pass_log: super::common::object_filter().pass_log,
             };
             kirie_render::load_workshop_scene(
                 render_target,

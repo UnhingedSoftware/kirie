@@ -7,7 +7,7 @@ use kirie_formats::project::Project;
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 use kirie_scene::object::ObjectKind;
 use kirie_scene::resolve::AssetSource;
-use kirie_scene::{PropertyBag, PropertyValue, Scene, SceneModel};
+use kirie_scene::{PropertyBag, PropertyValue, Scene, SceneModel, UserSetting};
 
 use super::error::SceneError;
 use super::renderer::{SceneOptions, SceneRenderer};
@@ -189,6 +189,7 @@ pub fn load_workshop_scene(
     };
     model.reresolve(&bag);
     drop_effects(&mut model, &options.skip_effects);
+    apply_render_debug(&mut model, &options);
 
     match SceneRenderer::new(target, &model, &source, options, audio, &user_props) {
         Ok(renderer) => Ok(Box::new(renderer)),
@@ -218,6 +219,28 @@ fn drop_effects(model: &mut SceneModel, ids: &[i64]) {
         };
         for effect in effects.iter_mut().filter(|e| ids.contains(&e.id)) {
             effect.resolved = None;
+        }
+    }
+}
+
+fn apply_render_debug(model: &mut SceneModel, options: &SceneOptions) {
+    if !options.base_only {
+        return;
+    }
+    for object in &mut model.scene.objects {
+        match &mut object.kind {
+            ObjectKind::Image(image) => {
+                for effect in &mut image.effects {
+                    effect.resolved = None;
+                }
+                image.color_blend_mode = UserSetting::literal(0);
+            }
+            ObjectKind::Text(text) => {
+                for effect in &mut text.effects {
+                    effect.resolved = None;
+                }
+            }
+            _ => {}
         }
     }
 }

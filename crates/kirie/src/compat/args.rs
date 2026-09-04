@@ -88,6 +88,7 @@ pub enum RenderDebug {
     BaseOnly,
     NoSolidFinal,
     PassLog,
+    PassReadback,
     Object(i64),
     SkipObject(i64),
     SkipEffect(i64),
@@ -321,6 +322,7 @@ fn parse_render_debug(value: &str) -> Result<RenderDebug, ParseError> {
         "base-only" => Ok(RenderDebug::BaseOnly),
         "no-solid-final" => Ok(RenderDebug::NoSolidFinal),
         "pass-log" => Ok(RenderDebug::PassLog),
+        "pass-readback" => Ok(RenderDebug::PassReadback),
         _ => {
             if let Some(rest) = value.strip_prefix("object=") {
                 Ok(RenderDebug::Object(render_debug_int(rest)?))

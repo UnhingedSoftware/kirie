@@ -36,6 +36,9 @@ pub struct SceneOptions {
     pub only_objects: Vec<i64>,
     pub skip_objects: Vec<i64>,
     pub skip_effects: Vec<i64>,
+    pub base_only: bool,
+    pub no_solid_final: bool,
+    pub pass_log: bool,
 }
 
 impl Default for SceneOptions {
@@ -49,8 +52,18 @@ impl Default for SceneOptions {
             only_objects: Vec::new(),
             skip_objects: Vec::new(),
             skip_effects: Vec::new(),
+            base_only: false,
+            no_solid_final: false,
+            pass_log: false,
         }
     }
+}
+
+static PASS_LOG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static NO_SOLID_FINAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn pass_log() -> bool {
+    PASS_LOG.load(std::sync::atomic::Ordering::Relaxed) || std::env::var_os("KIRIE_SLOT_DEBUG").is_some()
 }
 
 struct SourceIncludes<'a>(&'a dyn AssetSource);
@@ -154,6 +167,7 @@ struct ObjectGpu {
     brightness: f32,
     color: [f32; 4],
     visible: bool,
+    skip_final: bool,
     reads_scene: bool,
     offscreen_donor: bool,
     parallax_depth: [f32; 2],
@@ -286,6 +300,8 @@ impl SceneRenderer {
         audio: Option<Arc<AudioCapture>>,
         user_props: &[(String, kirie_scene::PropertyValue)],
     ) -> Result<Self, super::SceneError> {
+        PASS_LOG.store(options.pass_log, std::sync::atomic::Ordering::Relaxed);
+        NO_SOLID_FINAL.store(options.no_solid_final, std::sync::atomic::Ordering::Relaxed);
         let device = target.device;
         let queue = target.queue;
         let scene = &model.scene;
@@ -1315,13 +1331,24 @@ fn build_object(
         .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
         .map(|v| kirie_scene::material::Material::from_value(&v));
     let chain = plan::plan_image(image, true, offscreen_donor, color_blend.as_ref());
-    if std::env::var_os("KIRIE_SLOT_DEBUG").is_some() {
+    if pass_log() {
         tracing::info!(
             id = object.base.id,
             passes = chain.passes.len(),
             shaders = ?chain.passes.iter().map(|p| p.pass.shader.clone()).collect::<Vec<_>>(),
             "plan"
         );
+        for (i, p) in chain.passes.iter().enumerate() {
+            tracing::info!(
+                id = object.base.id,
+                pass = i,
+                shader = %p.shader,
+                geometry = ?p.geometry,
+                output = ?p.output,
+                blending = ?p.blending,
+                "render pass"
+            );
+        }
     }
     if chain.passes.is_empty() {
         return None;
@@ -1747,6 +1774,8 @@ fn build_object(
         brightness: image.brightness.value,
         color: image.color.value,
         visible,
+        skip_final: NO_SOLID_FINAL.load(std::sync::atomic::Ordering::Relaxed)
+            && image.model.as_ref().is_some_and(|m| m.solidlayer),
         reads_scene,
         offscreen_donor,
         final_front: comp_front,
@@ -3258,6 +3287,9 @@ fn draw_image_object(
         (f.translation, f.axes)
     });
     for (pass_index, pass) in object.passes.iter().enumerate() {
+        if object.skip_final && matches!(pass.output, PassOutput::Scene) {
+            continue;
+        }
         let (t0_translation, t0_rotation) = match (pass_index, &atlas_anim) {
             (0, Some((t, r))) => (*t, *r),
             _ => ([0.0, 0.0], [0.0, 0.0, 0.0, 0.0]),
@@ -3873,7 +3905,7 @@ pub(super) fn build_bind_group(
                 .and_then(|i| pass.textures.get(i as usize))
                 .and_then(|s| s.clone())
                 .or_else(|| slot.default_texture.clone());
-            let loud = std::env::var_os("KIRIE_SLOT_DEBUG").is_some();
+            let loud = pass_log();
             if loud {
                 tracing::info!(shader = %pass.shader, slot = ?slot.slot, sampler = %slot.name, name = ?name, "slot");
             }

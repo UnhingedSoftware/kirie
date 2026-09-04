@@ -22,12 +22,18 @@ pub(crate) struct ObjectFilter {
     pub(crate) only: Vec<i64>,
     pub(crate) skip: Vec<i64>,
     pub(crate) skip_effects: Vec<i64>,
+    pub(crate) base_only: bool,
+    pub(crate) no_solid_final: bool,
+    pub(crate) pass_log: bool,
 }
 
 static OBJECT_FILTER: std::sync::Mutex<ObjectFilter> = std::sync::Mutex::new(ObjectFilter {
     only: Vec::new(),
     skip: Vec::new(),
     skip_effects: Vec::new(),
+    base_only: false,
+    no_solid_final: false,
+    pass_log: false,
 });
 
 pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
@@ -37,7 +43,10 @@ pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
             super::args::RenderDebug::Object(id) => filter.only.push(*id),
             super::args::RenderDebug::SkipObject(id) => filter.skip.push(*id),
             super::args::RenderDebug::SkipEffect(id) => filter.skip_effects.push(*id),
-            _ => {}
+            super::args::RenderDebug::BaseOnly => filter.base_only = true,
+            super::args::RenderDebug::NoSolidFinal => filter.no_solid_final = true,
+            super::args::RenderDebug::PassLog => filter.pass_log = true,
+            super::args::RenderDebug::PassReadback => {}
         }
     }
     if let Ok(mut slot) = OBJECT_FILTER.lock() {
