@@ -114,8 +114,7 @@ impl PuppetPlayer {
                 let weight = layer.blend.clamp(0.0, 1.0);
                 keyed = true;
                 if layer.additive {
-                    let base = track.keys.first().copied().unwrap_or(rest);
-                    mixed = add_scaled(mixed, sub(key, base), weight);
+                    mixed = add_scaled(mixed, sub(key, rest), weight);
                 } else {
                     mixed = lerp(mixed, key, weight);
                 }
@@ -329,6 +328,18 @@ mod tests {
                     shapes: vec![],
                 },
                 PuppetAnimation {
+                    id: 10,
+                    name: "offset".into(),
+                    mode: "single".into(),
+                    fps: 10.0,
+                    frames: 1,
+                    tracks: vec![PuppetTrack {
+                        bone: 0,
+                        keys: vec![key([10.0, 70.0, 0.0], 0.0), key([10.0, 70.0, 0.0], 0.0)],
+                    }],
+                    shapes: vec![],
+                },
+                PuppetAnimation {
                     id: 9,
                     name: "once".into(),
                     mode: "single".into(),
@@ -386,13 +397,27 @@ mod tests {
     #[test]
     fn single_clip_holds_last_frame_and_stops() {
         let mesh = rig();
-        let mut player = PuppetPlayer::from_layers(vec![PuppetLayer::new(1, "a", Some(2))]);
+        let mut player = PuppetPlayer::from_layers(vec![PuppetLayer::new(1, "a", Some(3))]);
         player.advance(&mesh, 5.0);
         assert!(!player.layers[0].playing);
         assert!((player.layers[0].time - 0.2).abs() < 1e-6);
         let world = player.bone_world(&mesh);
         assert!((world[1][0] - 1.0f32.cos()).abs() < 1e-5);
         assert!(!player.is_animating(&mesh));
+    }
+
+    #[test]
+    fn additive_offset_is_measured_from_the_bind_pose() {
+        let mesh = rig();
+        let mut layer = PuppetLayer::new(1, "offset", Some(2));
+        layer.additive = true;
+        let player = PuppetPlayer::from_layers(vec![layer]);
+        assert_eq!(root_xy(&player.bone_world(&mesh), 0), [10.0, 70.0]);
+        let mut half = PuppetLayer::new(1, "offset", Some(2));
+        half.additive = true;
+        half.blend = 0.5;
+        let player = PuppetPlayer::from_layers(vec![half]);
+        assert_eq!(root_xy(&player.bone_world(&mesh), 0), [10.0, 45.0]);
     }
 
     #[test]
