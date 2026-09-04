@@ -401,6 +401,8 @@ pub struct PuppetAnimation {
     pub fps: f32,
     pub frames: u32,
     pub tracks: Vec<PuppetTrack>,
+    #[serde(default)]
+    pub shapes: Vec<Vec<f32>>,
 }
 
 impl PuppetAnimation {
@@ -679,26 +681,12 @@ fn parse_puppet_attachments(data: &[u8], mdls_offset: usize) -> Vec<PuppetAttach
 }
 
 const PUPPET_BONE_MATRIX_BYTES: u32 = 64;
-
-const PUPPET_SKELETON_HEADER: usize = 14;
-const PUPPET_SKELETON_FIRST_BONE: usize = 16;
-
-fn skeleton_bone_at(data: &[u8], at: usize, stop: usize) -> Option<(PuppetBone, usize)> {
-    let parent = read_u32(data, at + 6)? as i32;
-    if read_u32(data, at + 10)? != PUPPET_BONE_MATRIX_BYTES {
-        return None;
-    }
-    let matrix_at = at + PUPPET_SKELETON_HEADER;
-    let transform = read_affine(data, matrix_at, stop)?;
-    Some((
-        PuppetBone {
-            name: String::new(),
-            parent,
-            transform,
-        },
-        matrix_at + PUPPET_BONE_MATRIX_FLOATS * 4,
-    ))
-}
+const PUPPET_MAX_BONES: u32 = 128;
+const PUPPET_MAX_CLIPS: u32 = 4096;
+const PUPPET_KEY_BYTES: usize = 36;
+const PUPPET_WEIGHT_BYTES: usize = 4;
+const PUPPET_BLEND_RULE_BYTES: usize = 24;
+const PUPPET_CLIP_RANGE_BYTES: usize = 18;
 
 fn read_affine(data: &[u8], at: usize, stop: usize) -> Option<[f32; 16]> {
     if at + PUPPET_BONE_MATRIX_FLOATS * 4 > stop {
@@ -716,24 +704,206 @@ fn read_affine(data: &[u8], at: usize, stop: usize) -> Option<[f32; 16]> {
     affine.then_some(transform)
 }
 
-const PUPPET_KEY_BYTES: usize = 36;
+struct PuppetCursor<'a> {
+    data: &'a [u8],
+    at: usize,
+}
 
-fn parse_puppet_animations(data: &[u8]) -> Vec<PuppetAnimation> {
-    let Some(block) = data.windows(4).position(|w| w == b"MDLA") else {
-        return Vec::new();
-    };
-    let stop = data.len();
-    let Some(count) = read_u32(data, block + 13).map(|value| value as usize) else {
-        return Vec::new();
-    };
-    if count == 0 || count > 256 {
-        return Vec::new();
+impl<'a> PuppetCursor<'a> {
+    const fn new(data: &'a [u8], at: usize) -> Self {
+        Self { data, at }
     }
 
-    let mut animations = Vec::with_capacity(count);
-    let mut at = block + 17;
+    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+        let bytes = self.data.get(self.at..self.at.checked_add(n)?)?;
+        self.at += n;
+        Some(bytes)
+    }
+
+    fn u8(&mut self) -> Option<u8> {
+        self.take(1).map(|b| b[0])
+    }
+
+    fn u16(&mut self) -> Option<u16> {
+        self.take(2).map(|b| u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn u32(&mut self) -> Option<u32> {
+        self.take(4).map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn u64(&mut self) -> Option<u64> {
+        self.take(8)
+            .map(|b| u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+    }
+
+    fn f32(&mut self) -> Option<f32> {
+        self.u32().map(f32::from_bits)
+    }
+
+    fn cstring(&mut self) -> Option<String> {
+        let tail = self.data.get(self.at..)?;
+        let len = tail.iter().position(|b| *b == 0)?;
+        let text = String::from_utf8_lossy(&tail[..len]).into_owned();
+        self.at += len + 1;
+        Some(text)
+    }
+
+    fn block_header(&mut self) -> Option<(String, u32, usize)> {
+        let tag = self.cstring()?;
+        let version = tag.get(4..)?.parse::<u32>().ok()?;
+        let end = self.u32()? as usize;
+        Some((tag, version, end))
+    }
+
+    fn matrix(&mut self) -> Option<[f32; 16]> {
+        let at = self.at;
+        let bytes = self.take(PUPPET_BONE_MATRIX_FLOATS * 4)?;
+        read_affine(self.data, at, at + bytes.len())
+    }
+
+    fn sized(&mut self, expect: usize) -> Option<&'a [u8]> {
+        let bytes = self.u32()? as usize;
+        if bytes != expect {
+            return None;
+        }
+        self.take(bytes)
+    }
+
+    fn weights(&mut self, keys: usize) -> Option<Vec<f32>> {
+        let bytes = self.sized(keys * PUPPET_WEIGHT_BYTES)?;
+        Some(
+            bytes
+                .as_chunks::<PUPPET_WEIGHT_BYTES>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect(),
+        )
+    }
+
+    fn keys(&mut self, keys: usize) -> Option<Vec<PuppetKey>> {
+        let bytes = self.sized(keys * PUPPET_KEY_BYTES)?;
+        Some(
+            bytes
+                .as_chunks::<PUPPET_KEY_BYTES>()
+                .0
+                .iter()
+                .map(|key| {
+                    let value = |slot: usize| {
+                        f32::from_le_bytes([
+                            key[slot * 4],
+                            key[slot * 4 + 1],
+                            key[slot * 4 + 2],
+                            key[slot * 4 + 3],
+                        ])
+                    };
+                    PuppetKey {
+                        translation: [value(0), value(1), value(2)],
+                        rotation: [value(3), value(4), value(5)],
+                        scale: [value(6), value(7), value(8)],
+                    }
+                })
+                .collect(),
+        )
+    }
+}
+
+struct PuppetSkeleton {
+    bones: Vec<PuppetBone>,
+    end: usize,
+    extras: usize,
+    constraints: usize,
+}
+
+fn parse_puppet_skeleton(data: &[u8], mdls_offset: usize) -> Option<PuppetSkeleton> {
+    let mut cursor = PuppetCursor::new(data, mdls_offset);
+    let (tag, version, end) = cursor.block_header()?;
+    if !tag.starts_with("MDLS") {
+        return None;
+    }
+    let count = cursor.u32()?;
+    if count > PUPPET_MAX_BONES {
+        return None;
+    }
+    let mut bones = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let Some(animation) = parse_one_animation(data, &mut at, stop) else {
+        let name = cursor.cstring()?;
+        cursor.u32()?;
+        let parent = cursor.u32()? as i32;
+        if cursor.u32()? != PUPPET_BONE_MATRIX_BYTES {
+            return None;
+        }
+        let transform = cursor.matrix()?;
+        cursor.cstring()?;
+        bones.push(PuppetBone {
+            name,
+            parent,
+            transform,
+        });
+    }
+    let mut extras = 0;
+    let mut constraints = 0;
+    if version >= 2 {
+        extras = usize::from(cursor.u16()?);
+        for _ in 0..extras {
+            cursor.cstring()?;
+            cursor.u32()?;
+            cursor.u32()?;
+            cursor.take(PUPPET_BONE_MATRIX_FLOATS * 4)?;
+        }
+        if cursor.u8()? != 0 {
+            cursor.take((bones.len() + extras) * PUPPET_BONE_MATRIX_FLOATS * 4)?;
+        }
+        constraints = cursor.u32()? as usize;
+        for _ in 0..constraints {
+            cursor.u32()?;
+            cursor.f32()?;
+            cursor.f32()?;
+            let flags = if version >= 4 { cursor.u32()? } else { 0 };
+            if flags & 2 != 0 {
+                cursor.f32()?;
+                cursor.f32()?;
+            }
+        }
+    }
+    Some(PuppetSkeleton {
+        bones,
+        end,
+        extras,
+        constraints,
+    })
+}
+
+fn find_puppet_block(data: &[u8], mut at: usize, tag: &str) -> Option<usize> {
+    while at < data.len() {
+        let mut cursor = PuppetCursor::new(data, at);
+        let (found, _, end) = cursor.block_header()?;
+        if found.starts_with(tag) {
+            return Some(at);
+        }
+        if end <= at || end > data.len() {
+            return None;
+        }
+        at = end;
+    }
+    None
+}
+
+fn parse_puppet_animations(data: &[u8], skeleton: &PuppetSkeleton, meshes: u32) -> Vec<PuppetAnimation> {
+    let Some(block) = find_puppet_block(data, skeleton.end, "MDLA") else {
+        return Vec::new();
+    };
+    let mut cursor = PuppetCursor::new(data, block);
+    let Some((_, version, _)) = cursor.block_header() else {
+        return Vec::new();
+    };
+    let Some(count) = cursor.u32().filter(|count| *count <= PUPPET_MAX_CLIPS) else {
+        return Vec::new();
+    };
+    let mut animations = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let Some(animation) = parse_one_animation(&mut cursor, version, skeleton, meshes) else {
             break;
         };
         animations.push(animation);
@@ -741,43 +911,84 @@ fn parse_puppet_animations(data: &[u8]) -> Vec<PuppetAnimation> {
     animations
 }
 
-fn parse_one_animation(data: &[u8], at: &mut usize, stop: usize) -> Option<PuppetAnimation> {
-    let id = read_u32(data, *at)?;
-    let (name, after_name) = read_cstring(data, *at + 8, stop)?;
-    let (mode, after_mode) = read_cstring(data, after_name, stop)?;
-    let fps = read_f32(data, after_mode)?;
-    let frames = read_u32(data, after_mode + 4)?;
-    let bone_count = read_u32(data, after_mode + 12)? as usize;
-    if bone_count > 4096 {
+fn parse_one_animation(
+    cursor: &mut PuppetCursor<'_>,
+    version: u32,
+    skeleton: &PuppetSkeleton,
+    meshes: u32,
+) -> Option<PuppetAnimation> {
+    let id = u32::try_from(cursor.u64()?).ok()?;
+    let name = cursor.cstring()?;
+    let mode = cursor.cstring()?;
+    let fps = cursor.f32()?;
+    let frames = cursor.u32()?;
+    let flags = cursor.u32()?;
+    let track_count = cursor.u32()?;
+    if track_count > PUPPET_MAX_BONES {
         return None;
     }
-
-    let mut cursor = after_mode + 16;
-    let mut tracks = Vec::with_capacity(bone_count);
-    for bone in 0..bone_count {
-        let bytes = read_u32(data, cursor + 4)? as usize;
-        if bytes == 0 || !bytes.is_multiple_of(PUPPET_KEY_BYTES) || cursor + 8 + bytes > stop {
+    let keys = frames.checked_add(1)? as usize;
+    let mut tracks = Vec::with_capacity(track_count as usize);
+    for bone in 0..track_count as usize {
+        cursor.u32()?;
+        let keys = cursor.keys(keys)?;
+        tracks.push(PuppetTrack { bone, keys });
+    }
+    let mut shapes = Vec::new();
+    if version > 1 {
+        for _ in 0..skeleton.extras {
+            cursor.u32()?;
+            cursor.keys(keys)?;
+        }
+        for _ in 0..skeleton.constraints {
+            cursor.u32()?;
+            cursor.weights(keys)?;
+        }
+    }
+    if version >= 3 {
+        let shape_count = cursor.u32()?;
+        if shape_count > PUPPET_MAX_CLIPS {
             return None;
         }
-        let keys_at = cursor + 8;
-        let mut keys = Vec::with_capacity(bytes / PUPPET_KEY_BYTES);
-        for index in 0..bytes / PUPPET_KEY_BYTES {
-            let key = keys_at + index * PUPPET_KEY_BYTES;
-            let mut values = [0.0_f32; 9];
-            for (slot, value) in values.iter_mut().enumerate() {
-                *value = read_f32(data, key + slot * 4)?;
-            }
-            keys.push(PuppetKey {
-                translation: [values[0], values[1], values[2]],
-                rotation: [values[3], values[4], values[5]],
-                scale: [values[6], values[7], values[8]],
-            });
+        for _ in 0..shape_count {
+            cursor.u32()?;
+            shapes.push(cursor.weights(keys)?);
         }
-        tracks.push(PuppetTrack { bone, keys });
-        cursor = keys_at + bytes;
+        if cursor.u8()? != 0 {
+            for _ in 0..track_count {
+                cursor.u32()?;
+                cursor.weights(keys)?;
+            }
+        }
     }
-
-    *at = cursor;
+    if version >= 4 && cursor.u8()? != 0 {
+        for _ in 0..meshes {
+            let rule = cursor.u32()?;
+            if rule & 1 != 0 {
+                cursor.u32()?;
+                for _ in 0..cursor.u16()? {
+                    cursor.u16()?;
+                    cursor.weights(keys)?;
+                }
+            }
+        }
+    }
+    if version >= 5 {
+        cursor.take(PUPPET_BLEND_RULE_BYTES)?;
+    }
+    if version >= 6 && cursor.u8()? != 0 {
+        for _ in 0..track_count {
+            cursor.u32()?;
+            cursor.weights(keys)?;
+        }
+    }
+    if flags & 1 != 0 {
+        cursor.take(PUPPET_CLIP_RANGE_BYTES)?;
+    }
+    for _ in 0..cursor.u32()? {
+        cursor.u32()?;
+        cursor.cstring()?;
+    }
     Some(PuppetAnimation {
         id,
         name,
@@ -785,35 +996,12 @@ fn parse_one_animation(data: &[u8], at: &mut usize, stop: usize) -> Option<Puppe
         fps,
         frames,
         tracks,
+        shapes,
     })
 }
 
-fn parse_puppet_skeleton(data: &[u8], mdls_offset: usize) -> Vec<PuppetBone> {
-    let Some(count_at) = mdls_offset.checked_add(13) else {
-        return Vec::new();
-    };
-    let Some(count) = read_u32(data, count_at).map(|value| value as usize) else {
-        return Vec::new();
-    };
-    if count == 0 || count > 4096 {
-        return Vec::new();
-    }
-    let stop = data
-        .get(mdls_offset..)
-        .and_then(|tail| tail.windows(4).position(|w| w == b"MDAT" || w == b"MDLA"))
-        .map_or(data.len(), |at| mdls_offset + at);
-
-    let mut bones = Vec::with_capacity(count);
-    let mut at = mdls_offset + PUPPET_SKELETON_FIRST_BONE;
-    while bones.len() < count && at < stop {
-        if let Some((bone, next)) = skeleton_bone_at(data, at, stop) {
-            bones.push(bone);
-            at = next;
-        } else {
-            at += 1;
-        }
-    }
-    bones
+fn puppet_mesh_count(data: &[u8]) -> u32 {
+    read_u32(data, PUPPET_MARKER_SIZE + 8).unwrap_or(1)
 }
 
 impl PuppetMesh {
@@ -853,13 +1041,18 @@ impl PuppetMesh {
             indices.push(index);
         }
 
+        let skeleton = parse_puppet_skeleton(data, mdls_offset);
+        let animations = skeleton
+            .as_ref()
+            .map(|skeleton| parse_puppet_animations(data, skeleton, puppet_mesh_count(data)))
+            .unwrap_or_default();
         Ok(Self {
             version,
             vertices,
             indices,
-            bones: parse_puppet_skeleton(data, mdls_offset),
+            bones: skeleton.map(|skeleton| skeleton.bones).unwrap_or_default(),
             attachments: parse_puppet_attachments(data, mdls_offset),
-            animations: parse_puppet_animations(data),
+            animations,
         })
     }
 
@@ -1235,11 +1428,13 @@ mod tests {
         assert!(parsed >= 1, "expected at least the MDLV0017 model to parse");
     }
 
-    fn synth_puppet(version: &str, verts: u32, tris: u32) -> Vec<u8> {
+    fn synth_puppet_body(version: &str, verts: u32, tris: u32) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(version.as_bytes());
         b.push(0);
-        b.extend_from_slice(&[0xAB; 12]);
+        b.extend_from_slice(&[0xAB; 4]);
+        b.extend_from_slice(&0u32.to_le_bytes());
+        b.extend_from_slice(&1u32.to_le_bytes());
         b.extend_from_slice(&0u32.to_le_bytes());
         let vbytes = verts * PUPPET_VERTEX_STRIDE as u32;
         b.extend_from_slice(&vbytes.to_le_bytes());
@@ -1260,8 +1455,19 @@ mod tests {
                 b.extend_from_slice(&((t as u16 + k) % verts as u16).to_le_bytes());
             }
         }
-        b.extend_from_slice(b"MDLS");
-        b.extend_from_slice(&[0u8; 8]);
+        b
+    }
+
+    fn append_block(bytes: &mut Vec<u8>, block: &[u8]) {
+        let end = (bytes.len() + block.len()) as u32;
+        bytes.extend_from_slice(block);
+        let at = bytes.len() - block.len() + PUPPET_MARKER_SIZE;
+        bytes[at..at + 4].copy_from_slice(&end.to_le_bytes());
+    }
+
+    fn synth_puppet(version: &str, verts: u32, tris: u32) -> Vec<u8> {
+        let mut b = synth_puppet_body(version, verts, tris);
+        append_block(&mut b, &synth_skeleton(1, &[]));
         b
     }
 
@@ -1313,17 +1519,7 @@ mod tests {
     #[test]
     fn puppet_bones_are_named_and_carry_a_transform() {
         let mut bytes = synth_puppet("MDLV0023", 3, 1);
-        bytes.extend_from_slice(b"MDAT0001\0");
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&2u16.to_le_bytes());
-        bytes.extend_from_slice(b"head\0");
-        let matrix: [f32; 16] = [
-            1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -32.5, 116.4, 0.0, 1.0,
-        ];
-        for value in matrix {
-            bytes.extend_from_slice(&value.to_le_bytes());
-        }
+        append_block(&mut bytes, &synth_attachments(&[(2, "head", [-32.5, 116.4])]));
         bytes.extend_from_slice(b"MDLA0006\0");
 
         let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
@@ -1339,60 +1535,150 @@ mod tests {
         assert!(mesh.attachment("missing").is_none());
     }
 
-    fn synth_skeleton(bones: &[[f32; 2]]) -> Vec<u8> {
+    fn translation_matrix(translation: [f32; 2]) -> [f32; 16] {
+        [
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            translation[0],
+            translation[1],
+            0.0,
+            1.0,
+        ]
+    }
+
+    fn synth_skeleton(version: u32, bones: &[[f32; 2]]) -> Vec<u8> {
         let mut b = Vec::new();
-        b.extend_from_slice(b"MDLS0001\0");
+        b.extend_from_slice(format!("MDLS{version:04}\0").as_bytes());
         b.extend_from_slice(&0u32.to_le_bytes());
-        b.extend_from_slice(&(bones.len() as u16).to_le_bytes());
-        b.push(0);
+        b.extend_from_slice(&(bones.len() as u32).to_le_bytes());
         for (index, translation) in bones.iter().enumerate() {
-            b.extend_from_slice(&0u16.to_le_bytes());
+            b.push(0);
             b.extend_from_slice(&1u32.to_le_bytes());
             b.extend_from_slice(&(if index == 0 { -1i32 } else { 0 }).to_le_bytes());
             b.extend_from_slice(&64u32.to_le_bytes());
-            let matrix: [f32; 16] = [
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-                translation[0],
-                translation[1],
-                0.0,
-                1.0,
-            ];
-            for value in matrix {
+            for value in translation_matrix(*translation) {
                 b.extend_from_slice(&value.to_le_bytes());
             }
+            b.push(0);
+        }
+        if version >= 2 {
+            b.extend_from_slice(&0u16.to_le_bytes());
+            b.push(0);
+            b.extend_from_slice(&0u32.to_le_bytes());
         }
         b
     }
 
-    fn synth_animation(id: u32, keys: &[[f32; 2]]) -> Vec<u8> {
+    struct SynthClip {
+        id: u64,
+        name: &'static str,
+        mode: &'static str,
+        frames: u32,
+        tracks: Vec<Vec<[f32; 2]>>,
+        shapes: Vec<Vec<f32>>,
+        ranged: bool,
+        events: Vec<(u32, &'static str)>,
+    }
+
+    fn synth_clip(id: u32, keys: &[[f32; 2]]) -> SynthClip {
+        SynthClip {
+            id: u64::from(id),
+            name: "Animation 1",
+            mode: "loop",
+            frames: 0,
+            tracks: keys.iter().map(|key| vec![*key]).collect(),
+            shapes: Vec::new(),
+            ranged: false,
+            events: Vec::new(),
+        }
+    }
+
+    fn synth_animation(version: u32, meshes: u32, clips: &[SynthClip]) -> Vec<u8> {
         let mut b = Vec::new();
-        b.extend_from_slice(b"MDLA0001\0");
+        b.extend_from_slice(format!("MDLA{version:04}\0").as_bytes());
         b.extend_from_slice(&0u32.to_le_bytes());
-        b.extend_from_slice(&1u32.to_le_bytes());
-        b.extend_from_slice(&id.to_le_bytes());
-        b.extend_from_slice(&0u32.to_le_bytes());
-        b.extend_from_slice(b"Animation 1\0");
-        b.extend_from_slice(b"loop\0");
-        b.extend_from_slice(&12.0f32.to_le_bytes());
-        b.extend_from_slice(&1u32.to_le_bytes());
-        b.extend_from_slice(&0u32.to_le_bytes());
-        b.extend_from_slice(&(keys.len() as u32).to_le_bytes());
-        for key in keys {
-            b.extend_from_slice(&0u32.to_le_bytes());
-            b.extend_from_slice(&(PUPPET_KEY_BYTES as u32).to_le_bytes());
-            for value in [key[0], key[1], 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
-                b.extend_from_slice(&value.to_le_bytes());
+        b.extend_from_slice(&(clips.len() as u32).to_le_bytes());
+        for clip in clips {
+            let keys = clip.frames as usize + 1;
+            b.extend_from_slice(&clip.id.to_le_bytes());
+            b.extend_from_slice(clip.name.as_bytes());
+            b.push(0);
+            b.extend_from_slice(clip.mode.as_bytes());
+            b.push(0);
+            b.extend_from_slice(&12.0f32.to_le_bytes());
+            b.extend_from_slice(&clip.frames.to_le_bytes());
+            b.extend_from_slice(&u32::from(clip.ranged).to_le_bytes());
+            b.extend_from_slice(&(clip.tracks.len() as u32).to_le_bytes());
+            for track in &clip.tracks {
+                assert_eq!(track.len(), keys);
+                b.extend_from_slice(&0u32.to_le_bytes());
+                b.extend_from_slice(&((keys * PUPPET_KEY_BYTES) as u32).to_le_bytes());
+                for key in track {
+                    for value in [key[0], key[1], 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0] {
+                        b.extend_from_slice(&value.to_le_bytes());
+                    }
+                }
+            }
+            let weights = |b: &mut Vec<u8>, values: &[f32]| {
+                assert_eq!(values.len(), keys);
+                b.extend_from_slice(&((keys * PUPPET_WEIGHT_BYTES) as u32).to_le_bytes());
+                for value in values {
+                    b.extend_from_slice(&value.to_le_bytes());
+                }
+            };
+            if version >= 3 {
+                b.extend_from_slice(&(clip.shapes.len() as u32).to_le_bytes());
+                for shape in &clip.shapes {
+                    b.extend_from_slice(&7u32.to_le_bytes());
+                    weights(&mut b, shape);
+                }
+                b.push(1);
+                for _ in &clip.tracks {
+                    b.extend_from_slice(&0u32.to_le_bytes());
+                    weights(&mut b, &vec![0.5; keys]);
+                }
+            }
+            if version >= 4 {
+                b.push(1);
+                for mesh in 0..meshes {
+                    let rule = (mesh + 1) & 1;
+                    b.extend_from_slice(&rule.to_le_bytes());
+                    if rule == 1 {
+                        b.extend_from_slice(&0u32.to_le_bytes());
+                        b.extend_from_slice(&1u16.to_le_bytes());
+                        b.extend_from_slice(&0u16.to_le_bytes());
+                        weights(&mut b, &vec![1.0; keys]);
+                    }
+                }
+            }
+            if version >= 5 {
+                b.extend_from_slice(&[0; PUPPET_BLEND_RULE_BYTES]);
+            }
+            if version >= 6 {
+                b.push(1);
+                for _ in &clip.tracks {
+                    b.extend_from_slice(&0u32.to_le_bytes());
+                    weights(&mut b, &vec![0.25; keys]);
+                }
+            }
+            if clip.ranged {
+                b.extend_from_slice(&[0; PUPPET_CLIP_RANGE_BYTES]);
+            }
+            b.extend_from_slice(&(clip.events.len() as u32).to_le_bytes());
+            for (frame, name) in &clip.events {
+                b.extend_from_slice(&frame.to_le_bytes());
+                b.extend_from_slice(name.as_bytes());
+                b.push(0);
             }
         }
         b
@@ -1400,10 +1686,15 @@ mod tests {
 
     #[test]
     fn puppet_reads_an_unnamed_skeleton_and_its_animation() {
-        let mut bytes = synth_puppet("MDLV0023", 3, 1);
-        bytes.truncate(bytes.len() - 12);
-        bytes.extend_from_slice(&synth_skeleton(&[[-178.3, 532.2], [-519.0, 339.0]]));
-        bytes.extend_from_slice(&synth_animation(167, &[[-178.3, 532.2], [-118.0, 139.3]]));
+        let mut bytes = synth_puppet_body("MDLV0023", 3, 1);
+        append_block(
+            &mut bytes,
+            &synth_skeleton(1, &[[-178.3, 532.2], [-519.0, 339.0]]),
+        );
+        append_block(
+            &mut bytes,
+            &synth_animation(1, 1, &[synth_clip(167, &[[-178.3, 532.2], [-118.0, 139.3]])]),
+        );
 
         let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
         assert_eq!(mesh.bones.len(), 2);
@@ -1422,6 +1713,86 @@ mod tests {
         );
     }
 
+    #[test]
+    fn puppet_reads_every_clip_behind_the_version_trailers() {
+        for version in 1..=6u32 {
+            let mut bytes = synth_puppet_body("MDLV0023", 3, 1);
+            append_block(
+                &mut bytes,
+                &synth_skeleton(version.min(4), &[[0.0, 0.0], [1.0, 2.0]]),
+            );
+            let clips = [
+                SynthClip {
+                    id: 448,
+                    name: "idle",
+                    mode: "loop",
+                    frames: 2,
+                    tracks: vec![vec![[0.0, 0.0]; 3], vec![[1.0, 2.0], [2.0, 2.0], [1.0, 2.0]]],
+                    shapes: vec![vec![0.0, 0.5, 1.0]],
+                    ranged: true,
+                    events: vec![(1, "step")],
+                },
+                SynthClip {
+                    id: 330,
+                    name: "wave",
+                    mode: "single",
+                    frames: 1,
+                    tracks: vec![vec![[0.0, 0.0]; 2], vec![[1.0, 2.0]; 2]],
+                    shapes: vec![vec![1.0, 1.0], vec![0.0, 0.0]],
+                    ranged: false,
+                    events: Vec::new(),
+                },
+                synth_clip(301, &[[0.0, 0.0], [1.0, 2.0]]),
+            ];
+            append_block(&mut bytes, &synth_animation(version, 1, &clips));
+
+            let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
+            assert_eq!(mesh.bones.len(), 2, "MDLA{version}");
+            let ids: Vec<u32> = mesh.animations.iter().map(|clip| clip.id).collect();
+            assert_eq!(ids, [448, 330, 301], "MDLA{version} keeps every clip");
+            let idle = mesh.animation(448).expect("idle");
+            assert_eq!(idle.name, "idle");
+            assert_eq!(idle.frames, 2);
+            assert_eq!(idle.tracks[1].keys.len(), 3);
+            assert_eq!(idle.tracks[1].keys[1].translation, [2.0, 2.0, 0.0]);
+            let wave = mesh.animation(330).expect("wave");
+            assert_eq!(wave.mode, "single");
+            if version >= 3 {
+                assert_eq!(idle.shapes, vec![vec![0.0, 0.5, 1.0]], "MDLA{version}");
+                assert_eq!(wave.shapes.len(), 2, "MDLA{version}");
+            } else {
+                assert!(idle.shapes.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn puppet_keeps_the_clips_parsed_before_a_truncated_one() {
+        let mut bytes = synth_puppet_body("MDLV0023", 3, 1);
+        append_block(&mut bytes, &synth_skeleton(3, &[[0.0, 0.0]]));
+        let clips = [synth_clip(1, &[[0.0, 0.0]]), synth_clip(2, &[[0.0, 0.0]])];
+        let animation = synth_animation(6, 1, &clips);
+        let cut = animation.len() - 20;
+        append_block(&mut bytes, &animation[..cut]);
+
+        let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
+        assert_eq!(mesh.animations.len(), 1);
+        assert_eq!(mesh.animations[0].id, 1);
+    }
+
+    #[test]
+    fn puppet_rejects_a_track_whose_bytes_disagree_with_its_frames() {
+        let mut bytes = synth_puppet_body("MDLV0023", 3, 1);
+        append_block(&mut bytes, &synth_skeleton(1, &[[0.0, 0.0]]));
+        let mut animation = synth_animation(1, 1, &[synth_clip(5, &[[0.0, 0.0]])]);
+        let frames_at = PUPPET_MARKER_SIZE + 4 + 4 + 8 + "Animation 1\0".len() + "loop\0".len() + 4;
+        animation[frames_at..frames_at + 4].copy_from_slice(&3u32.to_le_bytes());
+        append_block(&mut bytes, &animation);
+
+        let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
+        assert!(mesh.animations.is_empty());
+    }
+
     fn synth_attachments(points: &[(u16, &str, [f32; 2])]) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend_from_slice(b"MDAT0001\0");
@@ -1431,25 +1802,7 @@ mod tests {
             b.extend_from_slice(&bone.to_le_bytes());
             b.extend_from_slice(name.as_bytes());
             b.push(0);
-            let matrix: [f32; 16] = [
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-                0.0,
-                0.0,
-                0.0,
-                1.0,
-                0.0,
-                translation[0],
-                translation[1],
-                0.0,
-                1.0,
-            ];
-            for value in matrix {
+            for value in translation_matrix(*translation) {
                 b.extend_from_slice(&value.to_le_bytes());
             }
         }
@@ -1458,14 +1811,17 @@ mod tests {
 
     #[test]
     fn an_attachment_anchors_in_its_bone_chain() {
-        let mut bytes = synth_puppet("MDLV0023", 3, 1);
-        bytes.truncate(bytes.len() - 12);
-        bytes.extend_from_slice(&synth_skeleton(&[[10.0, 20.0], [3.0, 4.0]]));
-        bytes.extend_from_slice(&synth_attachments(&[(1, "hook", [5.0, 6.0])]));
-        bytes.extend_from_slice(b"MDLA0001\0");
+        let mut bytes = synth_puppet_body("MDLV0023", 3, 1);
+        append_block(&mut bytes, &synth_skeleton(1, &[[10.0, 20.0], [3.0, 4.0]]));
+        append_block(&mut bytes, &synth_attachments(&[(1, "hook", [5.0, 6.0])]));
+        append_block(
+            &mut bytes,
+            &synth_animation(1, 1, &[synth_clip(9, &[[10.0, 20.0], [3.0, 4.0]])]),
+        );
 
         let mesh = PuppetMesh::parse(&bytes).expect("parse puppet");
         assert_eq!(mesh.bones.len(), 2);
+        assert_eq!(mesh.animations.len(), 1, "MDLA is reached through the MDAT block");
         assert_eq!(mesh.attachment("hook").map(|p| p.bone), Some(1));
         let at = mesh.anchor("hook", None, 0.0).expect("an anchor");
         assert!(
@@ -1554,6 +1910,58 @@ mod tests {
             std::iter::successors(Some(1u8), |n| Some(n.wrapping_mul(31).wrapping_add(7))).take(4096),
         );
         let _ = PuppetMesh::parse(&bytes);
+    }
+
+    #[test]
+    fn corpus_puppets_yield_every_clip_the_header_promises() {
+        let roots = std::env::var("KIRIE_PUPPET_CORPUS")
+            .map(|value| value.split(':').map(PathBuf::from).collect::<Vec<_>>())
+            .unwrap_or_else(|_| corpus_dir().into_iter().collect());
+        let mut checked = 0;
+        for root in roots.iter().filter(|root| root.is_dir()) {
+            for item in std::fs::read_dir(root).unwrap().flatten() {
+                let pkg_path = item.path().join("scene.pkg");
+                let Ok(bytes) = std::fs::read(&pkg_path) else {
+                    continue;
+                };
+                let Ok(pkg) = Pkg::parse(&bytes) else { continue };
+                for entry in pkg.entries() {
+                    let name = entry.name_str().unwrap_or("").to_owned();
+                    let Ok(payload) = pkg.read(entry) else { continue };
+                    if !name.ends_with(".mdl") || !payload.starts_with(b"MDLV") {
+                        continue;
+                    }
+                    let Some(mdla) = payload.windows(4).position(|w| w == b"MDLA") else {
+                        continue;
+                    };
+                    let promised = read_u32(payload, mdla + 13).unwrap();
+                    let mesh = PuppetMesh::parse(payload).expect("parse puppet");
+                    assert_eq!(
+                        mesh.animations.len() as u32,
+                        promised,
+                        "{}/{name} clips",
+                        item.file_name().to_string_lossy()
+                    );
+                    assert!(
+                        !mesh.bones.is_empty(),
+                        "{}/{name} bones",
+                        item.file_name().to_string_lossy()
+                    );
+                    for clip in &mesh.animations {
+                        for track in &clip.tracks {
+                            assert_eq!(
+                                track.keys.len() as u32,
+                                clip.frames + 1,
+                                "{name} {} keys",
+                                clip.id
+                            );
+                        }
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        eprintln!("checked {checked} puppet models");
     }
 
     #[test]
