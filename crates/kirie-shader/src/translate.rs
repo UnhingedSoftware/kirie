@@ -111,6 +111,9 @@ fn shaderc_options() -> Option<shaderc::CompileOptions<'static>> {
 }
 
 fn preprocess_and_flatten(stage: Stage, filename: &str, modernized: &str) -> String {
+    if modernized.contains('\0') || filename.contains('\0') {
+        return modernized.to_string();
+    }
     let Some(compiler) = shaderc::Compiler::new().ok() else {
         return modernized.to_string();
     };
@@ -131,6 +134,12 @@ fn try_naga_glsl(stage: Stage, src: &str) -> Result<naga::Module, String> {
 }
 
 fn try_shaderc(stage: Stage, filename: &str, src: &str) -> Result<naga::Module, String> {
+    if let Some(at) = src.find('\0') {
+        return Err(format!("source holds a NUL byte at offset {at}"));
+    }
+    if filename.contains('\0') {
+        return Err("file name holds a NUL byte".to_string());
+    }
     let compiler = shaderc::Compiler::new().map_err(|e| e.to_string())?;
     let opts = shaderc_options().ok_or_else(|| "shaderc options unavailable".to_string())?;
     let kind = match stage {
