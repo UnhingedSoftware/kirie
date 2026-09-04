@@ -60,11 +60,11 @@ pub const BRIDGE_INIT: &str = r#"(function(){
       if (!l) { return; }
       if (lastUser !== undefined && !userDelivered && typeof l.applyUserProperties === 'function') {
         userDelivered = true;
-        try { l.applyUserProperties(lastUser); } catch (e) { /* page's problem, not the bridge's */ }
+        try { l.applyUserProperties(lastUser); } catch (e) { console.error('applyUserProperties threw', e); }
       }
       if (lastGeneral !== undefined && !generalDelivered && typeof l.applyGeneralProperties === 'function') {
         generalDelivered = true;
-        try { l.applyGeneralProperties(lastGeneral); } catch (e) {}
+        try { l.applyGeneralProperties(lastGeneral); } catch (e) { console.error('applyGeneralProperties threw', e); }
       }
     }
   });
@@ -74,7 +74,7 @@ pub const BRIDGE_INIT: &str = r#"(function(){
     var can = l && typeof l.applyUserProperties === 'function';
     userDelivered = !!can;
     if (can) {
-      try { l.applyUserProperties(p); } catch (e) {}
+      try { l.applyUserProperties(p); } catch (e) { console.error('applyUserProperties threw', e); }
     }
   };
   window.__wpApplyGeneral = function (p) {
@@ -83,7 +83,7 @@ pub const BRIDGE_INIT: &str = r#"(function(){
     var can = l && typeof l.applyGeneralProperties === 'function';
     generalDelivered = !!can;
     if (can) {
-      try { l.applyGeneralProperties(p); } catch (e) {}
+      try { l.applyGeneralProperties(p); } catch (e) { console.error('applyGeneralProperties threw', e); }
     }
   };
 })();"#;

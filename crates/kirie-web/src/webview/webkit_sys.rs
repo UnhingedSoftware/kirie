@@ -43,6 +43,7 @@ type WebContextSetCacheModel = unsafe extern "C" fn(*mut c_void, c_int);
 type SettingsSetEnablePageCache = unsafe extern "C" fn(*mut c_void, c_int);
 
 type SettingsSetAllowFileAccess = unsafe extern "C" fn(*mut c_void, c_int);
+type SettingsSetWriteConsoleToStdout = unsafe extern "C" fn(*mut c_void, c_int);
 
 const CACHE_MODEL_DOCUMENT_VIEWER: c_int = 0;
 
@@ -89,6 +90,7 @@ pub struct WebKit {
     web_context_set_cache_model: Option<WebContextSetCacheModel>,
     settings_set_enable_page_cache: Option<SettingsSetEnablePageCache>,
     settings_set_allow_file_access: Option<SettingsSetAllowFileAccess>,
+    settings_set_write_console: Option<SettingsSetWriteConsoleToStdout>,
 }
 
 impl WebKit {
@@ -193,6 +195,20 @@ impl WebKit {
         }
     }
 
+    pub fn write_console_to_stdout(&self, view: &gtk::Widget) {
+        let Some(set_write_console) = self.settings_set_write_console else {
+            tracing::warn!("webkit lacks enable-write-console-messages-to-stdout; page console stays silent");
+            return;
+        };
+        // SAFETY: see `as_web_view`; the settings object is owned by `view`.
+        let settings = unsafe { (self.web_view_get_settings)(as_web_view(view)) };
+        if settings.is_null() {
+            return;
+        }
+        // SAFETY: same live `WebKitSettings`; plain gboolean.
+        unsafe { set_write_console(settings, 1) };
+    }
+
     pub fn eval(&self, view: &gtk::Widget, js: &str) {
         let Ok(js) = CString::new(js) else {
             tracing::debug!("script contains a NUL byte; not evaluated");
@@ -289,6 +305,11 @@ fn bind(lib: libloading::Library, soname: &'static str) -> Result<WebKit, String
             settings_set_allow_file_access: symbol(
                 &lib,
                 b"webkit_settings_set_allow_file_access_from_file_urls\0",
+            )
+            .ok(),
+            settings_set_write_console: symbol(
+                &lib,
+                b"webkit_settings_set_enable_write_console_messages_to_stdout\0",
             )
             .ok(),
             _lib: lib,

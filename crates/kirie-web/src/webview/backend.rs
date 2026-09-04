@@ -150,6 +150,9 @@ impl WebviewBackend {
 
         webkit.set_background_color(&view, [0.0, 0.0, 0.0, 1.0]);
         webkit.set_autoplay(&view, true);
+        if std::env::var_os("KIRIE_WEB_CONSOLE").is_some() {
+            webkit.write_console_to_stdout(&view);
+        }
 
         view.set_hexpand(true);
         view.set_vexpand(true);
