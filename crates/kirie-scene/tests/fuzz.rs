@@ -43,7 +43,9 @@ fn corpus_seeds() -> Vec<String> {
         ),
     ];
     for root in roots {
-        let Ok(dirs) = std::fs::read_dir(&root) else { continue };
+        let Ok(dirs) = std::fs::read_dir(&root) else {
+            continue;
+        };
         for dir in dirs.flatten() {
             if out.len() >= 10 {
                 return out;
@@ -51,7 +53,9 @@ fn corpus_seeds() -> Vec<String> {
             let Ok(pkg) = OwnedPkg::from_path(dir.path().join("scene.pkg")) else {
                 continue;
             };
-            let Some(entry) = pkg.get(b"scene.json") else { continue };
+            let Some(entry) = pkg.get(b"scene.json") else {
+                continue;
+            };
             if let Ok(bytes) = pkg.read(&entry)
                 && let Ok(text) = std::str::from_utf8(bytes)
             {
@@ -64,12 +68,18 @@ fn corpus_seeds() -> Vec<String> {
 
 #[test]
 fn seeds_parse_so_the_fuzz_reaches_real_code() {
-    assert!(Scene::from_slice(synthetic_seed().as_bytes()).is_ok(), "synthetic scene must parse");
+    assert!(
+        Scene::from_slice(synthetic_seed().as_bytes()).is_ok(),
+        "synthetic scene must parse"
+    );
     let corpus = corpus_seeds();
     if corpus.is_empty() {
         return;
     }
-    let ok = corpus.iter().filter(|s| Scene::from_slice(s.as_bytes()).is_ok()).count();
+    let ok = corpus
+        .iter()
+        .filter(|s| Scene::from_slice(s.as_bytes()).is_ok())
+        .count();
     println!("scene seeds {} parsing {ok}", corpus.len());
     assert!(ok > 0, "no real scene parsed, the fuzz would only see rejects");
 }
@@ -101,9 +111,7 @@ fn scene_parsing_never_panics_on_mutated_input() {
                 bytes.truncate(cut);
             }
             2 => {
-                let needles: [&[u8]; 6] = [
-                    b"1e400", b"-1", b"null", b"[]", b"{}", b"18446744073709551616",
-                ];
+                let needles: [&[u8]; 6] = [b"1e400", b"-1", b"null", b"[]", b"{}", b"18446744073709551616"];
                 let needle = needles[rng.below(needles.len())];
                 let at = rng.below(bytes.len());
                 bytes.splice(at..at, needle.iter().copied());

@@ -248,7 +248,11 @@ impl AnimationLayer {
         let id = obj.get("id").and_then(coerce_i64)?;
         Some(AnimationLayer {
             id,
-            name: obj.get("name").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            name: obj
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
             additive: obj.get("additive").and_then(Value::as_bool).unwrap_or(false),
             rate: user_f32(obj, "rate", 1.0),
             visible: user_bool(obj, "visible", false),

@@ -203,7 +203,9 @@ impl PuppetRig {
                     scene,
                     Some(&self.pose),
                 ),
-                Geometry::PuppetCopy => puppet_copy_vertices(&self.mesh, image_size, pass.uv_crop, Some(&self.pose)),
+                Geometry::PuppetCopy => {
+                    puppet_copy_vertices(&self.mesh, image_size, pass.uv_crop, Some(&self.pose))
+                }
                 _ => continue,
             };
             queue.write_buffer(&pass.vertex_buffer, 0, bytemuck::cast_slice(&verts));
@@ -962,7 +964,9 @@ impl SceneRenderer {
     }
 
     fn apply_puppet_ops(&mut self) {
-        let Some(script) = self.script.as_mut() else { return };
+        let Some(script) = self.script.as_mut() else {
+            return;
+        };
         let ops = script.take_puppet_ops();
         if ops.is_empty() {
             return;
@@ -975,7 +979,9 @@ impl SceneRenderer {
                     continue;
                 }
                 let Some(rig) = o.puppet.as_mut() else { continue };
-                let Some(layer) = rig.player.layer_named_mut(&name) else { continue };
+                let Some(layer) = rig.player.layer_named_mut(&name) else {
+                    continue;
+                };
                 let clip = layer.clip;
                 match cmd.as_str() {
                     "play" => {
@@ -1054,7 +1060,9 @@ impl SceneRenderer {
                 if *parent != o.id {
                     continue;
                 }
-                let Some(at) = rig.player.anchor(&rig.mesh, name) else { continue };
+                let Some(at) = rig.player.anchor(&rig.mesh, name) else {
+                    continue;
+                };
                 if let Some(local) = self.locals.get_mut(child) {
                     local.attach = [at[0], at[1]];
                     dirty.push(*child);
@@ -1964,7 +1972,8 @@ fn puppet_player(
     let layers = layers
         .iter()
         .map(|layer| {
-            let mut out = kirie_formats::puppet::PuppetLayer::new(layer.id, layer.name.clone(), playable(layer));
+            let mut out =
+                kirie_formats::puppet::PuppetLayer::new(layer.id, layer.name.clone(), playable(layer));
             out.rate = layer.rate.value;
             out.blend = layer.blend.value;
             out.additive = layer.additive;
@@ -2283,7 +2292,10 @@ impl Renderer for SceneRenderer {
             || self.items.iter().any(|it| match it {
                 SceneItem::Particle(_) => true,
                 SceneItem::Model(m) => m.has_animation(),
-                SceneItem::Image(o) => o.puppet.as_ref().is_some_and(|rig| rig.player.is_animating(&rig.mesh)),
+                SceneItem::Image(o) => o
+                    .puppet
+                    .as_ref()
+                    .is_some_and(|rig| rig.player.is_animating(&rig.mesh)),
                 _ => false,
             });
         if animated {

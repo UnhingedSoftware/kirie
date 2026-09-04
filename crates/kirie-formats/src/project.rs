@@ -853,7 +853,10 @@ mod tests {
         }
 
         std::fs::write(&path, b"   \n\t  ").expect("write");
-        assert!(matches!(Project::from_path(&path), Err(ProjectError::Blank { .. })));
+        assert!(matches!(
+            Project::from_path(&path),
+            Err(ProjectError::Blank { .. })
+        ));
 
         std::fs::write(&path, b"{bad").expect("write");
         assert!(matches!(Project::from_path(&path), Err(ProjectError::Json(_))));

@@ -9,7 +9,7 @@ mod world;
 pub use engine::{API_VERSION, ScriptEngine, TRANSLATOR_VERSION};
 pub use error::ScriptError;
 pub use frame::{
-    AnimationState, AudioBuffers, CameraState, HostFrame, LayerState, LogLine, MediaFrame,
-    PuppetLayerState, SceneOp, SceneState, TickOutput,
+    AnimationState, AudioBuffers, CameraState, HostFrame, LayerState, LogLine, MediaFrame, PuppetLayerState,
+    SceneOp, SceneState, TickOutput,
 };
 pub use value::ScriptValue;

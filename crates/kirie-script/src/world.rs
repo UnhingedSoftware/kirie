@@ -89,8 +89,7 @@ impl Deadline {
     fn expired(&self) -> bool {
         let at = self.0.load(std::sync::atomic::Ordering::Relaxed);
         at != u64::MAX
-            && u64::try_from(std::time::Instant::now().duration_since(*START).as_micros())
-                .unwrap_or(u64::MAX)
+            && u64::try_from(std::time::Instant::now().duration_since(*START).as_micros()).unwrap_or(u64::MAX)
                 > at
     }
 }

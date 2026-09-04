@@ -112,7 +112,10 @@ fn a_nul_byte_in_a_shader_is_an_error_not_a_crash() {
         fallback: None,
     };
     let out = translate(Stage::Fragment, "nul.frag", source, &resolver, &inputs());
-    assert!(out.is_err(), "a NUL-bearing shader must be rejected, not compiled");
+    assert!(
+        out.is_err(),
+        "a NUL-bearing shader must be rejected, not compiled"
+    );
 }
 
 #[test]
@@ -134,7 +137,10 @@ fn translator_never_panics_on_mutated_shaders() {
                 *stage,
                 "seed",
                 src,
-                &MapIncludeResolver { headers: headers.clone(), fallback: None },
+                &MapIncludeResolver {
+                    headers: headers.clone(),
+                    fallback: None,
+                },
                 &inputs(),
             )
             .is_ok()

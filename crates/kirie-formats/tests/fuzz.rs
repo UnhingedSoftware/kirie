@@ -71,7 +71,9 @@ fn corpus_seeds() -> Vec<Vec<u8>> {
         ),
     ];
     for root in roots {
-        let Ok(dirs) = std::fs::read_dir(&root) else { continue };
+        let Ok(dirs) = std::fs::read_dir(&root) else {
+            continue;
+        };
         for dir in dirs.flatten() {
             if models.len() >= 8 && texes.len() >= 8 {
                 break;
@@ -110,10 +112,16 @@ fn corpus_seeds() -> Vec<Vec<u8>> {
 #[test]
 fn seeds_are_parseable_so_the_fuzz_reaches_real_code() {
     let synthetic = synthetic_seeds();
-    assert!(PuppetMesh::parse(&synthetic[0]).is_ok(), "synthetic mdl must parse");
+    assert!(
+        PuppetMesh::parse(&synthetic[0]).is_ok(),
+        "synthetic mdl must parse"
+    );
     assert!(Model::parse(&synthetic[0]).is_ok(), "synthetic model must parse");
     assert!(Pkg::parse(&synthetic[1]).is_ok(), "synthetic pkg must parse");
-    assert!(Tex::parse(&synthetic[2]).is_err(), "synthetic tex is a header stub");
+    assert!(
+        Tex::parse(&synthetic[2]).is_err(),
+        "synthetic tex is a header stub"
+    );
 
     let corpus = corpus_seeds();
     if corpus.is_empty() {
@@ -122,7 +130,10 @@ fn seeds_are_parseable_so_the_fuzz_reaches_real_code() {
     let models = corpus.iter().filter(|b| Model::parse(b).is_ok()).count();
     let texes = corpus.iter().filter(|b| Tex::parse(b).is_ok()).count();
     println!("corpus seeds {} models {models} texes {texes}", corpus.len());
-    assert!(models > 0, "no real model parsed, the fuzz would only see rejects");
+    assert!(
+        models > 0,
+        "no real model parsed, the fuzz would only see rejects"
+    );
     assert!(texes > 0, "no real tex parsed, the fuzz would only see rejects");
 }
 

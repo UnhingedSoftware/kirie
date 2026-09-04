@@ -114,11 +114,15 @@ pub fn bands_from_spectrum(spectrum: &[Complex<f32>], ref_db: f32) -> BandTarget
         out.b64[band] = (peak * boost(band as f32 / (BANDS_64 - 1) as f32)).min(1.0);
     }
     for (band, slot) in out.b32.iter_mut().enumerate() {
-        let peak = level[band * 2..band * 2 + 2].iter().fold(0.0_f32, |m, v| m.max(*v));
+        let peak = level[band * 2..band * 2 + 2]
+            .iter()
+            .fold(0.0_f32, |m, v| m.max(*v));
         *slot = (peak * boost(band as f32 / (BANDS_32 - 1) as f32)).min(1.0);
     }
     for (band, slot) in out.b16.iter_mut().enumerate() {
-        let peak = level[band * 4..band * 4 + 4].iter().fold(0.0_f32, |m, v| m.max(*v));
+        let peak = level[band * 4..band * 4 + 4]
+            .iter()
+            .fold(0.0_f32, |m, v| m.max(*v));
         *slot = (peak * boost(band as f32 / (BANDS_16 - 1) as f32)).min(1.0);
     }
     out
@@ -286,7 +290,11 @@ mod tests {
         let out = bands_from_spectrum(&spec, REF_DB_MAX);
         let f1 = (20.0 - (REF_DB_MAX - RANGE_DB)) / RANGE_DB;
 
-        assert!((out.b64[1] - f1 * boost(1.0 / 63.0)).abs() < 1e-5, "got {}", out.b64[1]);
+        assert!(
+            (out.b64[1] - f1 * boost(1.0 / 63.0)).abs() < 1e-5,
+            "got {}",
+            out.b64[1]
+        );
         assert!((out.b32[0] - f1 * boost(0.0)).abs() < 1e-5, "got {}", out.b32[0]);
         assert!((out.b16[0] - f1 * boost(0.0)).abs() < 1e-5, "got {}", out.b16[0]);
     }

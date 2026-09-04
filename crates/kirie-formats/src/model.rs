@@ -2053,10 +2053,7 @@ mod tests {
             Err(PuppetError::BadMagic { .. })
         ));
         let short = b"MDLV0017\0".to_vec();
-        assert!(matches!(
-            PuppetMesh::parse(&short),
-            Err(PuppetError::NoMeshBlock)
-        ));
+        assert!(matches!(PuppetMesh::parse(&short), Err(PuppetError::NoMeshBlock)));
     }
 
     #[test]

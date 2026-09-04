@@ -19,7 +19,10 @@ fn a_runaway_script_is_interrupted_and_the_engine_survives() {
         took < std::time::Duration::from_secs(5),
         "a runaway script must be interrupted, took {took:?}"
     );
-    assert!(!out.errors.is_empty(), "the interrupted script must report an error");
+    assert!(
+        !out.errors.is_empty(),
+        "the interrupted script must report an error"
+    );
 
     e.load_property_script(
         "alpha_2",
