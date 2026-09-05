@@ -126,12 +126,9 @@ pub fn present(args: &CompatArgs) -> ExitCode {
 }
 
 fn control_socket(args: &CompatArgs) -> Option<std::path::PathBuf> {
-    args.control_socket.clone().or_else(|| {
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .or_else(|| Some(std::env::temp_dir()))
-            .map(|dir| dir.join("lwe.sock"))
-    })
+    args.control_socket
+        .clone()
+        .or_else(|| Some(crate::default_control_socket()))
 }
 
 fn background_of(args: &CompatArgs) -> Option<String> {

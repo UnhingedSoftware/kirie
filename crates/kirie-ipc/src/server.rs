@@ -40,6 +40,12 @@ impl ControlSocket {
         if let Err(e) = fs::remove_file(&path)
             && e.kind() != ErrorKind::NotFound
         {
+            // A shared temp dir plus a fixed name means the socket can belong to
+            // a different account; /tmp's sticky bit then refuses the unlink and
+            // the bind below fails with a bare EADDRINUSE. Say what is wrong.
+            if e.kind() == ErrorKind::PermissionDenied && socket_is_foreign(&path) {
+                return Err(IpcError::ForeignSocket { path });
+            }
             tracing::debug!(path = %path.display(), error = %e, "stale socket unlink failed");
         }
         let listener = UnixListener::bind(&path).map_err(|source| IpcError::Bind {
@@ -89,6 +95,17 @@ impl Drop for ControlSocket {
     fn drop(&mut self) {
         self.shutdown();
     }
+}
+
+fn socket_is_foreign(path: &std::path::Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(socket) = fs::metadata(path) else {
+        return false;
+    };
+    let ours = std::env::var_os("HOME")
+        .and_then(|home| fs::metadata(home).ok())
+        .map(|home| home.uid());
+    ours.is_some_and(|uid| uid != socket.uid())
 }
 
 fn serve(listener: &UnixListener, events: &Sender<IpcEvent>, shutdown: &AtomicBool) {

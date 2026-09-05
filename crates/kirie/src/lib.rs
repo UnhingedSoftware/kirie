@@ -182,11 +182,32 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
     }
 }
 
-fn default_control_socket() -> PathBuf {
-    let runtime = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    runtime.join("lwe.sock")
+pub(crate) fn default_control_socket() -> PathBuf {
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
+        return PathBuf::from(runtime).join("lwe.sock");
+    }
+    // No XDG_RUNTIME_DIR (macOS, or a bare login): the temp dir can be shared
+    // between accounts, so a fixed name collides and the second user cannot
+    // even unlink the first user's socket under /tmp's sticky bit. Give every
+    // uid its own 0700 directory.
+    let dir = std::env::temp_dir().join(format!("kirie-{}", current_user_tag()));
+    if std::fs::create_dir_all(&dir).is_ok() {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    }
+    dir.join("lwe.sock")
+}
+
+fn current_user_tag() -> String {
+    use std::os::unix::fs::MetadataExt;
+    if let Some(home) = std::env::var_os("HOME")
+        && let Ok(meta) = std::fs::metadata(&home)
+    {
+        return meta.uid().to_string();
+    }
+    std::env::var("USER")
+        .or_else(|_| std::env::var("LOGNAME"))
+        .unwrap_or_else(|_| "shared".to_owned())
 }
 
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
@@ -310,4 +331,19 @@ pub(crate) fn render_chain(err: &anyhow::Error) -> String {
         }
     }
     message
+}
+
+#[cfg(test)]
+mod socket_tests {
+    #[test]
+    fn the_fallback_socket_directory_is_per_user() {
+        // Two accounts share /tmp on macOS, so a fixed name collides and the
+        // second user cannot even unlink the first one's socket.
+        let tag = super::current_user_tag();
+        assert!(!tag.is_empty(), "a user tag is always available");
+        assert!(
+            !tag.contains('/'),
+            "the tag becomes a directory name, so it must be a single component: {tag}"
+        );
+    }
 }
