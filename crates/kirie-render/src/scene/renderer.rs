@@ -272,6 +272,7 @@ pub struct SceneRenderer {
     atlas_textures: Vec<AtlasSlot>,
     pointer: [f32; 2],
     pointer_last: [f32; 2],
+    pointer_on_output: bool,
     pointer_left: bool,
     runtime_layers: std::collections::HashMap<i64, RuntimeLayer>,
     runtime_templates: std::collections::HashMap<String, RuntimeTemplate>,
@@ -807,6 +808,7 @@ impl SceneRenderer {
             atlas_textures,
             pointer: [0.5, 0.5],
             pointer_last: [0.5, 0.5],
+            pointer_on_output: true,
             pointer_left: false,
             locals: local_xf,
             attached: scene
@@ -2544,7 +2546,12 @@ impl Renderer for SceneRenderer {
             let influence = self.general.cameraparallaxmouseinfluence.value;
             let t = (self.general.cameraparallaxdelay.value * dt).clamp(0.0, 1.0);
             for axis in 0..2 {
-                let target = (self.pointer[axis] - 0.5) * amount * influence;
+                let here = if self.pointer_on_output {
+                    self.pointer
+                } else {
+                    [0.5, 0.5]
+                };
+                let target = (here[axis] - 0.5) * amount * influence;
                 self.parallax_disp[axis] += (target - self.parallax_disp[axis]) * t;
             }
         }
@@ -3028,6 +3035,10 @@ impl Renderer for SceneRenderer {
 
     fn set_pointer(&mut self, x: f32, y: f32) {
         self.pointer = [x, y];
+    }
+
+    fn set_pointer_on_output(&mut self, on_output: bool) {
+        self.pointer_on_output = on_output;
     }
 
     fn set_pointer_buttons(&mut self, left_down: bool) {

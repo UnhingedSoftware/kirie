@@ -85,18 +85,16 @@ struct PlatformState {
     _toplevel_manager: Option<ZwlrForeignToplevelManagerV1>,
 }
 
-fn pointer_on_output(pointer: (f64, f64), origin: (i32, i32), logical: (u32, u32)) -> (f32, f32) {
+fn pointer_on_output(pointer: (f64, f64), origin: (i32, i32), logical: (u32, u32)) -> (f32, f32, bool) {
     const CENTRE: (f32, f32) = (0.5, 0.5);
     let (lw, lh) = logical;
     if lw == 0 || lh == 0 {
-        return CENTRE;
+        return (CENTRE.0, CENTRE.1, false);
     }
     let nx = (pointer.0 - f64::from(origin.0)) / f64::from(lw);
     let ny = (pointer.1 - f64::from(origin.1)) / f64::from(lh);
-    if !(0.0..=1.0).contains(&nx) || !(0.0..=1.0).contains(&ny) {
-        return CENTRE;
-    }
-    (nx as f32, ny as f32)
+    let on_output = (0.0..=1.0).contains(&nx) && (0.0..=1.0).contains(&ny);
+    (nx as f32, ny as f32, on_output)
 }
 
 impl WaylandPlatform {
@@ -808,8 +806,9 @@ impl PlatformState {
         ctx.last_frame = Some(now);
 
         if let Some((gx, gy)) = self.pointer.get() {
-            let (nx, ny) = pointer_on_output((gx, gy), ctx.position, ctx.logical_size);
+            let (nx, ny, on_output) = pointer_on_output((gx, gy), ctx.position, ctx.logical_size);
             renderer.set_pointer(nx, ny);
+            renderer.set_pointer_on_output(on_output);
         }
         renderer.set_pointer_buttons(self.buttons.left());
 
@@ -1233,31 +1232,35 @@ mod pointer_tests {
 
     #[test]
     fn a_pointer_on_the_output_maps_to_local_space() {
-        let (x, y) = pointer_on_output((7680.0 + 960.0, 540.0), (7680, 0), (1920, 1080));
+        let (x, y, on) = pointer_on_output((7680.0 + 960.0, 540.0), (7680, 0), (1920, 1080));
         assert!((x - 0.5).abs() < 1e-6, "{x}");
         assert!((y - 0.5).abs() < 1e-6, "{y}");
-        let (x, y) = pointer_on_output((7680.0, 0.0), (7680, 0), (1920, 1080));
+        assert!(on);
+        let (x, y, on) = pointer_on_output((7680.0, 0.0), (7680, 0), (1920, 1080));
         assert_eq!((x, y), (0.0, 0.0));
+        assert!(on);
     }
 
     #[test]
-    fn a_pointer_on_another_output_stays_neutral() {
-        assert_eq!(
-            pointer_on_output((100.0, 540.0), (7680, 0), (1920, 1080)),
-            (0.5, 0.5)
-        );
-        assert_eq!(
-            pointer_on_output((7680.0 + 4000.0, 540.0), (7680, 0), (1920, 1080)),
-            (0.5, 0.5)
-        );
-        assert_eq!(
-            pointer_on_output((7680.0 + 10.0, 4000.0), (7680, 0), (1920, 1080)),
-            (0.5, 0.5)
-        );
+    fn a_pointer_on_another_output_keeps_its_real_position_but_is_flagged_off() {
+        // Parallax wants a neutral centre off-output, but a cursor-following
+        // script wants to know where the cursor actually is — so report both.
+        let (x, y, on) = pointer_on_output((100.0, 540.0), (7680, 0), (1920, 1080));
+        assert!(!on);
+        assert!(x < 0.0, "a cursor left of this output reads negative, got {x}");
+        assert!((y - 0.5).abs() < 1e-6, "{y}");
+
+        let (x, _, on) = pointer_on_output((7680.0 + 4000.0, 540.0), (7680, 0), (1920, 1080));
+        assert!(!on);
+        assert!(x > 1.0, "a cursor right of this output reads past one, got {x}");
+
+        let (_, y, on) = pointer_on_output((7680.0 + 10.0, 4000.0), (7680, 0), (1920, 1080));
+        assert!(!on);
+        assert!(y > 1.0, "a cursor below this output reads past one, got {y}");
     }
 
     #[test]
     fn an_unconfigured_output_stays_neutral() {
-        assert_eq!(pointer_on_output((10.0, 10.0), (0, 0), (0, 0)), (0.5, 0.5));
+        assert_eq!(pointer_on_output((10.0, 10.0), (0, 0), (0, 0)), (0.5, 0.5, false));
     }
 }

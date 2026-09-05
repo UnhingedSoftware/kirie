@@ -40,6 +40,8 @@ pub trait Renderer {
 
     fn set_pointer(&mut self, _x: f32, _y: f32) {}
 
+    fn set_pointer_on_output(&mut self, _on_output: bool) {}
+
     fn redraw_hint(&self) -> RedrawHint {
         RedrawHint::Unknown
     }
