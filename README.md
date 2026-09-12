@@ -78,6 +78,10 @@ brew install ffmpeg pkg-config cmake ninja
 cargo build --release --no-default-features --features web-webview
 ```
 
+`--no-default-features` also drops the `tui` feature, so that build has no
+`kirie workshop browse`; `kirie workshop search` works either way. Add `tui` to
+the feature list to keep it.
+
 A build like that links against Homebrew's ffmpeg, so it stops working when
 Homebrew moves to a new major version. Release binaries carry their own
 (`--features portable`), which is why they need nothing installed.
@@ -131,11 +135,22 @@ launch and steer it without a wrapper:
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg /path/to/workshop/item --scaling fill
-kirie info  <item|scene.pkg|.tex>      # inspect
+kirie info <item|scene.pkg|.tex>       # inspect
 kirie extract <scene.pkg|.tex> -o DIR  # unpack
 kirie list                             # what is installed
+kirie check                            # can this machine render at all?
 kirie workshop browse                  # find more, and subscribe
 ```
+
+Anywhere a wallpaper is named you can give a Workshop ID instead of a path, and
+kirie looks it up across your Steam libraries:
+
+```sh
+kirie --screen-root HDMI-A-1 --bg 1388331347
+```
+
+Every subcommand, flag, control-socket command and environment variable, each
+with a worked example, is in the **[command reference](docs/COMMANDS.md)**.
 
 The Workshop commands talk to your own running Steam client, so they need
 Steam open and an account that owns Wallpaper Engine — Steam enforces that,
@@ -150,6 +165,31 @@ kirie workshop subscribe 1388331347 --wait --apply HDMI-A-1
 subscribes, waits for Steam to fetch it, and shows it — the wallpaper arrives
 in Steam's own library, updates with it, and Wallpaper Engine on Windows sees
 it too.
+
+### Steering a running kirie
+
+Start it with a control socket, then drive it from a shell or a panel:
+
+```sh
+kirie --screen-root HDMI-A-1 --bg 1388331347 --control-socket /tmp/kirie.sock &
+kirie ask --socket /tmp/kirie.sock status
+kirie ask --socket /tmp/kirie.sock bg HDMI-A-1 /path/to/other/item
+```
+
+Without `--control-socket` the socket is `$XDG_RUNTIME_DIR/lwe.sock`, which is
+also where `kirie ask` looks by default. The full command list is in the
+[command reference](docs/COMMANDS.md#control-socket).
+
+### Screenshots
+
+`--screenshot` renders one frame headlessly and exits, so it needs no
+compositor and no `--screen-root`:
+
+```sh
+kirie --bg 1388331347 --screenshot shot.png --screenshot-delay 10
+```
+
+The extension picks the format and must be `.png`, `.jpg`, `.jpeg` or `.bmp`.
 
 ## Credits
 
