@@ -554,7 +554,7 @@ impl PlatformState {
             if !ctx.paused || ctx.released || ctx.renderer.is_none() {
                 continue;
             }
-            if !ctx.paused_at.is_some_and(|at| at.elapsed() >= after) {
+            if ctx.paused_at.is_none_or(|at| at.elapsed() < after) {
                 continue;
             }
             let name = ctx.name.clone();

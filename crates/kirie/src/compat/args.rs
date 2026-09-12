@@ -381,6 +381,7 @@ fn flag_takes_value(canonical: &str) -> bool {
             | "--fps"
             | "--playback-speed"
             | "--render-scale"
+            | "--focus"
             | "--control-socket"
             | "--audio-device"
             | "--fullscreen-pause-ignore-appid"
@@ -767,6 +768,7 @@ fn canonical_flag(name: &str) -> Option<&'static str> {
         "--render-debug" => "--render-debug",
         "--gpu" => "--gpu",
         "--release-hidden-after" => "--release-hidden-after",
+        "--battery-fps" => "--battery-fps",
         "--fit-render-to-output" => "--fit-render-to-output",
         _ => return None,
     })
@@ -868,6 +870,43 @@ mod tests {
     fn duplicate_non_repeatable_is_fatal() {
         let err = parse(&os(&["kirie", "--fps", "30", "--fps", "60"])).unwrap_err();
         assert!(err.message.contains("Duplicate argument --fps"));
+    }
+
+    #[test]
+    fn focus_reads_its_value_in_both_spellings() {
+        // --focus was absent from flag_takes_value, so the value was never read
+        // and every spelling died on an empty string.
+        for argv in [
+            vec!["kirie", "--focus", "0.3,-0.2", "/tmp/x"],
+            vec!["kirie", "--focus=0.3,-0.2", "/tmp/x"],
+        ] {
+            let args = parse(&os(&argv)).expect("--focus takes one argument");
+            assert_eq!(args.focus, (0.3, -0.2), "for {argv:?}");
+        }
+    }
+
+    #[test]
+    fn focus_is_clamped_to_the_unit_range() {
+        let args = parse(&os(&["kirie", "--focus", "5,-5", "/tmp/x"])).unwrap();
+        assert_eq!(args.focus, (1.0, -1.0));
+    }
+
+    #[test]
+    fn battery_fps_is_read_and_does_not_leak_into_the_background() {
+        // --battery-fps was missing from canonical_flag, so it was skipped as
+        // unknown and its value was mistaken for a positional background id.
+        for argv in [
+            vec!["kirie", "--battery-fps", "5", "/tmp/x"],
+            vec!["kirie", "--battery-fps=5", "/tmp/x"],
+        ] {
+            let args = parse(&os(&argv)).expect("--battery-fps takes one argument");
+            assert_eq!(args.battery_fps, 5, "for {argv:?}");
+            assert_eq!(
+                args.default_background.as_deref(),
+                Some("/tmp/x"),
+                "the value must not be read as a background for {argv:?}"
+            );
+        }
     }
 
     #[test]
