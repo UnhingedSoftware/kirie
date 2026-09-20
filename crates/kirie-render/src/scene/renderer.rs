@@ -2327,7 +2327,11 @@ impl Renderer for SceneRenderer {
             .filter_map(|schedule| schedule.time_until_change(self.elapsed))
             .min_by(f64::total_cmp);
         match atlas_flips {
-            Some(wait) => kirie_platform::RedrawHint::After(std::time::Duration::from_secs_f64(wait)),
+            // Landing exactly on a boundary would ask for a wake with no wait
+            // at all, so give it a floor.
+            Some(wait) => {
+                kirie_platform::RedrawHint::After(std::time::Duration::from_secs_f64(wait.max(0.001)))
+            }
             None => kirie_platform::RedrawHint::Static,
         }
     }
@@ -2902,11 +2906,7 @@ impl Renderer for SceneRenderer {
         }
 
         {
-            let rp = encoder.offscreen(
-                view,
-                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                "kirie-scene-blit",
-            );
+            let rp = encoder.offscreen(view, wgpu::LoadOp::Clear(wgpu::Color::BLACK), "kirie-scene-blit");
             rp.set_pipeline(&self.blit_pipeline);
             rp.set_bind_group(0, &self.blit_bind, &[]);
             crate::frame_cost::draw(1);

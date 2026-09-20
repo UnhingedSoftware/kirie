@@ -76,8 +76,7 @@ fn build(layers: usize, effect_every: usize, composite_every: usize) -> (String,
     );
     files.insert(
         "materials/benchcomposite.json".into(),
-        br#"{"passes":[{"shader":"bench","blending":"normal","textures":["_rt_FullFrameBuffer"]}]}"#
-            .to_vec(),
+        br#"{"passes":[{"shader":"bench","blending":"normal","textures":["_rt_FullFrameBuffer"]}]}"#.to_vec(),
     );
     files.insert(
         "models/benchcomposite.json".into(),
@@ -243,18 +242,33 @@ fn main() {
     println!("wall           {wall:.3} ms/frame (record + submit, GPU pipelined)");
     println!("render passes  {:.1} /frame", cost.render_passes);
     println!("draw calls     {:.1} /frame", cost.draws);
-    println!("texture copies {:.1} /frame ({:.2} MiB)", cost.texture_copies, cost.copy_mib);
-    println!("buffer writes  {:.1} /frame ({:.1} KiB)", cost.buffer_writes, cost.buffer_kib);
+    println!(
+        "texture copies {:.1} /frame ({:.2} MiB)",
+        cost.texture_copies, cost.copy_mib
+    );
+    println!(
+        "buffer writes  {:.1} /frame ({:.1} KiB)",
+        cost.buffer_writes, cost.buffer_kib
+    );
     if cost.snapshots_skipped > 0.0 {
-        println!("copies skipped {:.1} /frame (scene unchanged since the last one)", cost.snapshots_skipped);
+        println!(
+            "copies skipped {:.1} /frame (scene unchanged since the last one)",
+            cost.snapshots_skipped
+        );
     }
     if cost.buffer_writes_skipped > 0.0 {
-        println!("writes skipped {:.1} /frame (bytes already in the buffer)", cost.buffer_writes_skipped);
+        println!(
+            "writes skipped {:.1} /frame (bytes already in the buffer)",
+            cost.buffer_writes_skipped
+        );
     }
 
     // A fingerprint of the last frame, so a change meant to cost less can be
     // checked for drawing the same picture.
-    println!("frame digest   {}", digest(&device, &queue, &texture, width, height));
+    println!(
+        "frame digest   {}",
+        digest(&device, &queue, &texture, width, height)
+    );
 }
 
 /// Reads the rendered frame back and hashes it.

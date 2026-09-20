@@ -220,7 +220,25 @@ fn particle_burst_renders_on_gpu() {
             multiview_mask: None,
         });
     }
-    renderer.draw(&mut encoder, &view, count);
+    {
+        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("particles"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        renderer.draw(&mut rp, count);
+    }
 
     let padded = (W * 4).div_ceil(256) * 256;
     let readback = device.create_buffer(&wgpu::BufferDescriptor {

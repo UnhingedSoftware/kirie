@@ -215,9 +215,7 @@ impl Bloom {
             &self.blur_y_bind,
             &self.bloom.view,
         );
-        crate::frame_cost::texture_copy(
-            u64::from(scene_fbo.width) * u64::from(scene_fbo.height) * 8,
-        );
+        crate::frame_cost::texture_copy(u64::from(scene_fbo.width) * u64::from(scene_fbo.height) * 8);
         encoder.copy_texture_to_texture(
             scene_fbo.texture.as_image_copy(),
             scene_snapshot.texture.as_image_copy(),

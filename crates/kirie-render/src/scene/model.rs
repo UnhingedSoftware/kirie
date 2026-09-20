@@ -13,7 +13,7 @@ use super::renderer::{
     build_bind_group, create_buffer_init, create_ubo, is_scene_rt, resolve_params, tex_res,
 };
 use super::texture::TextureRegistry;
-use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
+use super::uniforms::{Builtins, GlobalsLayout};
 
 pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
@@ -553,7 +553,7 @@ mod tests {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let (w, h) = (636u32, 692u32);
         let snapshot = Fbo::new(&device, "diag-snap", w, h);
-        let mg = build_model(
+        let mut mg = build_model(
             &device,
             obj,
             mo,
@@ -569,36 +569,21 @@ mod tests {
 
         let color = Fbo::new(&device, "diag-color", w, h);
         let depth = create_depth_texture(&device, w, h);
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            crate::frame_cost::render_pass();
-            let _c = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("diag-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 1.0,
-                            g: 0.0,
-                            b: 1.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        let mut enc = crate::scene::encoder::FrameEncoder::new(
+            &device,
+            wgpu::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+        enc.ensure_cleared(&color.view);
         let aspect = w as f32 / h as f32;
         draw_model(
             &mut enc,
             &queue,
-            &mg,
+            &mut mg,
             &color.view,
             &depth,
             &model.scene.camera,
@@ -612,7 +597,7 @@ mod tests {
             [0.5, 0.5],
             [0.5, 0.5],
         );
-        queue.submit(Some(enc.finish()));
+        enc.submit(&queue);
 
         let padded = (w * 8).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
