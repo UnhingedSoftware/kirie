@@ -39,11 +39,15 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   # The port to Windows is only a port while something checks it. The crate that
-  # owns the Windows desktop, the one that owns the control socket, the launcher
-  # and the audio device are where every `cfg(windows)` branch lives, and none of
-  # them needs ffmpeg or shaderc — so cross-compiling just those catches the
-  # regression that matters, a `std::os::unix` import creeping back in, on the
-  # same runner and in seconds.
+  # owns the Windows desktop, the one that owns the control socket, the launcher,
+  # the audio device, the bake cache, the shader cache and the Steam client are
+  # where every `cfg(windows)` branch lives, and none of them needs ffmpeg or
+  # shaderc — so cross-compiling just those catches the regression that matters,
+  # a `std::os::unix` import creeping back in, on the same runner and in seconds.
+  #
+  # kirie-bake, kirie-shader and kirie-steam-helper joined the list after a pass
+  # found all three asking for XDG_CACHE_HOME or HOME on a platform that sets
+  # neither. Nothing was compiling them for Windows, so nothing said so.
   #
   # The rest of the workspace is not cross-checked here on purpose: it reaches
   # ffmpeg, which would mean a Windows ffmpeg on a Linux runner. The release
@@ -73,4 +77,5 @@ jobs:
         run: |
           cargo clippy --target x86_64-pc-windows-gnu --all-targets \
             -p kirie-platform -p kirie-ipc -p kirie-launcher -p kirie-audio \
+            -p kirie-bake -p kirie-shader -p kirie-steam-helper \
             -- -D warnings
