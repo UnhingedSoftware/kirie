@@ -113,6 +113,13 @@ fn spawn_host(
         .arg("--height")
         .arg(size.height.to_string())
         .envs(crate::backend::gpu_offload_env())
+        // Set here, through the child's environment, rather than by the host
+        // setting it on itself: `std::env::set_var` is unsound as soon as
+        // anything else in the process might be reading the environment, and
+        // there is no safe way to set one in Rust. The host keeps a fallback
+        // for the case where somebody runs it by hand, but on every path kirie
+        // takes it finds the variable already here.
+        .env("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()

@@ -3,6 +3,34 @@ use std::path::{Path, PathBuf};
 
 pub const APP_ID: u32 = 431_960;
 
+/// Make sure the Steam client can see which app this is.
+///
+/// `SteamAPI_InitFlat` reads `SteamAppId` from the process environment. The
+/// parent puts it in the helper's environment when it spawns it, so the common
+/// path finds it already there and this does nothing; a helper someone ran by
+/// hand is the case that still needs it set.
+fn announce_app_id() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        for name in ["SteamAppId", "SteamGameId"] {
+            if std::env::var_os(name).is_some_and(|value| !value.is_empty()) {
+                continue;
+            }
+            // SAFETY: `set_var` is unsound while another thread may be reading
+            // the environment, and nothing here can prove that on its own --
+            // which is why `open_library` documents the requirement that it is
+            // called before the process starts any other thread. Both of
+            // kirie's entry points into this crate are the first statement of
+            // a `main` that has spawned nothing. There is no safe way to set
+            // an environment variable in Rust 1.94, and no way to hand the
+            // value to the Steam client except through the environment, so the
+            // most that can be done is to skip the call whenever the variable
+            // is already there, which it is whenever kirie spawned us.
+            unsafe { std::env::set_var(name, APP_ID.to_string()) };
+        }
+    });
+}
+
 const LIB_RELATIVE: [&str; 2] = ["steamrt64/libsteam_api.so", "steamrt32/libsteam_api.so"];
 
 #[derive(Debug)]
@@ -74,18 +102,35 @@ impl Session {
         Self::open_library(&path)
     }
 
+    /// Open the Steam client library at `path`.
+    ///
+    /// Call this before the process starts any other thread. The Steam client
+    /// reads `SteamAppId` out of the environment during its own init, so if it
+    /// is not already set this has to set it, and setting an environment
+    /// variable is only sound while nothing else can be reading one. Both of
+    /// kirie's entry points into this crate are the first thing their `main`
+    /// does, and the parent that spawns the helper passes the variable down in
+    /// the child's environment, so on the ordinary path there is nothing left
+    /// to set.
     pub fn open_library(path: &Path) -> Result<Self, SteamError> {
-        // SAFETY: single-threaded at this point — `main` has spawned nothing,
-        unsafe {
-            std::env::set_var("SteamAppId", APP_ID.to_string());
-            std::env::set_var("SteamGameId", APP_ID.to_string());
-        }
+        announce_app_id();
 
         // SAFETY: `path` is a real file under the user's Steam install; any
+        // library is free to run initialisers when it is loaded, which is what
+        // makes this unsafe, and `libsteam_api` is the one this crate exists to
+        // load. A path that names something that is not a loadable library
+        // fails here with an error rather than misbehaving.
         let library = unsafe { libloading::Library::new(path) }
             .map_err(|err| SteamError::LibraryUnusable(err.to_string()))?;
 
         // SAFETY: each of these names was verified present in the client's
+        // flat C API, and each transmute gives the symbol the signature
+        // steam_api_flat.h declares for it, so calling one through the pointer
+        // matches what the library expects. `sym` fails rather than answering
+        // null when a name is absent, which is what a Steam client too old for
+        // one of these looks like. Every pointer taken out of `library` is
+        // stored beside it in the `Session` below, and `_library` is the last
+        // field, so it is dropped after everything that was loaded from it.
         unsafe {
             let sym = |name: &[u8]| -> Result<*mut c_void, SteamError> {
                 library.get::<*mut c_void>(name).map(|s| *s).map_err(|err| {
@@ -237,6 +282,9 @@ impl Session {
     #[must_use]
     pub fn owns_app(&self) -> bool {
         // SAFETY: `apps` is the non-null interface pointer Steam returned, and
+        // it stays valid until `shutdown`, which only `Drop` calls. The
+        // function pointer came from the same `open_library` binding, and the
+        // one argument is a plain integer.
         unsafe { (self.is_subscribed_app)(self.apps, APP_ID) }
     }
 
@@ -250,6 +298,10 @@ impl Session {
     pub fn app_install_dir(&self) -> Option<PathBuf> {
         let mut buf = [0i8; 4096];
         // SAFETY: the buffer and its length are handed over together, and Steam
+        // writes at most that many bytes into it and NUL-terminates. The
+        // buffer is a live local for the whole call, and `c_field` below reads
+        // only up to the first NUL, so a Steam build that filled it without
+        // terminating still cannot read past the end.
         let written = unsafe {
             (self.get_app_install_dir)(
                 self.apps,
@@ -462,7 +514,10 @@ impl Session {
         let mut size = 0u64;
         let mut folder = [0i8; 4096];
         let mut updated = 0u32;
-        // SAFETY: every out-pointer is a live local, and the buffer's length is
+        // SAFETY: every out-pointer is a live local that outlives the call,
+        // and the buffer's length is passed alongside it, so Steam writes at
+        // most that many bytes. The interface pointer is valid for the same
+        // reason as in `owns_app`.
         let got = unsafe {
             (self.get_item_install_info)(
                 self.ugc,
@@ -495,6 +550,11 @@ impl Session {
 
     pub fn subscribe(&self, id: u64, timeout: std::time::Duration) -> Result<(), SteamError> {
         // SAFETY: interface pointers Steam returned, plain integers, and one
+        // out-buffer: `done` is a `MaybeUninit<SubscribeResult>` whose size is
+        // passed with it, so `GetAPICallResult` writes exactly that struct and
+        // no more. `assume_init` happens only after the call reported success
+        // and the failure flag came back clear, which is the point at which
+        // Steam has filled every field.
         unsafe {
             let call = (self.subscribe_item)(self.ugc, id);
             if call == 0 {
@@ -576,6 +636,9 @@ impl Session {
         let sort = query.sort.as_query();
 
         // SAFETY: every call below takes the interface pointer Steam handed us
+        // and a query handle Steam made, and the handle is released on every
+        // path out. The strings are `CString`s that outlive the calls they are
+        // passed to, and Steam copies them.
         unsafe {
             let handle = (self.create_query)(ugc, sort, 0, APP_ID, APP_ID, query.page.max(1));
             if handle == 0 || handle == u64::MAX {

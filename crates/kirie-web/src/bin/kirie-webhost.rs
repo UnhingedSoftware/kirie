@@ -34,9 +34,14 @@ fn main() {
     let height: u32 = arg("--height").and_then(|v| v.parse().ok()).unwrap_or(1080);
 
     let shm_len = SHM_HEADER + SHM_PIXELS;
-    // SAFETY: plain syscalls creating and sizing an anonymous fd we own.
+    // SAFETY: plain syscalls creating and sizing an anonymous fd we own. The
+    // name is a `c"..."` literal, so it is NUL-terminated and lives for the
+    // whole program, and `from_raw_fd` is given a descriptor nothing else
+    // holds. MFD_CLOEXEC keeps it out of the browser's own subprocesses: the
+    // only reader is the parent, which opens it by the /proc path printed
+    // below rather than by inheriting it.
     let (shm_file, shm_fd) = unsafe {
-        let fd = libc::memfd_create(c"kirie-web-frames".as_ptr(), 0);
+        let fd = libc::memfd_create(c"kirie-web-frames".as_ptr(), libc::MFD_CLOEXEC);
         if fd < 0 {
             eprintln!("kirie-webhost: memfd_create failed");
             std::process::exit(1);
@@ -47,7 +52,14 @@ fn main() {
         }
         (std::fs::File::from_raw_fd(fd), fd)
     };
-    // SAFETY: writable shared mapping of our own memfd; only this process maps
+    // SAFETY: the file is the anonymous memfd created just above, sized once
+    // and never resized or truncated afterwards, so the mapping cannot be torn
+    // out from under us the way a mapping of a real file could.
+    //
+    // The parent maps the same pages read-only and reads them while this loop
+    // writes, which the sequence number below coordinates: it is odd while a
+    // frame is going in and even once it is whole, so a reader that sees an
+    // odd number, or a different one either side of its copy, tries again.
     let mut shm = match unsafe { memmap2::MmapMut::map_mut(&shm_file) } {
         Ok(m) => m,
         Err(e) => {
@@ -142,6 +154,8 @@ fn main() {
             let len = frame.data.len();
             if key != last_pub && SHM_HEADER + len <= shm.len() {
                 last_pub = key;
+                // Odd while the frame is going in, even once it is whole.
+                // hosted.rs::poll_frame reads the other half of this.
                 seq += 1;
                 shm[0..8].copy_from_slice(&seq.to_le_bytes());
                 shm[8..12].copy_from_slice(&frame.width.to_le_bytes());

@@ -75,7 +75,6 @@ enum EvalFn {
 }
 
 pub struct WebKit {
-    _lib: libloading::Library,
     soname: &'static str,
     user_content_manager_new: UserContentManagerNew,
     user_content_manager_add_script: UserContentManagerAddScript,
@@ -91,6 +90,17 @@ pub struct WebKit {
     settings_set_enable_page_cache: Option<SettingsSetEnablePageCache>,
     settings_set_allow_file_access: Option<SettingsSetAllowFileAccess>,
     settings_set_write_console: Option<SettingsSetWriteConsoleToStdout>,
+    /// The open library, last so it outlives every field taken out of it, and
+    /// `ManuallyDrop` so it is never closed.
+    ///
+    /// Every field above is a bare `fn` pointer into this library's mapping,
+    /// with no lifetime tying it to the handle. Closing the handle would leave
+    /// them all dangling. Nothing ever needs it closed -- the one `WebKit`
+    /// lives in a `OnceLock` inside a function-local static and is never
+    /// dropped -- and on the failure path in `bind` this is what stops a
+    /// half-bound WebKitGTK from being unloaded after its initialisers, GType
+    /// registrations and `atexit` handlers have already run.
+    _lib: std::mem::ManuallyDrop<libloading::Library>,
 }
 
 impl WebKit {
@@ -114,6 +124,10 @@ impl WebKit {
             return;
         };
         // SAFETY: both aliases transcribe the WebKitGTK headers; the default
+        // web context is a process-wide singleton webkit owns, so it is live
+        // for as long as the process is, and the cache model is one of the
+        // enum's own values. The null check covers a webkit build that
+        // declines to make one.
         unsafe {
             let ctx = get_default();
             if !ctx.is_null() {
@@ -124,12 +138,20 @@ impl WebKit {
 
     pub fn new_web_view(&self, init_script: Option<&str>) -> *mut gtk::ffi::GtkWidget {
         // SAFETY: `webkit_user_content_manager_new` takes no arguments and
+        // returns a new reference the caller owns. The reference is handed to
+        // `webkit_web_view_new_with_user_content_manager` below, which takes
+        // its own, and the view drops it when it is destroyed.
         let manager = unsafe { (self.user_content_manager_new)() };
 
         if let Some(source) = init_script {
             match CString::new(source) {
                 Ok(source) => {
                     // SAFETY: `source` is a valid NUL-terminated C string that
+                    // outlives the call -- `CString::new` rejected any interior
+                    // NUL, and webkit copies the text rather than keeping the
+                    // pointer. The two flags are the header's own constants and
+                    // the two null pointers are the documented "no allow list,
+                    // no block list".
                     let script = unsafe {
                         (self.user_script_new)(
                             source.as_ptr(),
@@ -140,6 +162,9 @@ impl WebKit {
                         )
                     };
                     // SAFETY: both pointers were just produced by webkit's own
+                    // constructors above and neither has been freed. The
+                    // manager takes its own reference to the script, so the one
+                    // made here is allowed to go.
                     unsafe { (self.user_content_manager_add_script)(manager, script) };
                 }
                 Err(e) => tracing::warn!(error = %e, "init script contains a NUL; not injected"),
@@ -147,6 +172,9 @@ impl WebKit {
         }
 
         // SAFETY: `manager` is a live `WebKitUserContentManager`; the web view
+        // constructor accepts it and keeps a reference of its own. The widget
+        // that comes back is a floating `GtkWidget` the caller then parents,
+        // which is the ownership rule for every GTK widget constructor.
         unsafe { (self.web_view_new_with_user_content_manager)(manager) }
     }
 
@@ -156,6 +184,8 @@ impl WebKit {
             return;
         };
         // SAFETY: see `as_web_view`; `uri` is a valid NUL-terminated C
+        // string for the length of the call, which is all webkit needs -- it
+        // copies the text before returning.
         unsafe { (self.web_view_load_uri)(as_web_view(view), uri.as_ptr()) };
     }
 
@@ -167,21 +197,29 @@ impl WebKit {
             alpha: rgba[3],
         };
         // SAFETY: see `as_web_view`; `&rgba` is a valid `GdkRGBA` for the
+        // length of the call -- it is a local that outlives it, and `GdkRGBA`
+        // is four `f64`s in the order transcribed here, which webkit reads and
+        // does not keep.
         unsafe { (self.web_view_set_background_color)(as_web_view(view), &raw const rgba) };
     }
 
     pub fn set_autoplay(&self, view: &gtk::Widget, allow: bool) {
         // SAFETY: see `as_web_view`. `webkit_web_view_get_settings` returns a
+        // borrowed pointer the view owns rather than a new reference, so there
+        // is nothing to release, and the null check below covers the one case
+        // the headers leave open.
         let settings = unsafe { (self.web_view_get_settings)(as_web_view(view)) };
         if settings.is_null() {
             tracing::warn!("webkit view has no settings object; autoplay left at its default");
             return;
         }
         // SAFETY: `settings` is a live `WebKitSettings` owned by `view`, which
+        // outlives this call, and the argument is a plain `gboolean`.
         unsafe { (self.settings_set_media_gesture)(settings, c_int::from(!allow)) };
 
         if let Some(set_page_cache) = self.settings_set_enable_page_cache {
             // SAFETY: same live `WebKitSettings` as above; the value is a
+            // plain `gboolean`.
             unsafe { set_page_cache(settings, 0) };
         }
 
@@ -230,6 +268,8 @@ impl WebKit {
                 );
             },
             // SAFETY: as above, minus the length/world/source arguments this
+            // older entry point does not take. The three nulls are its
+            // documented "no cancellable, no callback, no user data".
             EvalFn::Run(f) => unsafe {
                 f(
                     view,
@@ -243,6 +283,13 @@ impl WebKit {
     }
 }
 
+/// The `WebKitWebView` behind a widget handle.
+///
+/// Every caller here got its widget from `new_web_view`, so the object really
+/// is a `WebKitWebView` and not some other widget, and `&gtk::Widget` keeps it
+/// alive for the length of the call. A `WebKitWebView` is a `GtkWidget` by
+/// inheritance, so the pointer is the same address either way; the cast only
+/// changes what Rust calls it.
 fn as_web_view(view: &gtk::Widget) -> *mut c_void {
     view.as_ptr().cast::<c_void>()
 }
@@ -251,6 +298,11 @@ fn open_first_available() -> Result<WebKit, String> {
     let mut rejected = Vec::new();
     for soname in SONAMES {
         // SAFETY: `dlopen` runs the library's initialisers, which is the
+        // unsoundness `Library::new` is marked for: an initialiser in an
+        // arbitrary library can do anything. These are the WebKitGTK sonames
+        // spelled out in `SONAMES`, not a path from the wallpaper or the
+        // command line, so what is being loaded is the same shared library
+        // this program would have linked against directly.
         let lib = match unsafe { libloading::Library::new(soname) } {
             Ok(lib) => lib,
             Err(e) => {
@@ -278,6 +330,12 @@ fn open_first_available() -> Result<WebKit, String> {
 
 fn bind(lib: libloading::Library, soname: &'static str) -> Result<WebKit, String> {
     // SAFETY: the aliases above transcribe the WebKitGTK headers verbatim, and
+    // `symbol` gives each resolved address exactly the signature the header
+    // declares for it, so calling one through its pointer is what the library
+    // expects. Each `?` here abandons the struct half-built, which is why `lib`
+    // is stored as a `ManuallyDrop`: the pointers already taken are discarded
+    // with it, and the library itself is left mapped rather than unloaded after
+    // its initialisers have run. See the note on `WebKit::_lib`.
     let webkit = unsafe {
         WebKit {
             soname,
@@ -312,17 +370,40 @@ fn bind(lib: libloading::Library, soname: &'static str) -> Result<WebKit, String
                 b"webkit_settings_set_enable_write_console_messages_to_stdout\0",
             )
             .ok(),
-            _lib: lib,
+            _lib: std::mem::ManuallyDrop::new(lib),
         }
     };
     Ok(webkit)
 }
 
+/// Resolve one symbol and copy it out as a bare `T`.
+///
+/// # Safety
+///
+/// `T` must be the type the symbol actually has -- in this file always a
+/// function pointer whose signature matches the WebKitGTK header. The value
+/// returned carries no lifetime, so the caller must keep the library mapped for
+/// as long as the value is used; `WebKit` does that by never closing it.
 unsafe fn symbol<T: Copy>(lib: &libloading::Library, name: &'static [u8]) -> Result<T, String> {
+    let readable = || String::from_utf8_lossy(&name[..name.len() - 1]).into_owned();
     // SAFETY: delegated to this function's own contract. `Library::get`
-    let symbol: libloading::Symbol<'_, T> = unsafe { lib.get(name) }.map_err(|e| {
-        let name = String::from_utf8_lossy(&name[..name.len() - 1]);
-        format!("missing symbol {name} ({e})")
-    })?;
+    // resolves the name in this library and hands back a `Symbol` borrowing it;
+    // it is `unsafe` because nothing checks that `T` is the symbol's real type,
+    // which is the contract above.
+    let symbol: libloading::Symbol<'_, T> =
+        unsafe { lib.get(name) }.map_err(|e| format!("missing symbol {} ({e})", readable()))?;
+
+    // `Library::get` answers `Ok` with a null address when `dlsym` returns null
+    // and `dlerror` says nothing -- an IFUNC resolver that answered null, say.
+    // Copying that out as a `T` would make a null function pointer, which is an
+    // invalid value of the type before anything is called, and would be
+    // indistinguishable from `None` in the `Option<...Fn>` fields below.
+    // SAFETY: reading the resolved address of a clone of the symbol, which
+    // borrows the same live library; the pointer is only compared, not called.
+    let address = unsafe { symbol.clone().try_as_raw_ptr() };
+    if address.is_none_or(|pointer| pointer.is_null()) {
+        return Err(format!("symbol {} resolved to null", readable()));
+    }
+
     Ok(*symbol)
 }

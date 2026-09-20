@@ -27,6 +27,12 @@ fn tell_scaler_the_colours(
     let full = i32::from(range == Range::JPEG);
 
     // SAFETY: the scaler is live and the coefficient tables belong to ffmpeg.
+    // `sws_getCoefficients` answers a pointer into ffmpeg's own static tables
+    // for any input -- out-of-range values get the default table rather than
+    // null -- so the two pointers handed to `sws_setColorspaceDetails` are
+    // always valid and are only read during the call. `scaler.as_mut_ptr()` is
+    // the SwsContext the borrow above keeps alive, and every other argument is
+    // a plain integer.
     unsafe {
         let coefficients = sws_getCoefficients(table);
         let target = sws_getCoefficients(SWS_CS_ITU709);

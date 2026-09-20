@@ -71,8 +71,22 @@ wrap_render_handler! {
             if buffer.is_null() || width <= 0 || height <= 0 {
                 return;
             }
-            let len = (width as usize) * (height as usize) * 4;
+            // Checked rather than plain arithmetic: a wrap on a 32-bit target
+            // would ask for fewer bytes than the buffer holds and put a corrupt
+            // frame on the screen.
+            let Some(len) = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+            else {
+                return;
+            };
             // SAFETY: CEF guarantees `buffer` points to `width * height * 4`
+            // bytes of BGRA with an upper-left origin, with no row padding, and
+            // that it is valid for the duration of this call. `width` and
+            // `height` are the ones it just handed us rather than any size held
+            // elsewhere, so they cannot have drifted from the buffer, and both
+            // were checked positive above. The bytes are copied out before the
+            // call returns.
             let data = unsafe { std::slice::from_raw_parts(buffer, len) }.to_vec();
             let frame = FrameBuffer {
                 data,

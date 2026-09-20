@@ -145,7 +145,13 @@ impl WebviewBackend {
             tracing::error!(url, soname = webkit.soname(), "webkit returned no web view");
             return Err(WebError::BrowserCreation);
         }
-        // SAFETY: `raw` is a non-null, freshly constructed `WebKitWebView` —
+        // SAFETY: `raw` is a non-null, freshly constructed `WebKitWebView` --
+        // checked just above -- and a `WebKitWebView` is a `GtkWidget` by
+        // inheritance, so the pointer is a valid one for this type. Widget
+        // constructors hand back a floating reference, and `from_glib_none`
+        // sinks it for an `InitiallyUnowned` type like this one, which is what
+        // makes the `gtk::Widget` the owner rather than leaving the reference
+        // for whoever parents the widget.
         let view: gtk::Widget = unsafe { from_glib_none(raw) };
 
         webkit.set_background_color(&view, [0.0, 0.0, 0.0, 1.0]);
@@ -206,6 +212,10 @@ impl WebviewBackend {
             return;
         };
         // SAFETY: `gtk_widget_destroy` is `unsafe` in gtk-rs because it
+        // leaves every other handle to the widget pointing at a destroyed
+        // object. `self.view.take()` above is what makes that safe here: this
+        // is the last handle, and nothing can ask for it again because the
+        // field is now empty.
         unsafe { view.destroy() };
     }
 
@@ -268,6 +278,9 @@ fn flush_pending_on_commit(
             return None;
         }
         // SAFETY: the `GValue` belongs to the emitting signal frame, so it is
+        // alive for the whole closure, and the `is_a(ENUM)` check above is the
+        // one precondition `g_value_get_enum` has -- reading a value of any
+        // other type through it is what would be undefined.
         let event = unsafe { glib::gobject_ffi::g_value_get_enum(event.to_glib_none().0) };
         if event != WEBKIT_LOAD_FINISHED {
             return None;
