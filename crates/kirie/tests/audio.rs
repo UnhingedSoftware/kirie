@@ -1,3 +1,7 @@
+// `compat::run` is the Linux desktop path, and the audio configuration these
+// tests read comes off it; the other platforms have no capture to configure.
+#![cfg(target_os = "linux")]
+
 use std::ffi::OsString;
 
 use kirie::compat::{args, run};

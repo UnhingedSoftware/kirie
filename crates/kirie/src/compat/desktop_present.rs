@@ -1,10 +1,30 @@
+//! Putting a wallpaper up on the platforms whose backend drives itself.
+//!
+//! macOS and Windows both hand kirie a plain loop and a channel of orders,
+//! rather than Wayland's event loop, so the two share this. Everything that
+//! differs between them is behind a `cfg` here: which backend to ask for, and
+//! whether web wallpapers have a view to live in.
+
 use std::process::ExitCode;
 
-use kirie_platform::{Platform, PresentOptions, RenderTarget, Renderer, RendererFactory, SurfaceSize};
+use kirie_platform::{
+    Backend, Platform, PresentOptions, RenderTarget, Renderer, RendererFactory, SurfaceSize,
+};
 
 use crate::compat::args::CompatArgs;
 use crate::compat::resolve::{self, Wallpaper};
 use crate::compat::screenshot::{Sound, build_presented_renderer};
+
+const fn desktop_backend() -> Backend {
+    #[cfg(target_os = "macos")]
+    {
+        Backend::Mac
+    }
+    #[cfg(windows)]
+    {
+        Backend::Windows
+    }
+}
 
 pub fn present(args: &CompatArgs) -> ExitCode {
     let Some(background) = background_of(args) else {
@@ -29,12 +49,17 @@ pub fn present(args: &CompatArgs) -> ExitCode {
     }
 
     if let Some(socket) = control_socket(args)
-        && crate::compat::mac_ipc::already_running(&socket)
+        && crate::compat::desktop_ipc::already_running(&socket)
     {
         eprintln!(
-            "another kirie already owns {} — stop it first (pkill -x kirie), or pass a \
+            "another kirie already owns {} — stop it first ({}), or pass a \
              different --control-socket",
-            socket.display()
+            socket.display(),
+            if cfg!(windows) {
+                "end kirie.exe in Task Manager"
+            } else {
+                "pkill -x kirie"
+            }
         );
         return ExitCode::FAILURE;
     }
@@ -50,22 +75,22 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         ..PresentOptions::default()
     };
 
-    let mut platform = match Platform::connect_with(
-        kirie_platform::Backend::Mac,
-        options,
-        factory(wallpaper.clone(), args),
-    ) {
-        Ok(platform) => platform,
-        Err(err) => {
-            eprintln!("cannot put a wallpaper on this desktop: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let mut platform =
+        match Platform::connect_with(desktop_backend(), options, factory(wallpaper.clone(), args)) {
+            Ok(platform) => platform,
+            Err(err) => {
+                eprintln!("cannot put a wallpaper on this desktop: {err}");
+                return ExitCode::FAILURE;
+            }
+        };
 
-    #[cfg(feature = "web-webview")]
+    // Web wallpapers need somewhere for a browser view to live, which so far
+    // only the macOS backend has; on Windows the scene, video and image
+    // wallpapers go up and a web one is refused earlier, by `unrunnable_reason`.
+    #[cfg(all(target_os = "macos", feature = "web-webview"))]
     if let Wallpaper::Web { dir, file } = &wallpaper {
         let url = resolve::web_entry_url(dir, file);
-        let level = crate::compat::mac_ipc::level_of(Sound {
+        let level = crate::compat::desktop_ipc::level_of(Sound {
             volume: args.volume,
             silent: args.silent,
         });
@@ -94,7 +119,7 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         }
     }
 
-    let showing = crate::compat::mac_ipc::Showing::new(
+    let showing = crate::compat::desktop_ipc::Showing::new(
         &platform.screen_names(),
         Some(std::path::Path::new(&background)),
         args.playback_speed as f32,
@@ -109,7 +134,7 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         let held = std::sync::Arc::clone(&showing);
         let started = std::thread::Builder::new()
             .name("kirie-control".to_owned())
-            .spawn(move || crate::compat::mac_ipc::serve(socket, orders, held, spoken));
+            .spawn(move || crate::compat::desktop_ipc::serve(socket, orders, held, spoken));
         if let Err(err) = started {
             tracing::warn!(%err, "no control socket thread");
         }
@@ -147,10 +172,6 @@ fn factory(wallpaper: Wallpaper, args: &CompatArgs) -> RendererFactory {
     };
 
     Box::new(move |target: &RenderTarget<'_>| {
-        let size = SurfaceSize {
-            width: target.size.0,
-            height: target.size.1,
-        };
         match build_presented_renderer(target, &wallpaper, scaling, clamp, &properties, sound) {
             Ok(renderer) => renderer,
             Err(err) => {

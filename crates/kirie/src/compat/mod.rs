@@ -10,10 +10,13 @@ pub mod common;
 #[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;
-#[cfg(unix)]
-pub mod mac_ipc;
-#[cfg(target_os = "macos")]
-pub mod mac_present;
+// The control socket for the backends that drive themselves rather than an
+// event loop: macOS and Windows. Linux has `ipc_app` instead, which lives
+// inside calloop.
+#[cfg(not(target_os = "linux"))]
+pub mod desktop_ipc;
+#[cfg(any(target_os = "macos", windows))]
+pub mod desktop_present;
 pub mod playlist;
 #[cfg(target_os = "linux")]
 pub mod power;
@@ -76,7 +79,7 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        offscreen_only(validated)
+        dispatch(validated)
     }
 }
 
@@ -171,8 +174,12 @@ fn init_tracing() {
     });
 }
 
+/// What `run::dispatch` is on Linux: work out what was asked for and do it.
+///
+/// Listing properties and taking a screenshot need no desktop at all, so they
+/// are answered first; anything else means putting a wallpaper up.
 #[cfg(not(target_os = "linux"))]
-fn offscreen_only(args: args::CompatArgs) -> ExitCode {
+fn dispatch(args: args::CompatArgs) -> ExitCode {
     common::set_render_scale(args.render_scale as f32);
     kirie_render::set_focus(args.focus.0, args.focus.1);
     common::set_fit_render_to_output(args.fit_render_to_output);
@@ -221,11 +228,13 @@ fn offscreen_only(args: args::CompatArgs) -> ExitCode {
         };
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
-        mac_present::present(&args)
+        desktop_present::present(&args)
     }
-    #[cfg(not(target_os = "macos"))]
+    // Linux, macOS and Windows have a backend each. Anywhere else kirie still
+    // renders -- off-screen, which is all `--screenshot` and `preview` need.
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         eprintln!(
             "this build renders off-screen only: --screenshot, `preview` and `list` work, putting a wallpaper on a screen does not"

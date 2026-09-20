@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+use kirie_ipc::{UnixListener, UnixStream};
 use kirie_platform::{RenderCommand, RenderTarget, Renderer, SurfaceSize};
 
 use crate::compat::args::{ClampMode, CompatArgs, ScalingMode};
@@ -219,6 +219,13 @@ pub fn serve_relaunching(socket: PathBuf, showing: Arc<Showing>) {
     }
 }
 
+// Swapping a web wallpaper means starting over with a new page, because the
+// view that holds it belongs to the window. Only the macOS webview backend has
+// one of those; everywhere else a web wallpaper was refused before it got here.
+#[cfg(not(target_os = "macos"))]
+fn restart_with(_wallpaper: &str) {}
+
+#[cfg(target_os = "macos")]
 fn restart_with(wallpaper: &str) {
     use std::os::unix::process::CommandExt as _;
 
@@ -381,7 +388,7 @@ fn set(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args:
             "ok\n".to_owned()
         }
         "batteryfps" => {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             kirie_platform::set_battery_fps(value.trim().parse::<u32>().unwrap_or(0));
             "ok\n".to_owned()
         }
