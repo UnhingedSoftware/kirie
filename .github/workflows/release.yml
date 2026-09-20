@@ -26,10 +26,15 @@ name: Release
 #                        installed; Wayland only for web items. Built on
 #                        glibc 2.35.
 #
-# No Windows artifacts: kirie's presentation layer is Linux-native (Wayland
-# wlr-layer-shell + X11 fallback, PulseAudio, memfd) - on Windows the original
-# Wallpaper Engine is the native app. A Windows port would be a new platform
-# backend, not a packaging change.
+#   kirie-windows-x86_64.exe
+#                      - Windows 10 1809 or newer, x86_64. Scenes, video and
+#                        images on the desktop, behind the icons, through the
+#                        WorkerW window Explorer keeps for the wallpaper. No web
+#                        wallpapers: there is no browser view in the Windows
+#                        backend yet, and one is refused with a reason rather
+#                        than shown blank. ffmpeg comes from vcpkg and shaderc is
+#                        built from source, both linked in, so the download is
+#                        one file that needs nothing installed.
 #
 # Job shape: default + web-cef build IN ONE JOB on a local org runner (the
 # focal-based runner image IS the glibc 2.31 floor debian:11 used to provide;
@@ -339,9 +344,108 @@ jobs:
           retention-days: 1
 
 
+
+  # 3b. Windows: one self-contained .exe. ffmpeg comes from vcpkg rather than
+  #     from scripts/build-ffmpeg.sh, because that script wants a unix shell,
+  #     nasm and `make`; vcpkg is the route ffmpeg-sys-next supports on MSVC,
+  #     and it is the only one that also names the Windows system libraries a
+  #     static avformat needs (secur32, ws2_32). Setting FFMPEG_DIR here would
+  #     skip that path and under-link, so it deliberately stays unset.
+  build-windows:
+    needs: [prepare, test]
+    env:
+      V: ${{ needs.prepare.outputs.version }}
+      # Static ffmpeg against the dynamic CRT: that is the combination Rust's
+      # MSVC target links, and the one shaderc-sys builds itself with (/MD).
+      TRIPLET: x64-windows-static-md
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: kirie-windows-x86_64
+
+      # shaderc-sys carries glslang and SPIRV-Tools in the crate and builds them
+      # with cmake; on MSVC it insists on Ninja, which the runner image does not
+      # ship. cmake, git and python it already has.
+      - name: Install ninja
+        run: choco install ninja --no-progress -y
+
+      # Building ffmpeg takes longer than everything else here put together, and
+      # what it produces only changes when vcpkg's own checkout does.
+      # VCPKG_INSTALLATION_ROOT comes from the runner image rather than from
+      # this file, so it is not in the `env` context a `with:` can read — hence
+      # passing it out as a step output.
+      - name: Find vcpkg
+        id: vcpkg
+        run: |
+          set -euo pipefail
+          root="${VCPKG_INSTALLATION_ROOT:-C:/vcpkg}"
+          echo "root=$root" >> "$GITHUB_OUTPUT"
+          echo "rev=$(git -C "$root" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Cache the ffmpeg vcpkg built
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.vcpkg.outputs.root }}/installed
+          key: vcpkg-ffmpeg-${{ env.TRIPLET }}-${{ steps.vcpkg.outputs.rev }}
+
+      # The same four libraries the crate asks for: codec, format,
+      # software-scaling and software-resampling, and nothing else.
+      - name: Build a static ffmpeg
+        run: |
+          set -euo pipefail
+          "${{ steps.vcpkg.outputs.root }}/vcpkg" install \
+            "ffmpeg[core,avcodec,avformat,swresample,swscale]:$TRIPLET"
+
+      - name: Set crate version
+        run: |
+          v="${{ needs.prepare.outputs.version }}"; v="${v#v}"
+          sed -i -E "0,/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/s//version = \"$v\"/" Cargo.toml
+
+      # No FFMPEG_DIR: see the note on this job. VCPKG_ROOT is what the vcpkg
+      # crate reads, and VCPKGRS_TRIPLET pins it to the same triplet built above
+      # instead of letting it guess.
+      - name: Build (self-contained)
+        env:
+          VCPKG_ROOT: ${{ steps.vcpkg.outputs.root }}
+          VCPKGRS_TRIPLET: x64-windows-static-md
+        run: KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable
+
+      # `dumpbin` lives in the MSVC toolchain, which cargo finds by itself but
+      # which is not on PATH until something puts it there.
+      - name: Put the MSVC tools on PATH
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # Anything outside System32 in this list would have to ship beside the
+      # exe, which is the one thing a single-file download cannot do.
+      - name: Check it carries its own ffmpeg
+        run: |
+          set -euo pipefail
+          linked="$(dumpbin //DEPENDENTS target/release/kirie.exe)"
+          echo "$linked"
+          if echo "$linked" | grep -iqE 'av(codec|format|util|device|filter)|sw(scale|resample)|shaderc'; then
+            echo "::error::ffmpeg or shaderc is a DLL here — it must be linked in"; exit 1
+          fi
+          echo "ok: ffmpeg and shaderc are linked in"
+
+      - name: Stage binary
+        run: cp target/release/kirie.exe kirie-windows-x86_64.exe
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kirie-windows-x86_64.exe
+          path: kirie-windows-x86_64.exe
+          if-no-files-found: error
+          retention-days: 1
+
+
   # 4. Create/update the draft release once, with all built artifacts + notes.
   release:
-    needs: [prepare, build-linux, build-webview, build-macos]
+    needs: [prepare, build-linux, build-webview, build-macos, build-windows]
     runs-on: ubuntu-latest
     env:
       GH_TOKEN: ${{ github.token }}
@@ -375,6 +479,7 @@ jobs:
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
           | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Self-contained; run `xattr -d com.apple.quarantine kirie-macos-aarch64` once, since it is not notarized. |
+          | `kirie-windows-x86_64.exe` | Windows 10 1809 or newer — scenes, video and images on the desktop behind the icons. Self-contained; web wallpapers are not supported yet. SmartScreen will warn once, since it is not signed. |
 
           EOF
           echo "attaching:"; echo "$files"

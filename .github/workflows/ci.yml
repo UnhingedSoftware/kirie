@@ -37,3 +37,40 @@ jobs:
 
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # The port to Windows is only a port while something checks it. The crate that
+  # owns the Windows desktop, the one that owns the control socket, the launcher
+  # and the audio device are where every `cfg(windows)` branch lives, and none of
+  # them needs ffmpeg or shaderc — so cross-compiling just those catches the
+  # regression that matters, a `std::os::unix` import creeping back in, on the
+  # same runner and in seconds.
+  #
+  # The rest of the workspace is not cross-checked here on purpose: it reaches
+  # ffmpeg, which would mean a Windows ffmpeg on a Linux runner. The release
+  # workflow builds the whole thing on Windows, where that is somebody else's
+  # problem.
+  windows:
+    name: Windows cross-check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+
+      # Some build scripts compile C for the target.
+      - name: Install the mingw toolchain
+        run: sudo apt-get update && sudo apt-get install -y mingw-w64
+
+      - name: Cross-check the platform crates
+        env:
+          CC_x86_64_pc_windows_gnu: x86_64-w64-mingw32-gcc
+          CXX_x86_64_pc_windows_gnu: x86_64-w64-mingw32-g++
+          AR_x86_64_pc_windows_gnu: x86_64-w64-mingw32-ar
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          cargo clippy --target x86_64-pc-windows-gnu --all-targets \
+            -p kirie-platform -p kirie-ipc -p kirie-launcher -p kirie-audio \
+            -- -D warnings
