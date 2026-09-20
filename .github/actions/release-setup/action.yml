@@ -1,8 +1,10 @@
 name: Release build setup
 description: >
-  Shared setup for the containerized release builds: apt build deps, rustup
-  (current stable, minimal), pip cmake (>=3.22 for shaderc's SPIRV-Tools on
-  debian:11), and the cargo/target cache. Uses plain actions/cache with a
+  Shared setup for the Linux release builds: apt build deps, rustup (current
+  stable, minimal), pip cmake (>=3.22, which shaderc's SPIRV-Tools needs and
+  jammy's apt does not have), and the cargo/target cache. Written when these
+  builds ran in containers, so it still installs everything and copes with
+  running as root. Uses plain actions/cache with a
   restore-keys prefix fallback so a Cargo.lock change restores the previous
   cache and rebuilds only the delta — the from-source static ffmpeg/shaderc
   artifacts in target/ survive across releases (Swatinem/rust-cache never
