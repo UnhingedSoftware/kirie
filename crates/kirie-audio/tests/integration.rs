@@ -1,6 +1,10 @@
 use std::time::{Duration, Instant};
 
-use kirie_audio::{AudioCapture, AudioConfig, AutoMute, CaptureStatus};
+use kirie_audio::{AudioCapture, AudioConfig, CaptureStatus};
+// Capture, and with it the auto-mute that watches for it, exists only on Linux
+// for now; the other platforms build the crate but never hear anything.
+#[cfg(target_os = "linux")]
+use kirie_audio::AutoMute;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer, Split};
 
@@ -43,6 +47,7 @@ fn ring_overflow_and_underflow() {
     assert_eq!(cons.pop_slice(&mut buf), 0);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn automute_disabled_never_plays() {
     let am = AutoMute::disabled();
@@ -51,6 +56,7 @@ fn automute_disabled_never_plays() {
     drop(am);
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn automute_enabled_starts_and_stops() {
     let am = AutoMute::start(true);

@@ -1,5 +1,4 @@
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 
 pub const SENTINEL: &str = "KIRIE_ICD_AUTO";
@@ -9,6 +8,8 @@ const RECOVERED: &str = "KIRIE_ICD_AUTO_FAILED";
 const OPT_IN: &str = "KIRIE_AUTO_PIN";
 
 pub fn auto_pin(argv: &[OsString]) {
+    use std::os::unix::process::CommandExt as _;
+
     if std::env::var_os(OPT_IN).is_none() {
         return;
     }
@@ -39,6 +40,8 @@ pub fn auto_pin(argv: &[OsString]) {
 }
 
 pub fn recover_from_bad_pin() {
+    use std::os::unix::process::CommandExt as _;
+
     if std::env::var_os(SENTINEL).is_none() || std::env::var_os(RECOVERED).is_some() {
         return;
     }

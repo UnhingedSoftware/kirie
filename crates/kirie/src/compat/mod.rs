@@ -1,13 +1,22 @@
 pub mod args;
+// Pinning a Vulkan ICD means re-executing kirie with `VK_DRIVER_FILES` set, so
+// the loader picks one driver out of several installed side by side. Windows
+// renders through DX12, lists its drivers in the registry rather than in ICD
+// manifests, and has no `exec` to re-enter itself with, so none of this
+// applies there.
+#[cfg(unix)]
 pub mod autopin;
 pub mod common;
 #[cfg(target_os = "linux")]
 pub mod ipc_app;
 pub mod list_props;
-#[cfg(unix)]
-pub mod mac_ipc;
-#[cfg(target_os = "macos")]
-pub mod mac_present;
+// The control socket for the backends that drive themselves rather than an
+// event loop: macOS and Windows. Linux has `ipc_app` instead, which lives
+// inside calloop.
+#[cfg(not(target_os = "linux"))]
+pub mod desktop_ipc;
+#[cfg(any(target_os = "macos", windows))]
+pub mod desktop_present;
 pub mod playlist;
 #[cfg(target_os = "linux")]
 pub mod power;
@@ -22,7 +31,6 @@ pub mod steam;
 pub mod webfeed;
 
 use std::ffi::OsString;
-use std::os::unix::process::CommandExt;
 use std::process::ExitCode;
 use std::sync::Once;
 
@@ -33,6 +41,7 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     #[cfg(feature = "web-webview")]
     kirie_web::viewhost::set_embedded_host(include_bytes!(env!("KIRIE_WEBVIEWHOST_BLOB")));
 
+    #[cfg(unix)]
     autopin::auto_pin(argv);
     pin_gpu(argv);
     init_tracing();
@@ -70,11 +79,19 @@ pub fn run(argv: &[OsString]) -> ExitCode {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        offscreen_only(validated)
+        dispatch(validated)
     }
 }
 
+// `--gpu` is the same ICD pinning `autopin` does, asked for by hand rather
+// than guessed at, and it is Linux and macOS for the same reasons.
+#[cfg(not(unix))]
+fn pin_gpu(_argv: &[OsString]) {}
+
+#[cfg(unix)]
 fn pin_gpu(argv: &[OsString]) {
+    use std::os::unix::process::CommandExt as _;
+
     const SENTINEL: &str = "KIRIE_GPU_PINNED";
     if std::env::var_os(SENTINEL).is_some() {
         return;
@@ -107,6 +124,8 @@ fn pin_gpu(argv: &[OsString]) {
     eprintln!("kirie: could not re-exec to pin {}: {err}", manifest.display());
 }
 
+// Only the ICD pinning above reads `--gpu`, so this goes wherever that goes.
+#[cfg(unix)]
 fn gpu_selector(argv: &[OsString]) -> Option<String> {
     let mut it = argv.iter().skip(1);
     while let Some(a) = it.next() {
@@ -155,8 +174,12 @@ fn init_tracing() {
     });
 }
 
+/// What `run::dispatch` is on Linux: work out what was asked for and do it.
+///
+/// Listing properties and taking a screenshot need no desktop at all, so they
+/// are answered first; anything else means putting a wallpaper up.
 #[cfg(not(target_os = "linux"))]
-fn offscreen_only(args: args::CompatArgs) -> ExitCode {
+fn dispatch(args: args::CompatArgs) -> ExitCode {
     common::set_render_scale(args.render_scale as f32);
     kirie_render::set_focus(args.focus.0, args.focus.1);
     common::set_fit_render_to_output(args.fit_render_to_output);
@@ -205,11 +228,13 @@ fn offscreen_only(args: args::CompatArgs) -> ExitCode {
         };
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     {
-        mac_present::present(&args)
+        desktop_present::present(&args)
     }
-    #[cfg(not(target_os = "macos"))]
+    // Linux, macOS and Windows have a backend each. Anywhere else kirie still
+    // renders -- off-screen, which is all `--screenshot` and `preview` need.
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         eprintln!(
             "this build renders off-screen only: --screenshot, `preview` and `list` work, putting a wallpaper on a screen does not"

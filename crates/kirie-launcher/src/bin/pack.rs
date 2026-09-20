@@ -1,5 +1,6 @@
 use std::fs::{self, File};
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -92,9 +93,14 @@ fn pack(build_dir: &Path, output: &Path) -> io::Result<PackInfo> {
     out.write_all(&(blob.len() as u64).to_le_bytes())?;
     out.write_all(key.as_bytes())?;
     out.flush()?;
-    let mut perms = fs::metadata(output)?.permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(output, perms)?;
+    // The packed file is a program, which Unix records in its mode bits and
+    // Windows takes from the extension.
+    #[cfg(unix)]
+    {
+        let mut perms = fs::metadata(output)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(output, perms)?;
+    }
 
     Ok(PackInfo {
         stub_len: stub_bytes.len(),

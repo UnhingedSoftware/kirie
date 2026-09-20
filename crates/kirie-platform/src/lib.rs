@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod backend;
 mod error;
 mod gpu;
@@ -20,10 +20,16 @@ mod snapshot;
 mod test_pattern;
 #[cfg(target_os = "linux")]
 mod toplevel;
+#[cfg(windows)]
+mod win32;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub use windows::set_battery_fps;
 #[cfg(target_os = "linux")]
 mod x11;
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub use backend::{Backend, Platform, PresentOptions};
 pub use error::PlatformError;
 pub use gpu::{

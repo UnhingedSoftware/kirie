@@ -58,4 +58,8 @@ pub enum PlatformError {
     #[cfg(target_os = "macos")]
     #[error("cannot prepare the desktop window: {0}")]
     MacWindow(String),
+
+    #[cfg(windows)]
+    #[error("the desktop has no window to draw wallpapers in; is Explorer running?")]
+    NoDesktopHost,
 }

@@ -4,6 +4,8 @@ use crate::error::PlatformError;
 #[cfg(target_os = "linux")]
 use crate::platform::WaylandPlatform;
 use crate::renderer::RendererFactory;
+#[cfg(windows)]
+use crate::windows::WindowsPlatform;
 #[cfg(target_os = "linux")]
 use crate::x11::{X11Mode, X11Platform};
 
@@ -48,11 +50,17 @@ pub enum Backend {
     X11,
     #[cfg(target_os = "macos")]
     Mac,
+    #[cfg(windows)]
+    Windows,
 }
 
 impl Backend {
     #[must_use]
     pub fn from_env() -> Self {
+        #[cfg(windows)]
+        {
+            Backend::Windows
+        }
         #[cfg(target_os = "macos")]
         {
             Backend::Mac
@@ -78,6 +86,8 @@ pub enum Platform {
     X11(X11Platform),
     #[cfg(target_os = "macos")]
     Mac(crate::macos::MacPlatform),
+    #[cfg(windows)]
+    Windows(WindowsPlatform),
 }
 
 impl Platform {
@@ -107,6 +117,11 @@ impl Platform {
                 make_renderer,
                 options,
             )?)),
+            #[cfg(windows)]
+            Backend::Windows => Ok(Self::Windows(WindowsPlatform::connect_with(
+                make_renderer,
+                options,
+            )?)),
         }
     }
 
@@ -124,6 +139,8 @@ impl Platform {
             Self::X11(p) => p.output_count(),
             #[cfg(target_os = "macos")]
             Self::Mac(p) => p.output_count(),
+            #[cfg(windows)]
+            Self::Windows(p) => p.output_count(),
         }
     }
 
@@ -136,6 +153,8 @@ impl Platform {
             Self::X11(p) => p.surface_count(),
             #[cfg(target_os = "macos")]
             Self::Mac(p) => p.surface_count(),
+            #[cfg(windows)]
+            Self::Windows(p) => p.surface_count(),
         }
     }
 
@@ -149,6 +168,8 @@ impl Platform {
             Self::X11(_) => None,
             #[cfg(target_os = "macos")]
             Self::Mac(_) => None,
+            #[cfg(windows)]
+            Self::Windows(_) => None,
         }
     }
 
@@ -161,22 +182,32 @@ impl Platform {
             Self::X11(_) => {}
             #[cfg(target_os = "macos")]
             Self::Mac(_) => {}
+            #[cfg(windows)]
+            Self::Windows(_) => {}
         }
     }
 
-    #[cfg(target_os = "macos")]
+    /// Where to send commands on the backends that have no event loop of their
+    /// own to wake -- everything but Wayland, which has calloop.
+    #[cfg(any(target_os = "macos", windows))]
     #[must_use]
     pub fn orders(&self) -> std::sync::mpsc::Sender<crate::renderer::RenderCommand> {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Mac(p) => p.orders(),
+            #[cfg(windows)]
+            Self::Windows(p) => p.orders(),
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     #[must_use]
     pub fn screen_names(&self) -> Vec<String> {
         match self {
+            #[cfg(target_os = "macos")]
             Self::Mac(p) => p.screen_names(),
+            #[cfg(windows)]
+            Self::Windows(p) => p.screen_names(),
         }
     }
 
@@ -188,6 +219,8 @@ impl Platform {
             Self::X11(p) => p.run(duration),
             #[cfg(target_os = "macos")]
             Self::Mac(p) => p.run(duration),
+            #[cfg(windows)]
+            Self::Windows(p) => p.run(duration),
         }
     }
 }

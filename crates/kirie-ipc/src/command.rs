@@ -1,6 +1,6 @@
-use std::ffi::OsStr;
-use std::os::unix::ffi::OsStrExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+
+use crate::os::{looks_like_a_path, path_bytes, path_from_bytes};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -142,8 +142,8 @@ impl Command {
                 SetOption::AudioDevice(s) => format!("set audiodevice {s}"),
             }
             .into_bytes(),
-            Self::Bg { screen, path } => join(&[b"bg", screen.as_bytes(), path.as_os_str().as_bytes()]),
-            Self::Preload { path } => join(&[b"preload", path.as_os_str().as_bytes()]),
+            Self::Bg { screen, path } => join(&[b"bg", screen.as_bytes(), &path_bytes(path)]),
+            Self::Preload { path } => join(&[b"preload", &path_bytes(path)]),
             Self::Property { screen, key, value } => {
                 join(&[b"property", screen.as_bytes(), key.as_bytes(), value.as_bytes()])
             }
@@ -151,7 +151,7 @@ impl Command {
                 join(&[b"scaling", screen.as_bytes(), mode.as_str().as_bytes()])
             }
             Self::Clamp { screen, mode } => join(&[b"clamp", screen.as_bytes(), mode.as_str().as_bytes()]),
-            Self::Screenshot { path } => join(&[b"screenshot", path.as_os_str().as_bytes()]),
+            Self::Screenshot { path } => join(&[b"screenshot", &path_bytes(path)]),
         }
     }
 }
@@ -298,7 +298,7 @@ fn rest_string(cur: &mut Cursor<'_>) -> String {
 }
 
 fn rest_path(cur: &mut Cursor<'_>) -> PathBuf {
-    PathBuf::from(OsStr::from_bytes(cur.rest()).to_os_string())
+    path_from_bytes(cur.rest())
 }
 
 const EVERY_SCREEN: &str = "*";
@@ -320,12 +320,8 @@ fn parse_bg(cur: &mut Cursor<'_>) -> (String, PathBuf) {
     (screen, path_of(path))
 }
 
-fn looks_like_a_path(bytes: &[u8]) -> bool {
-    bytes.starts_with(b"/") || bytes.starts_with(b"~/") || Path::new(OsStr::from_bytes(bytes)).exists()
-}
-
 fn path_of(bytes: &[u8]) -> PathBuf {
-    PathBuf::from(OsStr::from_bytes(bytes).to_os_string())
+    path_from_bytes(bytes)
 }
 
 fn parse_workshop(cur: &mut Cursor<'_>) -> Request {
@@ -750,8 +746,14 @@ mod tests {
         assert_eq!(cmd(b"screenshot"), Command::Screenshot { path: PathBuf::new() });
     }
 
+    // A Unix path is bytes, and a wallpaper directory named in some other
+    // encoding still has to reach the renderer intact. Windows paths are UTF-16
+    // and cross the wire as UTF-8, so there is nothing to preserve there.
+    #[cfg(unix)]
     #[test]
     fn non_utf8_paths_survive() {
+        use std::os::unix::ffi::OsStrExt;
+
         let line = b"bg HDMI-A-1 /weird/\xff\xfe/dir";
         let Command::Bg { path, .. } = cmd(line) else {
             panic!("expected bg")

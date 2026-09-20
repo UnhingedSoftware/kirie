@@ -1,12 +1,12 @@
 use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::net::Shutdown;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
 use kirie::compat::args::{self, ClampMode, ScalingMode, WindowMode};
+use kirie_ipc::UnixStream;
 
 const CORPUS_VIDEO: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960/3600453929";
 const CORPUS_SCENE: &str = "/home/aiko/.steam/steam/steamapps/workshop/content/431960/3047596375";

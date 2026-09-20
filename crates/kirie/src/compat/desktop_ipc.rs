@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
+use kirie_ipc::{UnixListener, UnixStream};
 use kirie_platform::{RenderCommand, RenderTarget, Renderer, SurfaceSize};
 
 use crate::compat::args::{ClampMode, CompatArgs, ScalingMode};
@@ -219,6 +219,13 @@ pub fn serve_relaunching(socket: PathBuf, showing: Arc<Showing>) {
     }
 }
 
+// Swapping a web wallpaper means starting over with a new page, because the
+// view that holds it belongs to the window. Only the macOS webview backend has
+// one of those; everywhere else a web wallpaper was refused before it got here.
+#[cfg(not(target_os = "macos"))]
+fn restart_with(_wallpaper: &str) {}
+
+#[cfg(target_os = "macos")]
 fn restart_with(wallpaper: &str) {
     use std::os::unix::process::CommandExt as _;
 
@@ -381,7 +388,7 @@ fn set(rest: &str, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args:
             "ok\n".to_owned()
         }
         "batteryfps" => {
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", windows))]
             kirie_platform::set_battery_fps(value.trim().parse::<u32>().unwrap_or(0));
             "ok\n".to_owned()
         }
@@ -433,9 +440,18 @@ fn put_up(
     if let Wallpaper::Web { dir, file } = &wallpaper {
         return hand_to_web(dir, file, path, orders, showing);
     }
-    #[cfg(not(all(target_os = "macos", feature = "web-webview")))]
+    // Without a webview, swapping to a web wallpaper means starting the whole
+    // process over on the new page. macOS can do that, so it answers "ok" and
+    // `restart_with` re-execs. Windows has neither a view to put a page in nor
+    // an `exec` to restart through, so say so rather than answer "ok" and leave
+    // the old wallpaper up.
+    #[cfg(all(target_os = "macos", not(feature = "web-webview")))]
     if matches!(wallpaper, Wallpaper::Web { .. }) {
         return ("ok\n".to_owned(), Some(path.to_owned()));
+    }
+    #[cfg(not(target_os = "macos"))]
+    if matches!(wallpaper, Wallpaper::Web { .. }) {
+        return refused(path, "web wallpapers are not supported on this platform");
     }
 
     for name in showing.meaning(screen) {

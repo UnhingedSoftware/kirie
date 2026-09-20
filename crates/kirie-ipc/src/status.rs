@@ -1,5 +1,6 @@
-use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
+
+use crate::os::path_bytes;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct StatusSnapshot {
@@ -25,7 +26,7 @@ pub(crate) fn format_status(snapshot: &StatusSnapshot) -> Vec<u8> {
         out.extend_from_slice(sc.screen.as_bytes());
         out.extend_from_slice(b" bg=");
         if let Some(p) = &sc.bg {
-            out.extend_from_slice(p.as_os_str().as_bytes());
+            out.extend_from_slice(&path_bytes(p));
         }
         out.push(b'\n');
     }

@@ -20,7 +20,7 @@ pub fn power_preference() -> wgpu::PowerPreference {
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) struct Gpu {
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
