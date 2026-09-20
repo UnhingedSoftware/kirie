@@ -440,9 +440,18 @@ fn put_up(
     if let Wallpaper::Web { dir, file } = &wallpaper {
         return hand_to_web(dir, file, path, orders, showing);
     }
-    #[cfg(not(all(target_os = "macos", feature = "web-webview")))]
+    // Without a webview, swapping to a web wallpaper means starting the whole
+    // process over on the new page. macOS can do that, so it answers "ok" and
+    // `restart_with` re-execs. Windows has neither a view to put a page in nor
+    // an `exec` to restart through, so say so rather than answer "ok" and leave
+    // the old wallpaper up.
+    #[cfg(all(target_os = "macos", not(feature = "web-webview")))]
     if matches!(wallpaper, Wallpaper::Web { .. }) {
         return ("ok\n".to_owned(), Some(path.to_owned()));
+    }
+    #[cfg(not(target_os = "macos"))]
+    if matches!(wallpaper, Wallpaper::Web { .. }) {
+        return refused(path, "web wallpapers are not supported on this platform");
     }
 
     for name in showing.meaning(screen) {

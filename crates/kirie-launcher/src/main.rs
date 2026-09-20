@@ -135,6 +135,21 @@ fn prune_old_runtimes(root: &Path, keep: &str) {
     }
 }
 
+/// Where the runtime this binary carries gets unpacked.
+///
+/// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so asking for those found
+/// nothing and the launcher gave up before it extracted anything.
+/// `%LOCALAPPDATA%` is the same idea under a different name.
+#[cfg(windows)]
+fn cache_root() -> io::Result<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| io::Error::other("LOCALAPPDATA is not set"))?;
+    Ok(base.join("kirie").join("rt"))
+}
+
+#[cfg(unix)]
 fn cache_root() -> io::Result<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)

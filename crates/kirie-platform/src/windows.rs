@@ -62,6 +62,10 @@ pub struct WindowsPlatform {
     orders: std::sync::mpsc::Sender<crate::renderer::RenderCommand>,
     incoming: std::sync::mpsc::Receiver<crate::renderer::RenderCommand>,
     speed: f32,
+    /// Whether the wallpaper takes mouse clicks rather than letting them fall
+    /// through to the desktop. Kept because a window rebuilt after Explorer
+    /// restarts has to be made the same way as the one it replaces.
+    take_clicks: bool,
 }
 
 impl WindowsPlatform {
@@ -142,6 +146,7 @@ impl WindowsPlatform {
             orders,
             incoming,
             speed: options.playback_speed as f32,
+            take_clicks: options.take_clicks,
         };
         for index in 0..platform.outputs.len() {
             platform.configure_swapchain(index);
@@ -352,11 +357,15 @@ impl WindowsPlatform {
     /// Make a screen's window again after Explorer destroyed it, and give it a
     /// new surface. The renderer itself survives; only its canvas was lost.
     fn rebuild_window(&mut self, index: usize, host: win32::Handle) {
-        let Some(output) = self.outputs.get(index) else {
+        let Some(output) = self.outputs.get_mut(index) else {
             return;
         };
+        // The window this surface was made from is already gone, so let go of
+        // it before anything else can ask it for another frame.
+        output.wgpu_surface = None;
+        output.configured = false;
         let (rect, name) = (output.rect, output.name.clone());
-        let Some(window) = win32::desktop_window(host, rect, false) else {
+        let Some(window) = win32::desktop_window(host, rect, self.take_clicks) else {
             tracing::error!(output = %name, "could not make the wallpaper window again");
             return;
         };
@@ -476,6 +485,17 @@ impl WindowsPlatform {
             .ignore
             .iter()
             .any(|wanted| program == *wanted || program.trim_end_matches(".exe") == wanted)
+    }
+
+    /// How long until the soonest redraw a renderer has asked for.
+    fn next_deadline(&self) -> Option<Duration> {
+        let now = Instant::now();
+        self.outputs
+            .iter()
+            .filter_map(|output| output.due_at)
+            .filter(|due| *due > now)
+            .map(|due| due.duration_since(now))
+            .min()
     }
 
     fn pace(&self) -> Duration {
@@ -629,7 +649,15 @@ impl WindowsPlatform {
                 drew |= self.draw(index);
             }
 
-            let pace = if drew { self.pace() } else { IDLE_POLL };
+            // Nothing drew, but a renderer may have asked to be woken at a
+            // moment sooner than the idle poll. Sleeping the full IDLE_POLL
+            // then costs it a quarter second of its animation. Deadlines
+            // already past are ignored, so a covered screen cannot spin.
+            let pace = if drew {
+                self.pace()
+            } else {
+                self.next_deadline().unwrap_or(IDLE_POLL).min(IDLE_POLL)
+            };
             let elapsed = frame_start.elapsed();
             if elapsed < pace {
                 std::thread::sleep(pace - elapsed);
@@ -757,9 +785,12 @@ fn create_surface(
     );
     win32_handle.hinstance = std::num::NonZeroIsize::new(win32::module_handle() as isize);
 
-    // SAFETY: the window outlives the surface because the backend destroys its
-    // surfaces before its windows, and Explorer only ever destroys a window
-    // whose surface `keep_host` then replaces.
+    // SAFETY: the surface never outlives its window. `Drop` clears every
+    // surface before destroying the window it came from, and `rebuild_window`
+    // clears the surface of a window Explorer destroyed before making another.
+    // Between Explorer closing a window and `keep_host` noticing, at most one
+    // poll later, wgpu is handed a stale HWND and answers `Lost`, which `draw`
+    // already treats as a frame to skip.
     let surface = unsafe {
         instance.create_surface_unsafe(wgpu::SurfaceTargetUnsafe::RawHandle {
             raw_display_handle: Some(RawDisplayHandle::Windows(WindowsDisplayHandle::new())),
