@@ -9,6 +9,7 @@ pub mod extract;
 pub mod gpus;
 pub mod info;
 pub mod list;
+mod os;
 pub mod preview;
 mod preview_render;
 pub mod soak;
@@ -183,31 +184,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
 }
 
 pub(crate) fn default_control_socket() -> PathBuf {
-    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(runtime).join("lwe.sock");
-    }
-    // No XDG_RUNTIME_DIR (macOS, or a bare login): the temp dir can be shared
-    // between accounts, so a fixed name collides and the second user cannot
-    // even unlink the first user's socket under /tmp's sticky bit. Give every
-    // uid its own 0700 directory.
-    let dir = std::env::temp_dir().join(format!("kirie-{}", current_user_tag()));
-    if std::fs::create_dir_all(&dir).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
-    }
-    dir.join("lwe.sock")
-}
-
-fn current_user_tag() -> String {
-    use std::os::unix::fs::MetadataExt;
-    if let Some(home) = std::env::var_os("HOME")
-        && let Ok(meta) = std::fs::metadata(&home)
-    {
-        return meta.uid().to_string();
-    }
-    std::env::var("USER")
-        .or_else(|_| std::env::var("LOGNAME"))
-        .unwrap_or_else(|_| "shared".to_owned())
+    os::runtime_dir().join("lwe.sock")
 }
 
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
@@ -339,11 +316,18 @@ mod socket_tests {
     fn the_fallback_socket_directory_is_per_user() {
         // Two accounts share /tmp on macOS, so a fixed name collides and the
         // second user cannot even unlink the first one's socket.
-        let tag = super::current_user_tag();
+        let tag = crate::os::current_user_tag();
         assert!(!tag.is_empty(), "a user tag is always available");
         assert!(
-            !tag.contains('/'),
+            !tag.contains('/') && !tag.contains('\\'),
             "the tag becomes a directory name, so it must be a single component: {tag}"
         );
+    }
+
+    // haru computes this path itself rather than asking kirie for it, so the
+    // two agreeing on the file name is what makes them able to talk at all.
+    #[test]
+    fn the_socket_is_named_the_same_on_every_platform() {
+        assert!(super::default_control_socket().ends_with("lwe.sock"));
     }
 }

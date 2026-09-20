@@ -71,6 +71,7 @@ rkyv = "0.8"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 mime_guess = "2"
+uds_windows = "1.2"
 
 [profile.release]
 lto = "fat"

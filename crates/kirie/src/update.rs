@@ -78,12 +78,7 @@ fn replace(path: &std::path::Path, url: &str) -> Result<()> {
         bail!("download failed ({status})");
     }
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o755))
-            .context("could not mark the download executable")?;
-    }
+    crate::os::set_executable(&staged).context("could not mark the download executable")?;
     std::fs::rename(&staged, path).map_err(|err| {
         let _ = std::fs::remove_file(&staged);
         anyhow!("{err}")

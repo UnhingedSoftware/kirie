@@ -16,6 +16,15 @@ web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview-m
 web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
 vaapi = ["kirie-video/vaapi"]
 
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+# Windows delivers Ctrl-C to a console handler rather than as a signal, so
+# signal-hook's iterator has no counterpart there. This is the safe wrapper
+# around the handler that does the same job.
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSView", "NSResponder"] }
@@ -42,7 +51,6 @@ pollster = { workspace = true }
 crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-signal-hook = "0.4"
 ratatui = { version = "0.30.2", optional = true }
 
 [lints]

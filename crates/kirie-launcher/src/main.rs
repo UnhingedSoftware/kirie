@@ -1,6 +1,5 @@
 use std::fs::{self, File};
 use std::io::{self, BufReader, Read, Seek, SeekFrom};
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -19,12 +18,41 @@ fn main() -> std::process::ExitCode {
 fn run() -> io::Result<()> {
     let exe = std::env::current_exe()?;
     let dir = ensure_extracted(&exe)?;
-    let target = dir.join("kirie");
-    let err = Command::new(&target).args(std::env::args_os().skip(1)).exec();
+    let target = dir.join(if cfg!(windows) { "kirie.exe" } else { "kirie" });
+    hand_over(&target)
+}
+
+/// Become the extracted engine.
+///
+/// Unix replaces this process with it, so what the session started keeps its
+/// pid and its place in the job -- a wallpaper renderer being supervised by
+/// systemd or launchd wants that. Windows has no `exec`, so the stub stays
+/// alive as a parent doing nothing but waiting and passing the exit code on.
+#[cfg(unix)]
+fn hand_over(target: &Path) -> io::Result<()> {
+    use std::os::unix::process::CommandExt as _;
+
+    let err = Command::new(target).args(std::env::args_os().skip(1)).exec();
     Err(io::Error::other(format!(
         "cannot exec extracted engine {}: {err}",
         target.display()
     )))
+}
+
+#[cfg(windows)]
+fn hand_over(target: &Path) -> io::Result<()> {
+    let status = Command::new(target)
+        .args(std::env::args_os().skip(1))
+        .status()
+        .map_err(|err| {
+            io::Error::other(format!(
+                "cannot start extracted engine {}: {err}",
+                target.display()
+            ))
+        })?;
+    // A process killed by a signal has no exit code of its own; 127 is what
+    // `main` already reports for "the engine did not run".
+    std::process::exit(status.code().unwrap_or(127));
 }
 
 fn ensure_extracted(exe: &Path) -> io::Result<PathBuf> {

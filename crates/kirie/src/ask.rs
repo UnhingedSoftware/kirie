@@ -1,7 +1,8 @@
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
+
+use kirie_ipc::UnixStream;
 
 const DEADLINE: Duration = Duration::from_secs(20);
 

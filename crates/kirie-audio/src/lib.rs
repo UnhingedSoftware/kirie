@@ -108,13 +108,6 @@ impl AudioConfig {
     }
 
     #[must_use]
-    pub fn disabled_on(config: Self) -> Self {
-        Self {
-            enabled: false,
-            ..config
-        }
-    }
-
     #[cfg(target_os = "linux")]
     fn resolved_gate(&self) -> f32 {
         if let Some(g) = self.gate {
@@ -158,43 +151,39 @@ pub struct AudioCapture {
 }
 
 impl AudioCapture {
+    /// A capture that was never started: the spectrum stays silent and nothing
+    /// is listening. This is what every platform but Linux gets, and what
+    /// Linux gets when the wallpaper did not ask for audio.
+    fn silent(device: Option<String>) -> Self {
+        Self {
+            shared: Arc::new(ArcSwap::from_pointee(AudioSpectrum::silent())),
+            status: Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8())),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            device,
+            player: PlayerSlot::default(),
+            capture_thread: None,
+            worker_thread: None,
+        }
+    }
+
+    /// Capture reads the PulseAudio monitor source, which exists only on Linux.
+    #[cfg(not(target_os = "linux"))]
     #[must_use]
     pub fn start(config: AudioConfig) -> Self {
-        #[cfg(not(target_os = "linux"))]
-        let config = AudioConfig::disabled_on(config);
+        Self::silent(config.device)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn start(config: AudioConfig) -> Self {
         let shared = Arc::new(ArcSwap::from_pointee(AudioSpectrum::silent()));
         let shutdown = Arc::new(AtomicBool::new(false));
         let player = PlayerSlot::default();
 
-        #[cfg(not(target_os = "linux"))]
-        {
-            let status = Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8()));
-            return Self {
-                shared,
-                status,
-                shutdown,
-                device: config.device.clone(),
-                player,
-                capture_thread: None,
-                worker_thread: None,
-            };
-        }
-
-        #[cfg(target_os = "linux")]
         if !config.enabled {
-            let status = Arc::new(AtomicU8::new(CaptureStatus::Disabled.as_u8()));
-            return Self {
-                shared,
-                status,
-                shutdown,
-                device: config.device.clone(),
-                player,
-                capture_thread: None,
-                worker_thread: None,
-            };
+            return Self::silent(config.device);
         }
 
-        #[cfg(target_os = "linux")]
         {
             let status = Arc::new(AtomicU8::new(CaptureStatus::Starting.as_u8()));
             let device = config.device.clone();

@@ -208,7 +208,7 @@ fn partial_bytes(id: &str) -> u64 {
 pub fn apply(socket: &Path, screen: &str, dir: &Path) -> Result<()> {
     use std::io::{Read, Write};
 
-    let mut stream = std::os::unix::net::UnixStream::connect(socket).with_context(|| {
+    let mut stream = kirie_ipc::UnixStream::connect(socket).with_context(|| {
         format!(
             "no wallpaper engine is listening on {} (start kirie with --control-socket)",
             socket.display()
@@ -220,7 +220,7 @@ pub fn apply(socket: &Path, screen: &str, dir: &Path) -> Result<()> {
     request.extend_from_slice(b"bg ");
     request.extend_from_slice(screen.as_bytes());
     request.push(b' ');
-    request.extend_from_slice(dir.as_os_str().as_encoded_bytes());
+    request.extend_from_slice(&kirie_ipc::path_bytes(dir));
     request.push(b'\n');
     stream.write_all(&request)?;
 

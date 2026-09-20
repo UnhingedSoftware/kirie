@@ -1,7 +1,5 @@
 use std::io::{ErrorKind, Read, Write};
 use std::net::Shutdown;
-use std::os::unix::ffi::OsStrExt;
-use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -10,7 +8,7 @@ use std::{env, fs, process, thread};
 use crossbeam_channel::{Receiver, unbounded};
 use kirie_ipc::{
     ClampMode, Command, CommandOutcome, ControlSocket, IpcEvent, ScalingMode, ScreenStatus, SetOption,
-    StatusSnapshot,
+    StatusSnapshot, UnixStream,
 };
 
 const LIVE_BG: &str = "/home/aiko/.local/share/Steam/steamapps/workshop/content/431960/3047596375";
@@ -588,8 +586,14 @@ fn concurrent_clients_are_all_served() {
     }
 }
 
+// A Unix path is bytes, so a wallpaper directory named in some other encoding
+// has to survive the socket unchanged. Windows paths are UTF-16 and cross as
+// UTF-8, where there is no such byte sequence to preserve.
+#[cfg(unix)]
 #[test]
 fn non_utf8_bg_path_reaches_app_byte_exact() {
+    use std::os::unix::ffi::OsStrExt;
+
     let s = Server::start("non-utf8", MockApp::doc_semantics());
     let mut line = b"bg HDMI-A-1 /weird/\xff\xfe/dir".to_vec();
     line.push(b'\n');

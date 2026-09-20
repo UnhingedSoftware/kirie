@@ -1,5 +1,4 @@
 use std::io::{ErrorKind, Read, Write};
-use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +11,7 @@ use crossbeam_channel::{Sender, bounded};
 use crate::command::{Request, parse_request};
 use crate::error::IpcError;
 use crate::event::{CommandOutcome, IpcEvent};
+use crate::os::{UnixListener, UnixStream, socket_is_foreign};
 use crate::status::format_status;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
@@ -95,17 +95,6 @@ impl Drop for ControlSocket {
     fn drop(&mut self) {
         self.shutdown();
     }
-}
-
-fn socket_is_foreign(path: &std::path::Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-    let Ok(socket) = fs::metadata(path) else {
-        return false;
-    };
-    let ours = std::env::var_os("HOME")
-        .and_then(|home| fs::metadata(home).ok())
-        .map(|home| home.uid());
-    ours.is_some_and(|uid| uid != socket.uid())
 }
 
 fn serve(listener: &UnixListener, events: &Sender<IpcEvent>, shutdown: &AtomicBool) {
