@@ -28,4 +28,23 @@ fn main() {
     }
 
     println!("cargo:rustc-env=KIRIE_WEBVIEWHOST_BLOB={}", blob.display());
+
+    link_media_foundation();
+}
+
+// vcpkg's ffmpeg builds avcodec with the Media Foundation encoder, so avcodec.lib
+// carries references to three COM interface GUIDs that live in the Windows SDK's
+// own libraries rather than in any ffmpeg object: IID_IMFTransform and
+// IID_IMFMediaEventGenerator in mfuuid, IID_ICodecAPI in strmiids. ffmpeg-sys-next
+// names ole32, secur32, ws2_32, bcrypt and user32 on its vcpkg path and stops
+// there, so without this the final link fails with three unresolved externals.
+// Both are SDK libraries that ship with the MSVC toolchain, so there is nothing
+// to install; they are simply not asked for.
+fn link_media_foundation() {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if windows && msvc {
+        println!("cargo:rustc-link-lib=mfuuid");
+        println!("cargo:rustc-link-lib=strmiids");
+    }
 }
