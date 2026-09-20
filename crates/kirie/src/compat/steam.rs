@@ -4,7 +4,13 @@ use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
 const STEAM_ROOTS: [&str; 1] = ["Library/Application Support/Steam"];
 
-#[cfg(not(target_os = "macos"))]
+// Windows keeps Steam where the installer put it rather than under the user's
+// profile, so there is nothing home-relative to look for; `install_roots` below
+// covers it instead.
+#[cfg(windows)]
+const STEAM_ROOTS: [&str; 0] = [];
+
+#[cfg(all(not(target_os = "macos"), not(windows)))]
 const STEAM_ROOTS: [&str; 4] = [
     ".local/share/Steam",
     ".steam/steam",
@@ -12,22 +18,48 @@ const STEAM_ROOTS: [&str; 4] = [
     "snap/steam/common/.local/share/Steam",
 ];
 
+/// The account's home directory.
+///
+/// Windows does not set `HOME`; it sets `USERPROFILE`. Asking only for `HOME`
+/// is why every Steam lookup came back empty there, which took `--bg <id>`,
+/// `kirie list` and the Wallpaper Engine assets with it.
+#[must_use]
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()))
+        .map(PathBuf::from)
+}
+
+/// Steam installs that are not under a home directory.
+///
+/// Empty everywhere but Windows, where the default install is
+/// `%ProgramFiles(x86)%\\Steam`. Any library on another disk is then found from
+/// there, through `libraryfolders.vdf`, the same way as on Linux.
+#[cfg(windows)]
+fn install_roots() -> Vec<PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"]
+        .iter()
+        .filter_map(|key| std::env::var_os(key))
+        .filter(|base| !base.is_empty())
+        .map(|base| PathBuf::from(base).join("Steam"))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn install_roots() -> Vec<PathBuf> {
+    Vec::new()
+}
+
 #[must_use]
 pub fn libraries() -> Vec<PathBuf> {
-    libraries_with(
-        std::env::var_os("KIRIE_STEAM_LIBRARY"),
-        std::env::var_os("HOME").map(PathBuf::from),
-    )
+    libraries_with(std::env::var_os("KIRIE_STEAM_LIBRARY"), home_dir())
 }
 
 fn libraries_with(override_value: Option<OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
     if let Some(value) = override_value {
         return std::env::split_paths(&value).filter(|dir| dir.is_dir()).collect();
     }
-
-    let Some(home) = home else {
-        return Vec::new();
-    };
 
     fn push(found: &mut Vec<PathBuf>, dir: PathBuf) {
         if dir.is_dir() && !found.contains(&dir) {
@@ -36,8 +68,15 @@ fn libraries_with(override_value: Option<OsString>, home: Option<PathBuf>) -> Ve
     }
 
     let mut found: Vec<PathBuf> = Vec::new();
-    for root in STEAM_ROOTS {
-        push(&mut found, home.join(root));
+    if let Some(home) = home {
+        for root in STEAM_ROOTS {
+            push(&mut found, home.join(root));
+        }
+    }
+    // Not `else`: a Windows machine has a home directory and a Steam in
+    // Program Files, and either can be the one with the wallpapers in it.
+    for root in install_roots() {
+        push(&mut found, root);
     }
 
     for install in found.clone() {

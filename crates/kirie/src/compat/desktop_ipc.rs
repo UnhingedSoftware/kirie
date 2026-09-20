@@ -347,9 +347,13 @@ fn act(
         "set" => set(rest, orders, showing, args),
         "preload" => "ok\n".to_owned(),
         "volume" => {
-            let wanted = rest.trim().parse::<i64>().unwrap_or(100).clamp(0, 100);
+            // 0-128, which is what `--volume` takes, what the Linux socket
+            // takes, and what docs/COMMANDS.md says. This arm used to read the
+            // number as 0-100 and scale it, so the same `volume 100` meant full
+            // volume here and 78% on Linux.
+            let wanted = rest.trim().parse::<i64>().unwrap_or(128).clamp(0, 128);
             if let Ok(mut sound) = showing.sound.lock() {
-                sound.volume = wanted * 128 / 100;
+                sound.volume = wanted;
             }
             rebuild_all(orders, showing, args);
             "ok\n".to_owned()
