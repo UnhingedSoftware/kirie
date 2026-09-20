@@ -2,8 +2,18 @@ use anyhow::{Context, Result, anyhow, bail};
 
 const RELEASES: &str = "https://api.github.com/repos/UnhingedSoftware/kirie/releases/latest";
 
+/// The release file that replaces this build.
+///
+/// Only Linux publishes more than one, because only Linux has two web backends
+/// to pick between; macOS and Windows publish a single build each, and the
+/// Windows one carries an extension, because Windows will not run a file
+/// without one. These names have to match what haru asks GitHub for.
 const fn asset_name() -> &'static str {
-    if cfg!(feature = "web-cef") {
+    if cfg!(target_os = "macos") {
+        "kirie-macos-x86_64"
+    } else if cfg!(windows) {
+        "kirie-windows-x86_64.exe"
+    } else if cfg!(feature = "web-cef") {
         "kirie-web-cef-linux-x86_64"
     } else if cfg!(any(feature = "web-webview", feature = "web-webview-inproc")) {
         "kirie-web-webview-linux-x86_64"
@@ -42,7 +52,11 @@ pub fn run(check_only: bool, force: bool) -> Result<()> {
     replace(&exe, &url).with_context(|| format!("could not replace {}", exe.display()))?;
 
     println!("updated to {tag}");
-    println!("restart the engine to run it (kirie.sh --restart, or log out and in)");
+    if cfg!(windows) {
+        println!("restart the renderer to run it (end kirie.exe, then start it again)");
+    } else {
+        println!("restart the engine to run it (kirie.sh --restart, or log out and in)");
+    }
     Ok(())
 }
 
@@ -79,11 +93,35 @@ fn replace(path: &std::path::Path, url: &str) -> Result<()> {
     }
 
     crate::os::set_executable(&staged).context("could not mark the download executable")?;
-    std::fs::rename(&staged, path).map_err(|err| {
-        let _ = std::fs::remove_file(&staged);
+    put_in_place(&staged, path)
+}
+
+/// Move the download onto the binary it replaces.
+///
+/// Unix renames over a running program happily: the copy already running holds
+/// the old inode. Windows locks the file it is executing, so the old one goes
+/// aside under another name first, which Windows does allow, and the next
+/// update sweeps it up once nothing has it open.
+#[cfg(unix)]
+fn put_in_place(staged: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    std::fs::rename(staged, path).map_err(|err| {
+        let _ = std::fs::remove_file(staged);
         anyhow!("{err}")
-    })?;
-    Ok(())
+    })
+}
+
+#[cfg(windows)]
+fn put_in_place(staged: &std::path::Path, path: &std::path::Path) -> Result<()> {
+    let stale = path.with_extension("old");
+    let _ = std::fs::remove_file(&stale);
+    let moved = std::fs::rename(path, &stale).is_ok();
+    std::fs::rename(staged, path).map_err(|err| {
+        if moved {
+            let _ = std::fs::rename(&stale, path);
+        }
+        let _ = std::fs::remove_file(staged);
+        anyhow!("{err}")
+    })
 }
 
 fn fetch_text(url: &str) -> Result<String> {
