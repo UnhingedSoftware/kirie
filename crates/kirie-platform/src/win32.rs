@@ -25,10 +25,10 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTT
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowExW,
     FindWindowW, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowThreadProcessId, HWND_BOTTOM, IsWindow, MSG, PM_REMOVE, PeekMessageW, RegisterClassW,
-    SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_NORMAL, SW_SHOWNA,
-    SWP_NOACTIVATE, SWP_NOZORDER, SendMessageTimeoutW, SetParent, SetWindowPos, ShowWindow, WM_ERASEBKGND,
-    WNDCLASSW, WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_VISIBLE,
+    GetWindowThreadProcessId, IsWindow, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SM_CXVIRTUALSCREEN,
+    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_NORMAL, SW_SHOWNA, SWP_NOACTIVATE,
+    SWP_NOZORDER, SendMessageTimeoutW, SetParent, SetWindowPos, ShowWindow, WM_ERASEBKGND, WNDCLASSW,
+    WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_VISIBLE,
 };
 
 /// A window on the desktop, kept as a raw handle because that is what both
@@ -332,6 +332,12 @@ pub(crate) fn reparent(window: Handle, host: Handle) {
 }
 
 /// Move and resize a wallpaper window to cover `rect`.
+///
+/// The z-order argument is null because `SWP_NOZORDER` is set, and that flag
+/// tells Windows to ignore whatever is passed there. Keeping the order is what
+/// is wanted: the wallpaper windows are children of the desktop host, one per
+/// monitor, so they never overlap each other, and sinking one to the bottom of
+/// that sibling list would gain nothing while risking a reshuffle every poll.
 #[allow(unsafe_code)]
 pub(crate) fn place(window: Handle, rect: Rect) {
     if !alive(window) {
@@ -342,7 +348,7 @@ pub(crate) fn place(window: Handle, rect: Rect) {
     unsafe {
         SetWindowPos(
             window,
-            HWND_BOTTOM,
+            std::ptr::null_mut(),
             rect.left.saturating_sub(origin.left),
             rect.top.saturating_sub(origin.top),
             rect.width() as i32,
@@ -472,25 +478,45 @@ pub(crate) fn program_of(window: Handle) -> Option<String> {
         return None;
     }
 
-    let mut buffer = [0_u16; 260];
-    let mut len = buffer.len() as u32;
-    // SAFETY: the buffer and the length live across the call, and `len` says
-    // how much of the buffer may be written.
-    let ok = unsafe {
-        QueryFullProcessImageNameW(
-            process,
-            windows_sys::Win32::System::Threading::PROCESS_NAME_FORMAT::default(),
-            buffer.as_mut_ptr(),
-            std::ptr::from_mut(&mut len),
-        )
-    };
-    // SAFETY: a handle OpenProcess returned and nothing else holds.
-    unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
-    if ok == 0 {
-        return None;
+    // MAX_PATH is what nearly every program's path fits in, but a Win32 path
+    // can be up to 32767 units long and the call answers a path that does not
+    // fit with ERROR_INSUFFICIENT_BUFFER rather than with a truncated name.
+    // Treating that as "no program" would quietly stop
+    // `--fullscreen-pause-ignore` matching anything installed deep enough, so
+    // grow the buffer once instead.
+    let mut path = None;
+    for capacity in [260_usize, 32_768] {
+        let mut buffer = vec![0_u16; capacity];
+        let mut len = capacity as u32;
+        // SAFETY: the buffer and the length live across the call, and `len`
+        // says how many units of the buffer may be written.
+        let ok = unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                windows_sys::Win32::System::Threading::PROCESS_NAME_FORMAT::default(),
+                buffer.as_mut_ptr(),
+                std::ptr::from_mut(&mut len),
+            )
+        };
+        if ok != 0 {
+            path = Some(String::from_utf16_lossy(
+                buffer.get(..len as usize).unwrap_or_default(),
+            ));
+            break;
+        }
+        // SAFETY: a thread-local error code, read right after the call that set
+        // it and before anything else on this thread can overwrite it.
+        let insufficient = unsafe { windows_sys::Win32::Foundation::GetLastError() }
+            == windows_sys::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
+        if !insufficient {
+            break;
+        }
     }
 
-    let path = String::from_utf16_lossy(buffer.get(..len as usize).unwrap_or_default());
+    // SAFETY: a handle OpenProcess returned and nothing else holds.
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(process) };
+
+    let path = path?;
     let file = path.rsplit(['\\', '/']).next()?;
     (!file.is_empty()).then(|| file.to_ascii_lowercase())
 }
