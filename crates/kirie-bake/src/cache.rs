@@ -113,6 +113,14 @@ impl LoadedBundle {
     pub fn open(file: &Path) -> Result<Self, BakeError> {
         let f = fs::File::open(file).map_err(|e| BakeError::io(file, e))?;
         // SAFETY: the bundle file is opened read-only and this process never
+        // writes to one it has mapped -- the baker writes a new bundle to a
+        // temporary file and renames it into place, which replaces the
+        // directory entry and leaves this mapping pointing at the old inode.
+        // Another process editing the file underneath us is the one hazard
+        // `Mmap::map` cannot rule out; the checksum sidecar and the checked
+        // `access` below are what catch the bytes changing, and nothing here
+        // is a security boundary -- the cache lives under the user's own
+        // cache directory.
         let mmap = unsafe { Mmap::map(&f) }.map_err(|e| BakeError::io(file, e))?;
 
         let sidecar = file.with_file_name(CHECKSUM_FILE);
@@ -150,9 +158,24 @@ impl LoadedBundle {
         })
     }
 
+    /// The archive itself, borrowed straight out of the mapping.
+    ///
+    /// This cannot be the checked `rkyv::access`: validation walks the whole
+    /// archive, and the accessors below call this once per texture, so paying
+    /// for it here would make loading a bundle quadratic in the number of
+    /// textures it holds. The validation happens once instead, in `open`.
     #[must_use]
     pub fn archived(&self) -> &ArchivedBakedBundle {
-        // SAFETY: the same bytes were validated with the checked `access` in
+        debug_assert!(
+            rkyv::access::<ArchivedBakedBundle, rkyv::rancor::Error>(&self.mmap).is_ok(),
+            "a LoadedBundle was built over bytes `open` never validated",
+        );
+        // SAFETY: these are the same bytes the checked `access` in `open`
+        // accepted. `open` is the only constructor, both fields are private,
+        // and neither is ever handed out mutably, so a `LoadedBundle` cannot
+        // exist over a mapping that was not validated. The mapping is
+        // read-only and is never remapped for the life of the value, and the
+        // assertion above re-checks that in debug builds and in the tests.
         unsafe { rkyv::access_unchecked::<ArchivedBakedBundle>(&self.mmap) }
     }
 
@@ -203,24 +226,46 @@ impl LoadedBundle {
     }
 }
 
+/// Where baked wallpapers are kept.
+///
+/// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so this used to return an
+/// error there and nothing could be baked at all. `%LOCALAPPDATA%` is the same
+/// idea under a different name, and it is what the launcher already unpacks
+/// its runtime into.
 fn default_cache_base() -> Result<PathBuf, BakeError> {
-    if let Some(x) = std::env::var_os("XDG_CACHE_HOME")
-        && !x.is_empty()
-    {
-        return Ok(PathBuf::from(x).join("kirie"));
-    }
-    if let Some(home) = std::env::var_os("HOME")
-        && !home.is_empty()
-    {
-        return Ok(PathBuf::from(home).join(".cache").join("kirie"));
+    if let Some(base) = cache_home() {
+        return Ok(base.join("kirie"));
     }
     Err(BakeError::io(
         PathBuf::from("~/.cache/kirie"),
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            "neither XDG_CACHE_HOME nor HOME is set",
+            if cfg!(windows) {
+                "LOCALAPPDATA is not set"
+            } else {
+                "neither XDG_CACHE_HOME nor HOME is set"
+            },
         ),
     ))
+}
+
+#[cfg(windows)]
+fn cache_home() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(unix)]
+fn cache_home() -> Option<PathBuf> {
+    if let Some(x) = std::env::var_os("XDG_CACHE_HOME")
+        && !x.is_empty()
+    {
+        return Some(PathBuf::from(x));
+    }
+    std::env::var_os("HOME")
+        .filter(|home| !home.is_empty())
+        .map(|home| PathBuf::from(home).join(".cache"))
 }
 
 fn sanitize(s: &str) -> String {
