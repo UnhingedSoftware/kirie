@@ -10,7 +10,14 @@ const RELEASES: &str = "https://api.github.com/repos/UnhingedSoftware/kirie/rele
 /// without one. These names have to match what haru asks GitHub for.
 const fn asset_name() -> &'static str {
     if cfg!(target_os = "macos") {
-        "kirie-macos-x86_64"
+        // The release only builds Apple Silicon. An Intel mac asks for a name that
+        // is not in the release and is told so, which beats handing it an arm64
+        // binary that will not start.
+        if cfg!(target_arch = "aarch64") {
+            "kirie-macos-aarch64"
+        } else {
+            "kirie-macos-x86_64"
+        }
     } else if cfg!(windows) {
         "kirie-windows-x86_64.exe"
     } else if cfg!(feature = "web-cef") {
