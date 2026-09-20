@@ -152,6 +152,11 @@ struct PassGpu {
     model_matrix: Mat4,
     blending: Blending,
     tex_resolution: [[f32; 4]; 8],
+    /// The bytes last uploaded to `vs_ubo` / `fs_ubo`. A layer that is not
+    /// driven by time, audio or the pointer packs the same uniforms every
+    /// frame, and re-uploading them is pure cost.
+    vs_ubo_sent: Vec<u8>,
+    fs_ubo_sent: Vec<u8>,
     material_pass: kirie_scene::material::Pass,
     params_vs: Arc<Vec<Parameter>>,
     params_fs: Arc<Vec<Parameter>>,
@@ -1912,6 +1917,8 @@ fn build_object(
             tex_resolution,
             params_vs,
             params_fs,
+            vs_ubo_sent: Vec::new(),
+            fs_ubo_sent: Vec::new(),
             material_pass: raw_pass,
         });
     }
@@ -2283,12 +2290,14 @@ impl Renderer for SceneRenderer {
                 _ => false,
             })
         };
-        let animated = self.script.is_some()
+        // Content that can differ from one frame to the next no matter when
+        // the frame is drawn. Anything here means the wallpaper has to keep up
+        // with the frame rate.
+        let continuous = self.script.is_some()
             || self.animator.is_some()
             || (self.audio.is_some() && reads_any(super::uniforms::AUDIO_GLOBALS))
             || reads_any(super::uniforms::FRAME_DRIVEN_GLOBALS)
             || !self.video_textures.is_empty()
-            || !self.atlas_textures.is_empty()
             || !self.runtime_layers.is_empty()
             || (self.general.cameraparallax.value && !self.options.disable_parallax)
             || self.items.iter().any(|it| match it {
@@ -2300,10 +2309,26 @@ impl Renderer for SceneRenderer {
                     .is_some_and(|rig| rig.player.is_animating(&rig.mesh)),
                 _ => false,
             });
-        if animated {
-            kirie_platform::RedrawHint::Unknown
-        } else {
-            kirie_platform::RedrawHint::Static
+        if continuous {
+            return kirie_platform::RedrawHint::Unknown;
+        }
+
+        // Everything left changes on a sprite-sheet table, which says exactly
+        // when the picture next differs. Redrawing before then spends a frame
+        // to produce the same image, so ask to be woken at the flip instead.
+        let atlas_flips = self
+            .atlas_textures
+            .iter()
+            .map(|slot| &slot.atlas.schedule)
+            .chain(self.items.iter().filter_map(|it| match it {
+                SceneItem::Image(o) => o.atlas.as_ref().map(|a| &a.schedule),
+                _ => None,
+            }))
+            .filter_map(|schedule| schedule.time_until_change(self.elapsed))
+            .min_by(f64::total_cmp);
+        match atlas_flips {
+            Some(wait) => kirie_platform::RedrawHint::After(std::time::Duration::from_secs_f64(wait)),
+            None => kirie_platform::RedrawHint::Static,
         }
     }
 
@@ -2491,30 +2516,9 @@ impl Renderer for SceneRenderer {
             self.window_for = Some(size);
         }
 
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("kirie-scene-encoder"),
-            });
-
-        {
-            let _clear = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kirie-scene-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.scene_fbo.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(self.clear_color),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        // The clear is not a pass of its own: it rides on the first draw into
+        // the scene, and only happens by itself if nothing draws there at all.
+        let mut encoder = super::encoder::FrameEncoder::new(&self.device, self.clear_color);
 
         let scene_view = &self.scene_fbo.view;
         let scene_tex = &self.scene_fbo.texture;
@@ -2682,11 +2686,7 @@ impl Renderer for SceneRenderer {
                     if object.reads_scene
                         && let Some(snap_tex) = snap_tex
                     {
-                        encoder.copy_texture_to_texture(
-                            scene_tex.as_image_copy(),
-                            snap_tex.as_image_copy(),
-                            copy_extent,
-                        );
+                        encoder.refresh_snapshot(scene_view, scene_tex, snap_tex, copy_extent);
                     }
                     draw_image_object(
                         &mut encoder,
@@ -2726,7 +2726,7 @@ impl Renderer for SceneRenderer {
                     let n = pg
                         .renderer
                         .upload(&self.queue, &pg.view_projection, &self.sprite_scratch);
-                    pg.renderer.draw(&mut encoder, scene_view, n);
+                    pg.renderer.draw(encoder.scene(scene_view), n);
                 }
                 SceneItem::Text(tg)
                     if !tg.visible
@@ -2738,7 +2738,7 @@ impl Renderer for SceneRenderer {
                         ) => {}
                 SceneItem::Text(tg) => {
                     if let Some(tp) = &self.text_pipeline {
-                        extras::draw_text(&mut encoder, tp, tg, scene_view);
+                        extras::draw_text(encoder.scene(scene_view), tp, tg);
                     }
                 }
                 SceneItem::Model(mg)
@@ -2752,11 +2752,7 @@ impl Renderer for SceneRenderer {
                     if mg.reads_scene
                         && let Some(snap_tex) = snap_tex
                     {
-                        encoder.copy_texture_to_texture(
-                            scene_tex.as_image_copy(),
-                            snap_tex.as_image_copy(),
-                            copy_extent,
-                        );
+                        encoder.refresh_snapshot(scene_view, scene_tex, snap_tex, copy_extent);
                     }
                     if let Some(depth_view) = self.model_depth.as_ref() {
                         let aspect = if self.proj_h > 0 {
@@ -2885,59 +2881,40 @@ impl Renderer for SceneRenderer {
                             })
                         })
                         .collect();
-                    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("kirie-runtime-layers"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: scene_view,
-                            depth_slice: None,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                        multiview_mask: None,
-                    });
+                    let rp = encoder.scene(scene_view);
                     rp.set_pipeline(pipeline);
                     rp.set_vertex_buffer(0, buf.slice(..));
                     for ((_, first, count), bind) in batches.iter().zip(&binds) {
                         rp.set_bind_group(0, bind, &[]);
+                        crate::frame_cost::draw(1);
                         rp.draw(*first..*first + *count, 0..1);
                     }
                 }
             }
         }
 
+        // Nothing may have drawn into the scene this frame; it still has to be
+        // cleared before it is shown.
+        encoder.ensure_cleared(scene_view);
+
         if let (Some(bloom), Some(snap)) = (&self.bloom, &self.scene_snapshot) {
-            bloom.run(&mut encoder, &self.scene_fbo, snap);
+            bloom.run(encoder.raw(), &self.scene_fbo, snap);
         }
 
         {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("kirie-scene-blit"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
+            let rp = encoder.offscreen(
+                view,
+                wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                "kirie-scene-blit",
+            );
             rp.set_pipeline(&self.blit_pipeline);
             rp.set_bind_group(0, &self.blit_bind, &[]);
+            crate::frame_cost::draw(1);
             rp.draw(0..4, 0..1);
         }
 
-        self.queue.submit(Some(encoder.finish()));
+        encoder.submit(&self.queue);
+        crate::frame_cost::end_frame();
     }
 
     fn set_property(&mut self, key: &str, value: &str) -> kirie_platform::PropertyImpact {
@@ -3482,11 +3459,35 @@ fn apply_runtime_updates(layers: &mut std::collections::HashMap<i64, RuntimeLaye
     }
 }
 
+/// Packs a pass's uniforms and uploads them, unless the buffer already holds
+/// exactly these bytes.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn upload_globals(
+    queue: &wgpu::Queue,
+    ubo: Option<&wgpu::Buffer>,
+    sent: &mut Vec<u8>,
+    scratch: &mut Vec<u8>,
+    layout: &GlobalsLayout,
+    builtins: &Builtins,
+    params: &BTreeMap<String, Vec<f32>>,
+) {
+    let Some(ubo) = ubo else { return };
+    pack_globals(scratch, layout, builtins, params);
+    if sent == scratch {
+        crate::frame_cost::buffer_write_skipped();
+        return;
+    }
+    crate::frame_cost::buffer_write(scratch.len() as u64);
+    queue.write_buffer(ubo, 0, scratch);
+    sent.clear();
+    sent.extend_from_slice(scratch);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw_image_object(
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut super::encoder::FrameEncoder,
     queue: &wgpu::Queue,
-    object: &ObjectGpu,
+    object: &mut ObjectGpu,
     scene_view: &wgpu::TextureView,
     screen_mvp: Mat4,
     ambient: [f32; 3],
@@ -3512,7 +3513,7 @@ fn draw_image_object(
         let f = a.placement_at(elapsed);
         (f.translation, f.axes)
     });
-    for (pass_index, pass) in object.passes.iter().enumerate() {
+    for (pass_index, pass) in object.passes.iter_mut().enumerate() {
         if object.skip_final && matches!(pass.output, PassOutput::Scene) {
             continue;
         }
@@ -3584,46 +3585,48 @@ fn draw_image_object(
             audio32: audio.map_or([0.0; 32], |a| a.audio32),
             audio64: audio.map_or([0.0; 64], |a| a.audio64),
         };
-        if let Some(ubo) = &pass.vs_ubo {
-            pack_globals(scratch, &pass.vs_globals, &builtins, &pass.vs_params);
-            queue.write_buffer(ubo, 0, scratch);
-        }
-        if let Some(ubo) = &pass.fs_ubo {
-            pack_globals(scratch, &pass.fs_globals, &builtins, &pass.fs_params);
-            queue.write_buffer(ubo, 0, scratch);
-        }
+        upload_globals(
+            queue,
+            pass.vs_ubo.as_ref(),
+            &mut pass.vs_ubo_sent,
+            scratch,
+            &pass.vs_globals,
+            &builtins,
+            &pass.vs_params,
+        );
+        upload_globals(
+            queue,
+            pass.fs_ubo.as_ref(),
+            &mut pass.fs_ubo_sent,
+            scratch,
+            &pass.fs_globals,
+            &builtins,
+            &pass.fs_params,
+        );
 
-        let (target_view, load) = match &pass.output {
-            PassOutput::Scene => (scene_view, wgpu::LoadOp::Load),
-            PassOutput::Fbo(i) => (
-                object.fbos[*i].as_ref().map_or(scene_view, |f| &f.view),
+        // A pass that composites into the scene joins the scene's open render
+        // pass; one that fills an offscreen buffer clears it, so it gets its
+        // own. Either way the draws are recorded in the same order as before.
+        let offscreen = match &pass.output {
+            PassOutput::Scene => None,
+            PassOutput::Fbo(i) => Some(object.fbos[*i].as_ref().map(|f| &f.view)),
+            PassOutput::Named(name) => Some(object.named_fbos.get(name).map(|f| &f.view)),
+        };
+        let rp = match offscreen {
+            None => encoder.scene(scene_view),
+            // An output buffer that failed to build fell back to the scene
+            // view with a clear, and still does.
+            Some(view) => encoder.offscreen(
+                view.unwrap_or(scene_view),
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-            ),
-            PassOutput::Named(name) => (
-                object.named_fbos.get(name).map_or(scene_view, |f| &f.view),
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                "kirie-scene-offscreen",
             ),
         };
-        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("kirie-scene-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
         rp.set_pipeline(&pass.pipeline);
         rp.set_bind_group(0, &pass.g0_bind, &[]);
         rp.set_bind_group(1, &pass.g1_bind, &[]);
         rp.set_vertex_buffer(0, pass.vertex_buffer.slice(..));
+        crate::frame_cost::draw(1);
         if let Some(indices) = &pass.puppet_indices {
             rp.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
             rp.draw_indexed(0..pass.puppet_index_count, 0, 0..1);
@@ -3632,6 +3635,12 @@ fn draw_image_object(
         }
         let _ = pass.blending;
     }
+}
+
+/// How many bytes a copy of the scene target moves, for the frame-cost counters.
+pub(crate) fn fbo_bytes(extent: wgpu::Extent3d) -> u64 {
+    let texel = super::fbo::FBO_FORMAT.target_pixel_byte_cost().unwrap_or(8);
+    u64::from(extent.width) * u64::from(extent.height) * u64::from(texel)
 }
 
 #[repr(C)]

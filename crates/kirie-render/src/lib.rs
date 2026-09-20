@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod content;
+pub mod frame_cost;
 mod error;
 pub mod media;
 pub mod particle;
