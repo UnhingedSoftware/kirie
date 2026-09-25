@@ -89,6 +89,9 @@ pub enum RenderDebug {
     NoSolidFinal,
     PassLog,
     PassReadback,
+    /// Log what each frame asks of the GPU: render passes, draws, texture
+    /// copies and buffer uploads, every few seconds.
+    FrameCost,
     Object(i64),
     SkipObject(i64),
     SkipEffect(i64),
@@ -323,6 +326,7 @@ fn parse_render_debug(value: &str) -> Result<RenderDebug, ParseError> {
         "no-solid-final" => Ok(RenderDebug::NoSolidFinal),
         "pass-log" => Ok(RenderDebug::PassLog),
         "pass-readback" => Ok(RenderDebug::PassReadback),
+        "frame-cost" => Ok(RenderDebug::FrameCost),
         _ => {
             if let Some(rest) = value.strip_prefix("object=") {
                 Ok(RenderDebug::Object(render_debug_int(rest)?))

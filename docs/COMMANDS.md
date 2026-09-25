@@ -566,12 +566,24 @@ KIRIE_SCREENSHOT_SIZE=2560x1440 kirie --bg 1388331347 --screenshot shot.png
 | `--render-debug <MODE>` | Narrow what gets drawn; repeatable |
 
 `--render-debug` takes `base-only`, `no-solid-final`, `pass-log`,
-`pass-readback`, `object=<ID>`, `skip-object=<ID>` or `skip-effect=<ID>`.
+`pass-readback`, `frame-cost`, `object=<ID>`, `skip-object=<ID>` or
+`skip-effect=<ID>`.
+
+`frame-cost` logs what each frame asks of the GPU — render passes, draw calls,
+scene copies and uniform uploads, plus the copies and uploads that were skipped
+because nothing had changed — every five seconds. It is the way to see what a
+wallpaper costs on your own machine.
+
+Layers that composite into the scene share one render pass. Setting
+`KIRIE_UNBATCHED_PASSES=1` goes back to a render pass per layer, which is
+slower but is there if a driver ever misbehaves with the shared one; the
+picture is the same either way.
 
 ```sh
 kirie --bg 1388331347 --dump-structure
 kirie --bg 1388331347 --screenshot shot.png --render-debug base-only
 kirie --bg 1388331347 --screenshot shot.png --render-debug skip-effect=3
+RUST_LOG=info kirie --bg 1388331347 --render-debug frame-cost
 ```
 
 Set `RUST_LOG=debug` for tracing output alongside any of these.
