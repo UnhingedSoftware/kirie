@@ -215,6 +215,7 @@ impl Bloom {
             &self.blur_y_bind,
             &self.bloom.view,
         );
+        crate::frame_cost::texture_copy(u64::from(scene_fbo.width) * u64::from(scene_fbo.height) * 8);
         encoder.copy_texture_to_texture(
             scene_fbo.texture.as_image_copy(),
             scene_snapshot.texture.as_image_copy(),
@@ -241,6 +242,7 @@ impl Bloom {
         bind: &wgpu::BindGroup,
         target: &wgpu::TextureView,
     ) {
+        crate::frame_cost::render_pass();
         let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -257,6 +259,7 @@ impl Bloom {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        crate::frame_cost::draw(1);
         rp.set_pipeline(pipeline);
         rp.set_bind_group(0, bind, &[]);
         rp.draw(0..3, 0..1);

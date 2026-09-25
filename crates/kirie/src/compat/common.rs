@@ -47,6 +47,7 @@ pub(crate) fn set_object_filter(debug: &[super::args::RenderDebug]) {
             super::args::RenderDebug::NoSolidFinal => filter.no_solid_final = true,
             super::args::RenderDebug::PassLog => filter.pass_log = true,
             super::args::RenderDebug::PassReadback => {}
+            super::args::RenderDebug::FrameCost => kirie_render::frame_cost::enable(),
         }
     }
     if let Ok(mut slot) = OBJECT_FILTER.lock() {
