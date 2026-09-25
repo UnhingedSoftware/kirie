@@ -315,7 +315,9 @@ kirie ask --socket /run/user/1000/lwe.sock set fps 60
 
 Without `--socket` it uses `$XDG_RUNTIME_DIR/lwe.sock`, falling back to a
 per-user `0700` directory under the system temp dir when `XDG_RUNTIME_DIR` is
-unset (macOS, or a bare login).
+unset (macOS, or a bare login). Windows has no `XDG_RUNTIME_DIR`, so there it is
+`%LOCALAPPDATA%\kirie\lwe.sock`, with the same temp-directory fallback when
+`LOCALAPPDATA` is unset.
 
 ### `kirie preview`
 
@@ -576,9 +578,10 @@ Set `RUST_LOG=debug` for tracing output alongside any of these.
 
 ## Control socket
 
-A running kirie listens on a Unix socket — `$XDG_RUNTIME_DIR/lwe.sock` unless
-`--control-socket <PATH>` says otherwise — and reads one command per
-connection. Use `kirie ask`, or write to it directly with `socat`.
+A running kirie listens on a Unix socket — `$XDG_RUNTIME_DIR/lwe.sock`, or
+`%LOCALAPPDATA%\kirie\lwe.sock` on Windows, unless `--control-socket <PATH>`
+says otherwise — and reads one command per connection. It is a unix-domain
+socket at a path on disk on Windows too, not a named pipe. Use `kirie ask`, or write to it directly with `socat`.
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg 1388331347 --control-socket /tmp/kirie.sock &

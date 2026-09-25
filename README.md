@@ -176,8 +176,9 @@ kirie ask --socket /tmp/kirie.sock status
 kirie ask --socket /tmp/kirie.sock bg HDMI-A-1 /path/to/other/item
 ```
 
-Without `--control-socket` the socket is `$XDG_RUNTIME_DIR/lwe.sock`, which is
-also where `kirie ask` looks by default. The full command list is in the
+Without `--control-socket` the socket is `$XDG_RUNTIME_DIR/lwe.sock`
+(`%LOCALAPPDATA%\kirie\lwe.sock` on Windows), which is also where `kirie ask`
+looks by default. The full command list is in the
 [command reference](docs/COMMANDS.md#control-socket).
 
 ### Screenshots
