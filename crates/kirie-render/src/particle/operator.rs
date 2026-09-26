@@ -51,6 +51,8 @@ pub enum Operator {
         endvalue: f32,
     },
     ColorChange {
+        starttime: f32,
+        endtime: f32,
         startvalue: Vec3,
         endvalue: Vec3,
     },
@@ -133,6 +135,8 @@ impl Operator {
                 endvalue: p.f32("endvalue", 0.0),
             },
             "colorchange" => Operator::ColorChange {
+                starttime: p.f32("starttime", 0.0),
+                endtime: p.f32("endtime", 1.0),
                 startvalue: p.vec3("startvalue", [1.0, 1.0, 1.0]),
                 endvalue: p.vec3("endvalue", [1.0, 1.0, 1.0]),
             },
@@ -216,14 +220,12 @@ impl Operator {
                 fadeouttime,
             } => {
                 let lp = pt.life_pos();
-                let mut a = pt.initial.alpha;
                 if *fadeintime > 0.0 && lp < *fadeintime {
-                    a *= lp / *fadeintime;
+                    pt.alpha *= lp / *fadeintime;
                 }
                 if *fadeouttime > 0.0 && lp > 1.0 - *fadeouttime {
-                    a *= (1.0 - lp) / *fadeouttime;
+                    pt.alpha *= (1.0 - lp) / *fadeouttime;
                 }
-                pt.alpha = a;
             }
             Operator::SizeChange {
                 starttime,
@@ -231,7 +233,7 @@ impl Operator {
                 startvalue,
                 endvalue,
             } => {
-                pt.size = pt.initial.size * ramp(pt.life_pos(), *starttime, *endtime, *startvalue, *endvalue);
+                pt.size *= ramp(pt.life_pos(), *starttime, *endtime, *startvalue, *endvalue);
             }
             Operator::AlphaChange {
                 starttime,
@@ -239,17 +241,17 @@ impl Operator {
                 startvalue,
                 endvalue,
             } => {
-                pt.alpha =
-                    pt.initial.alpha * ramp(pt.life_pos(), *starttime, *endtime, *startvalue, *endvalue);
+                pt.alpha *= ramp(pt.life_pos(), *starttime, *endtime, *startvalue, *endvalue);
             }
-            Operator::ColorChange { startvalue, endvalue } => {
+            Operator::ColorChange {
+                starttime,
+                endtime,
+                startvalue,
+                endvalue,
+            } => {
                 let lp = pt.life_pos();
-                let m = [
-                    startvalue[0] + (endvalue[0] - startvalue[0]) * lp,
-                    startvalue[1] + (endvalue[1] - startvalue[1]) * lp,
-                    startvalue[2] + (endvalue[2] - startvalue[2]) * lp,
-                ];
-                pt.color = math::mul_comp(pt.initial.color, m);
+                let m = [0, 1, 2].map(|i| ramp(lp, *starttime, *endtime, startvalue[i], endvalue[i]));
+                pt.color = math::mul_comp(pt.color, m);
             }
             Operator::Turbulence {
                 scale,

@@ -20,7 +20,26 @@ pub struct ParticleGpu {
     pub sim: ParticleSim,
     pub renderer: ParticleRenderer,
     pub view_projection: [f32; 16],
+    /// The layer's own tilt and depth, which its parents do not change.
+    own: ParticleOwn,
     _texture: Option<Arc<GpuTexture>>,
+}
+
+#[derive(Clone, Copy)]
+struct ParticleOwn {
+    origin_z: f32,
+    angles_xy: [f32; 2],
+    scale_z: f32,
+}
+
+impl ParticleGpu {
+    /// Places the system where its parents, puppet attachment, script or
+    /// timeline have moved it.
+    pub fn set_transform(&mut self, world: WorldXf, screen_mvp: &Mat4, scene_size: (u32, u32)) {
+        let model = particle_model_matrix(world, self.own, scene_size);
+        self.view_projection = matrix::mul(screen_mvp, &model);
+        self.origin = [world.0[0], world.0[1], self.own.origin_z];
+    }
 }
 
 pub struct TextGpu {
@@ -354,14 +373,14 @@ pub fn build_particle(
     queue: &wgpu::Queue,
     object: &Object,
     pobj: &ParticleObject,
+    world: WorldXf,
     scene_size: (u32, u32),
     screen_mvp: &Mat4,
     source: &dyn AssetSource,
     registry: &mut TextureRegistry,
 ) -> Option<ParticleGpu> {
-    if !(pobj.visible.value && object.base.visible.value) {
-        return None;
-    }
+    // A hidden system is still built: a script or timeline may show it later.
+    let visible = pobj.visible.value && object.base.visible.value;
 
     let sim = ParticleSim::new(
         &pobj.system,
@@ -377,18 +396,23 @@ pub fn build_particle(
     let tex_ref = texture.as_ref().map(|t| (&t.view, &t.sampler));
     let renderer = ParticleRenderer::new(device, queue, FBO_FORMAT, blending, tex_ref, capacity);
 
-    let model = particle_model_matrix(object, pobj, scene_size);
-    let view_projection = matrix::mul(screen_mvp, &model);
-
-    Some(ParticleGpu {
+    let own = ParticleOwn {
+        origin_z: object.base.origin.value[2],
+        angles_xy: [pobj.angles.value[0], pobj.angles.value[1]],
+        scale_z: pobj.scale.value[2],
+    };
+    let mut gpu = ParticleGpu {
         id: object.base.id,
-        visible: true,
+        visible,
         origin: object.base.origin.value,
         sim,
         renderer,
-        view_projection,
+        view_projection: matrix::IDENTITY,
+        own,
         _texture: texture,
-    })
+    };
+    gpu.set_transform(world, screen_mvp, scene_size);
+    Some(gpu)
 }
 
 fn particle_material(
@@ -408,15 +432,14 @@ fn particle_material(
     (texture, pass.blending)
 }
 
-fn particle_model_matrix(object: &Object, pobj: &ParticleObject, scene_size: (u32, u32)) -> Mat4 {
+fn particle_model_matrix(world: WorldXf, own: ParticleOwn, scene_size: (u32, u32)) -> Mat4 {
     let (sw, sh) = (scene_size.0 as f32, scene_size.1 as f32);
-    let o = object.base.origin.value;
-    let t = matrix::translation([o[0] - sw / 2.0, o[1] - sh / 2.0, o[2]]);
-    let a = pobj.angles.value;
-    let rz = matrix::rotation_z(-a[2]);
-    let ry = matrix::rotation_y(a[1]);
-    let rx = matrix::rotation_x(-a[0]);
-    let s = matrix::scale(pobj.scale.value);
+    let ([ox, oy], [sx, sy], angle_z) = world;
+    let t = matrix::translation([ox - sw / 2.0, oy - sh / 2.0, own.origin_z]);
+    let rz = matrix::rotation_z(-angle_z);
+    let ry = matrix::rotation_y(own.angles_xy[1]);
+    let rx = matrix::rotation_x(-own.angles_xy[0]);
+    let s = matrix::scale([sx, sy, own.scale_z]);
     matrix::mul(&t, &matrix::mul(&rz, &matrix::mul(&ry, &matrix::mul(&rx, &s))))
 }
 
@@ -751,6 +774,19 @@ mod tests {
         let particle_cy = oy - scene.1 as f32 / 2.0;
         assert_eq!(quad_cy, particle_cy);
         assert!(particle_cy > 0.0, "a high origin sits above the centre");
+    }
+
+    #[test]
+    fn a_particle_system_sits_where_its_world_transform_puts_it() {
+        let own = ParticleOwn {
+            origin_z: 0.0,
+            angles_xy: [0.0, 0.0],
+            scale_z: 1.0,
+        };
+        // A parent at (1000, 500) with the emitter 100 px to its right.
+        let m = particle_model_matrix(([1100.0, 500.0], [2.0, 2.0], 0.0), own, (1920, 1080));
+        assert_eq!([m[12], m[13]], [1100.0 - 960.0, 500.0 - 540.0]);
+        assert_eq!([m[0], m[5]], [2.0, 2.0]);
     }
 
     #[test]

@@ -276,6 +276,10 @@ pub struct SceneRenderer {
     video_users: Vec<Vec<usize>>,
     atlas_textures: Vec<AtlasSlot>,
     pointer: [f32; 2],
+    /// Where the cursor is on the output, 0-1 from the top left, before the
+    /// scaling window maps it onto the scene.
+    pointer_raw: [f32; 2],
+    view_window: crate::scaling::UvWindow,
     pointer_last: [f32; 2],
     pointer_on_output: bool,
     pointer_left: bool,
@@ -624,6 +628,7 @@ impl SceneRenderer {
                         queue,
                         object,
                         pobj,
+                        world_xf(object.base.id, &local_xf),
                         (proj_w, proj_h),
                         &screen_mvp,
                         source,
@@ -812,6 +817,8 @@ impl SceneRenderer {
             video_textures,
             atlas_textures,
             pointer: [0.5, 0.5],
+            pointer_raw: [0.5, 0.5],
+            view_window: crate::scaling::UvWindow::FULL,
             pointer_last: [0.5, 0.5],
             pointer_on_output: true,
             pointer_left: false,
@@ -956,7 +963,8 @@ impl SceneRenderer {
             let id = match item {
                 SceneItem::Image(o) => o.id,
                 SceneItem::Text(tg) => tg.id,
-                _ => continue,
+                SceneItem::Particle(pg) => pg.id,
+                SceneItem::Model(_) => continue,
             };
             if !transform_affected(id, dirty, &self.locals) {
                 continue;
@@ -965,7 +973,8 @@ impl SceneRenderer {
             match item {
                 SceneItem::Image(o) => retransform(o, &self.queue, world, (sw, sh)),
                 SceneItem::Text(tg) => tg.set_transform(&self.device, world),
-                _ => {}
+                SceneItem::Particle(pg) => pg.set_transform(world, &self.screen_mvp, (sw, sh)),
+                SceneItem::Model(_) => {}
             }
         }
     }
@@ -1588,6 +1597,8 @@ fn build_object(
         binds: Vec<(u32, String)>,
         is_puppet_base: bool,
         effect_index: Option<usize>,
+        chain_index: usize,
+        sources: (String, String),
     }
     let mut built: Vec<Survivor> = Vec::new();
     for (ci, plan_pass) in chain.passes.iter().enumerate() {
@@ -1645,6 +1656,8 @@ fn build_object(
                     binds: plan_pass.binds.clone(),
                     is_puppet_base,
                     effect_index: plan_pass.effect_index,
+                    chain_index: ci,
+                    sources: (vs_src, fs_src),
                 });
             }
             Err(e) => {
@@ -1689,6 +1702,44 @@ fn build_object(
         .rposition(|s| is_composite(&s.target))
         .unwrap_or(n - 1);
 
+    // The plan gave the layer's own blend to its last pass. When that pass
+    // was dropped (a shader that is missing or fails to build), the pass now
+    // drawing to the scene still has its effect's blend, usually "normal",
+    // which paints the layer's transparent parts as an opaque box. Give it
+    // the layer's blend instead.
+    let planned_last = chain.passes.len() - 1;
+    if !offscreen_donor
+        && chain.passes.len() > 1
+        && let Some(sv) = built.get_mut(last_comp)
+        && sv.chain_index != planned_last
+        && !sv.is_puppet_base
+        && chain.passes[planned_last].blending != chain.passes[sv.chain_index].blending
+    {
+        let plan_pass = &chain.passes[sv.chain_index];
+        match pipeline::build_pass(
+            device,
+            FBO_FORMAT,
+            chain.passes[planned_last].blending,
+            plan_pass.cull,
+            kirie_scene::material::DepthMode::Disabled,
+            kirie_scene::material::DepthMode::Disabled,
+            wgpu::PrimitiveTopology::TriangleStrip,
+            &plan_pass.pass,
+            &sv.sources.0,
+            &sv.sources.1,
+            resolver,
+        ) {
+            Ok(mut b) => {
+                b.vs_params = Vec::new();
+                b.fs_params = Vec::new();
+                sv.built = b;
+            }
+            Err(e) => {
+                tracing::debug!(shader = %plan_pass.shader, error = %e, "rebuilding the scene pass with the layer blend failed");
+            }
+        }
+    }
+
     let mut passes = Vec::with_capacity(n);
     let mut comp_front: Option<usize> = None;
     for (i, sv) in built.into_iter().enumerate() {
@@ -1701,6 +1752,7 @@ fn build_object(
             binds,
             is_puppet_base,
             effect_index,
+            ..
         } = sv;
         let is_scene = i == last_comp && !offscreen_donor;
         let composite = is_composite(&target);
@@ -2518,6 +2570,8 @@ impl Renderer for SceneRenderer {
                 }),
             );
             self.window_for = Some(size);
+            self.view_window = window;
+            self.pointer = pointer_through_window(self.pointer_raw, window);
         }
 
         // The clear is not a pass of its own: it rides on the first draw into
@@ -2538,6 +2592,7 @@ impl Renderer for SceneRenderer {
         let pack_scratch = &mut self.pack_scratch;
         let pointer = self.pointer;
         let pointer_last = self.pointer_last;
+        let daytime = super::scripting::time_of_day_now(self.tz_offset_secs) as f32;
         let parallax = if self.options.disable_parallax {
             ([0.0, 0.0], 0.0, self.proj_w as f32)
         } else {
@@ -2555,11 +2610,19 @@ impl Renderer for SceneRenderer {
             let t = (self.general.cameraparallaxdelay.value * dt).clamp(0.0, 1.0);
             for axis in 0..2 {
                 let here = if self.pointer_on_output {
-                    self.pointer
+                    self.pointer_raw
                 } else {
                     [0.5, 0.5]
                 };
-                let target = (here[axis] - 0.5) * amount * influence;
+                // The pointer runs top-down, the displacement is applied in
+                // y-up scene space: flip y so both axes follow the cursor the
+                // same way.
+                let off = if axis == 1 {
+                    0.5 - here[axis]
+                } else {
+                    here[axis] - 0.5
+                };
+                let target = off * amount * influence;
                 self.parallax_disp[axis] += (target - self.parallax_disp[axis]) * t;
             }
         }
@@ -2668,6 +2731,7 @@ impl Renderer for SceneRenderer {
                     self.ambient,
                     self.skylight,
                     time,
+                    daytime,
                     self.elapsed,
                     texel,
                     audio,
@@ -2701,6 +2765,7 @@ impl Renderer for SceneRenderer {
                         self.ambient,
                         self.skylight,
                         time,
+                        daytime,
                         self.elapsed,
                         texel,
                         audio,
@@ -2775,6 +2840,7 @@ impl Renderer for SceneRenderer {
                             self.ambient,
                             self.skylight,
                             time,
+                            daytime,
                             texel,
                             audio,
                             pack_scratch,
@@ -3011,7 +3077,8 @@ impl Renderer for SceneRenderer {
     }
 
     fn set_pointer(&mut self, x: f32, y: f32) {
-        self.pointer = [x, y];
+        self.pointer_raw = [x, y];
+        self.pointer = pointer_through_window([x, y], self.view_window);
     }
 
     fn set_pointer_on_output(&mut self, on_output: bool) {
@@ -3493,6 +3560,7 @@ fn draw_image_object(
     ambient: [f32; 3],
     skylight: [f32; 3],
     time: f32,
+    daytime: f32,
     elapsed: f64,
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
@@ -3558,7 +3626,7 @@ fn draw_image_object(
         };
         let builtins = Builtins {
             time,
-            daytime: 0.0,
+            daytime,
             brightness: object.brightness,
             alpha: object.alpha,
             color: [
@@ -3681,14 +3749,16 @@ fn auto_projection(model: &SceneModel, output: (u32, u32)) -> (u32, u32) {
     let mut ext_h = 0.0f32;
     for object in &model.scene.objects {
         if let ObjectKind::Image(img) = &object.kind {
+            // Origins are measured from the scene's bottom-left corner (see
+            // `scene_space_quad`), so the far edge of a layer is the extent.
             let ox = object.base.origin.value[0].abs();
             let oy = object.base.origin.value[1].abs();
             ext_w = ext_w.max(ox + img.size[0] / 2.0);
             ext_h = ext_h.max(oy + img.size[1] / 2.0);
         }
     }
-    let w = (ext_w * 2.0).round() as u32;
-    let h = (ext_h * 2.0).round() as u32;
+    let w = ext_w.round() as u32;
+    let h = ext_h.round() as u32;
     if w > 0 && h > 0 {
         (w, h)
     } else if output.0 > 0 && output.1 > 0 {
@@ -3774,6 +3844,16 @@ fn transform_affected(id: i64, dirty: &[i64], locals: &HashMap<i64, LocalXf>) ->
     false
 }
 
+/// Maps a cursor position on the output onto the part of the scene the
+/// scaling window shows there, so a cropped or zoomed scene reacts under the
+/// real cursor.
+fn pointer_through_window(pointer: [f32; 2], window: crate::scaling::UvWindow) -> [f32; 2] {
+    [
+        window.u0 + pointer[0] * (window.u1 - window.u0),
+        window.v0 + pointer[1] * (window.v1 - window.v0),
+    ]
+}
+
 fn pointer_to_scene(pointer: [f32; 2], projection: (u32, u32)) -> [f32; 2] {
     [
         pointer[0] * projection.0 as f32,
@@ -3795,7 +3875,9 @@ fn world_xf(id: i64, locals: &HashMap<i64, LocalXf>) -> WorldXf {
     let mut ang = 0.0f32;
     for l in chain.iter().rev() {
         let (lx, ly) = ((l.origin[0] + l.attach[0]) * sx, (l.origin[1] + l.attach[1]) * sy);
-        let (s, c) = ang.sin_cos();
+        // The same turn the quads get (`scene_space_quad` rotates by
+        // -angle_z), so a child stays put on its rotated parent.
+        let (s, c) = (-ang).sin_cos();
         ox += lx * c - ly * s;
         oy += lx * s + ly * c;
         sx *= l.scale[0];
@@ -4394,6 +4476,11 @@ mod tests {
     #[test]
     fn pointer_scene_space_is_y_up_like_layer_origins() {
         assert_eq!(pointer_to_scene([0.5, 0.5], (1920, 1080)), [960.0, 540.0]);
+        // A 16:9 scene on a 16:10 screen shows its middle 90% of width.
+        let window = crate::scaling::ScalingMode::Fill.uv_window((1920, 1080), (1920, 1200));
+        assert_eq!(pointer_through_window([0.5, 0.5], window), [0.5, 0.5]);
+        let left = pointer_through_window([0.0, 0.0], window);
+        assert!((left[0] - 0.05).abs() < 1e-6 && left[1] == 0.0, "{left:?}");
         assert_eq!(pointer_to_scene([0.0, 0.0], (1920, 1080)), [0.0, 1080.0]);
         assert_eq!(pointer_to_scene([1.0, 1.0], (1920, 1080)), [1920.0, 0.0]);
     }
@@ -4526,6 +4613,62 @@ mod tests {
         assert!((origin[1] - 1736.0).abs() < 0.001, "{origin:?}");
         assert_eq!(scale, [1.0, 1.0]);
         assert!(angle.abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn a_child_turns_with_its_parent_the_way_the_parent_quad_does() {
+        let parent = LocalXf {
+            origin: [1000.0, 1000.0],
+            attach: [0.0, 0.0],
+            scale: [1.0, 1.0],
+            angle_z: std::f32::consts::FRAC_PI_2,
+            parent: None,
+        };
+        let child = LocalXf {
+            origin: [100.0, 0.0],
+            attach: [0.0, 0.0],
+            scale: [1.0, 1.0],
+            angle_z: 0.0,
+            parent: Some(1),
+        };
+        let locals: HashMap<i64, LocalXf> = [(1, parent), (2, child)].into_iter().collect();
+
+        // Where the parent's own quad puts the point 100 px along its x axis.
+        let quad = scene_space_quad(
+            [1000.0, 1000.0],
+            (200, 2),
+            [1.0, 1.0],
+            parent.angle_z,
+            (2000, 2000),
+        );
+        let right_mid = [
+            (quad[2][0] + quad[3][0]) / 2.0 + 1000.0,
+            (quad[2][1] + quad[3][1]) / 2.0 + 1000.0,
+        ];
+
+        let (origin, _, angle) = world_xf(2, &locals);
+        assert!(
+            (origin[0] - right_mid[0]).abs() < 0.01,
+            "{origin:?} vs {right_mid:?}"
+        );
+        assert!(
+            (origin[1] - right_mid[1]).abs() < 0.01,
+            "{origin:?} vs {right_mid:?}"
+        );
+        assert!((angle - std::f32::consts::FRAC_PI_2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn auto_projection_is_the_far_edge_of_the_layers() {
+        let json = r#"{
+            "camera": {"center": "0 0 -1", "eye": "0 0 0", "up": "0 1 0"},
+            "general": {"orthogonalprojection": {"auto": true}},
+            "objects": [{"id": 1, "name": "bg", "image": "models/bg.json",
+                         "origin": "960 540 0", "size": "1920 1080"}]
+        }"#;
+        let scene = kirie_scene::Scene::from_slice(json.as_bytes()).expect("scene parses");
+        let model = SceneModel::resolve(scene, &kirie_scene::PropertyBag::default());
+        assert_eq!(auto_projection(&model, (2560, 1440)), (1920, 1080));
     }
 
     #[test]

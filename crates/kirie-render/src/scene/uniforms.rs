@@ -7,6 +7,7 @@ use super::matrix::{IDENTITY, Mat4};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GlType {
     Float,
+    Int,
     Vec2,
     Vec3,
     Vec4,
@@ -19,7 +20,7 @@ impl GlType {
     #[must_use]
     pub fn align(self) -> usize {
         match self {
-            GlType::Float => 4,
+            GlType::Float | GlType::Int => 4,
             GlType::Vec2 => 8,
             _ => 16,
         }
@@ -28,7 +29,7 @@ impl GlType {
     #[must_use]
     pub fn size(self) -> usize {
         match self {
-            GlType::Float => 4,
+            GlType::Float | GlType::Int => 4,
             GlType::Vec2 => 8,
             GlType::Vec3 => 12,
             GlType::Vec4 => 16,
@@ -314,6 +315,13 @@ fn write_member(bytes: &mut [u8], member: &Member, comps: &[f32]) {
         }
     };
     match member.ty {
+        GlType::Int => {
+            let v = comps.first().copied().unwrap_or(0.0).round() as i32;
+            let off = member.offset;
+            if off + 4 <= bytes.len() {
+                bytes[off..off + 4].copy_from_slice(&v.to_le_bytes());
+            }
+        }
         GlType::Mat3 => {
             for col in 0..3 {
                 for row in 0..3 {
@@ -341,6 +349,18 @@ mod tests {
 
     fn names(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn an_int_member_is_written_as_an_int() {
+        let member = Member {
+            name: "g_Mode".into(),
+            ty: GlType::Int,
+            offset: 4,
+        };
+        let mut bytes = [0u8; 8];
+        write_member(&mut bytes, &member, &[2.0]);
+        assert_eq!(i32::from_le_bytes(bytes[4..8].try_into().unwrap()), 2);
     }
 
     #[test]
