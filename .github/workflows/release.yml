@@ -428,7 +428,9 @@ jobs:
         env:
           VCPKG_ROOT: ${{ steps.vcpkg.outputs.root }}
           VCPKGRS_TRIPLET: x64-windows-static-md
-        run: KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable
+        # web-webview2 puts web wallpapers in WebView2. Its loader is linked in
+        # statically on MSVC, so this stays one file.
+        run: KIRIE_RELEASE_TAG="$V" cargo build --release -p kirie --features portable,web-webview2
 
       # `dumpbin` lives in the MSVC toolchain, which cargo finds by itself but
       # which is not on PATH until something puts it there.
@@ -444,6 +446,11 @@ jobs:
           echo "$linked"
           if echo "$linked" | grep -iqE 'av(codec|format|util|device|filter)|sw(scale|resample)|shaderc'; then
             echo "::error::ffmpeg or shaderc is a DLL here — it must be linked in"; exit 1
+          fi
+          # WebView2's loader has a static library for exactly this; the DLL
+          # would have to ship beside the exe.
+          if echo "$linked" | grep -iq 'WebView2Loader'; then
+            echo "::error::WebView2Loader is a DLL here — it must be linked in"; exit 1
           fi
           echo "ok: ffmpeg and shaderc are linked in"
 
@@ -494,7 +501,7 @@ jobs:
           | `kirie-web-cef-linux-x86_64` | + web wallpapers, bundled Chromium (self-extracting, no system deps) |
           | `kirie-web-webview-linux-x86_64` | + web wallpapers via the system webkit, presented natively on the compositor's background layer. One file — the webkit host is built in. Needs `webkit2gtk-4.1`, `libsoup3`, `gtk-layer-shell` installed; web items are Wayland-only. |
           | `kirie-macos-aarch64` | Apple Silicon — scenes, video, images, and web wallpapers through the system WebKit. Self-contained; run `xattr -d com.apple.quarantine kirie-macos-aarch64` once, since it is not notarized. |
-          | `kirie-windows-x86_64.exe` | Windows 10 1809 or newer — scenes, video and images on the desktop behind the icons. Self-contained; web wallpapers are not supported yet. SmartScreen will warn once, since it is not signed. |
+          | `kirie-windows-x86_64.exe` | Windows 10 1809 or newer — scenes, video and images on the desktop behind the icons. Self-contained; web wallpapers run in the Microsoft Edge WebView2 Runtime that Windows 11 ships (haru installs it on a Windows 10 machine without it). SmartScreen will warn once, since it is not signed. |
 
           EOF
           echo "attaching:"; echo "$files"

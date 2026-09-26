@@ -37,8 +37,10 @@ pub use gpu::{
 };
 #[cfg(target_os = "linux")]
 pub use renderer::CommandSender;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", windows))]
 pub use renderer::MakeViewFn;
+#[cfg(windows)]
+pub use renderer::PageView;
 pub use renderer::{BuildFn, BuildLocalFn, InitialBuildFn, RenderCommand, RendererFactory};
 pub use renderer::{
     CaptureFn, PropertyImpact, RedrawHint, RenderTarget, Renderer, RendererSnapshot, SnapshotFormat,

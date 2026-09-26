@@ -40,7 +40,7 @@ pub fn home_dir() -> Option<PathBuf> {
 fn install_roots() -> Vec<PathBuf> {
     ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"]
         .iter()
-        .filter_map(|key| std::env::var_os(key))
+        .filter_map(std::env::var_os)
         .filter(|base| !base.is_empty())
         .map(|base| PathBuf::from(base).join("Steam"))
         .collect()

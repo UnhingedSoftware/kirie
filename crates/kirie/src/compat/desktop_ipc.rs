@@ -444,6 +444,10 @@ fn put_up(
     if let Wallpaper::Web { dir, file } = &wallpaper {
         return hand_to_web(dir, file, path, orders, showing);
     }
+    #[cfg(all(windows, feature = "web-webview2"))]
+    if let Wallpaper::Web { dir, file } = &wallpaper {
+        return hand_to_page(dir, file, screen, path, orders, showing);
+    }
     // Without a webview, swapping to a web wallpaper means starting the whole
     // process over on the new page. macOS can do that, so it answers "ok" and
     // `restart_with` re-execs. Windows has neither a view to put a page in nor
@@ -453,7 +457,7 @@ fn put_up(
     if matches!(wallpaper, Wallpaper::Web { .. }) {
         return ("ok\n".to_owned(), Some(path.to_owned()));
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", all(windows, feature = "web-webview2"))))]
     if matches!(wallpaper, Wallpaper::Web { .. }) {
         return refused(path, "web wallpapers are not supported on this platform");
     }
@@ -517,6 +521,38 @@ fn hand_to_web(
     }
     showing.take_staged();
     showing.put_up("", Path::new(path));
+    showing
+        .generation
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    ("ok\n".to_owned(), None)
+}
+
+/// Put a web wallpaper up on Windows, on the screens asked for.
+///
+/// Unlike macOS's, this honours the screen: each window gets its own page, so
+/// one monitor can show a page while another keeps its scene.
+#[cfg(all(windows, feature = "web-webview2"))]
+fn hand_to_page(
+    dir: &Path,
+    file: &str,
+    screen: &str,
+    path: &str,
+    orders: &Sender<RenderCommand>,
+    showing: &Arc<Showing>,
+) -> (String, Option<String>) {
+    let properties = showing.properties();
+    let sound = showing.sound();
+    for name in showing.meaning(screen) {
+        let make = crate::compat::desktop_present::web_page(dir, file, &properties, sound);
+        if orders
+            .send(RenderCommand::SetView { screen: name, make })
+            .is_err()
+        {
+            return ("error the renderer stopped listening\n".to_owned(), None);
+        }
+    }
+    showing.take_staged();
+    showing.put_up(screen, Path::new(path));
     showing
         .generation
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);

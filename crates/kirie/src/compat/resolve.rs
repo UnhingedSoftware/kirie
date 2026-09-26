@@ -75,13 +75,22 @@ impl Wallpaper {
     pub fn unrunnable_reason(&self) -> Option<String> {
         match self {
             Wallpaper::Video { .. } | Wallpaper::Image { .. } | Wallpaper::Scene { .. } => None,
-            // Windows has no view for a browser to live in yet, whatever the
-            // build says: `desktop_present` only installs one on macOS. Letting
-            // a web wallpaper through on the strength of a feature flag would
-            // put up a window that never gets a page and leave the screen
-            // black with nothing said, so the refusal is by platform first.
-            #[cfg(windows)]
-            Wallpaper::Web { .. } => Some("web wallpapers are not supported on Windows yet".to_owned()),
+            // On Windows the page lives in WebView2, which is a system component
+            // rather than part of kirie. Asking whether it is there costs a
+            // registry read, and refusing up front with where to get it beats
+            // putting up a window that stays black.
+            #[cfg(all(windows, feature = "web-webview2"))]
+            Wallpaper::Web { .. } => kirie_web::webview2::runtime_version().is_none().then(|| {
+                format!(
+                    "web wallpapers need the Microsoft Edge WebView2 Runtime, which is not installed; \
+                     haru can install it, or get it from {}",
+                    kirie_web::webview2::RUNTIME_DOWNLOAD
+                )
+            }),
+            #[cfg(all(windows, not(feature = "web-webview2")))]
+            Wallpaper::Web { .. } => Some(
+                "web wallpapers need a build with WebView2 (rebuild with --features web-webview2)".to_owned(),
+            ),
             #[cfg(all(not(windows), any(feature = "web-cef", feature = "web-webview")))]
             Wallpaper::Web { .. } => None,
             #[cfg(all(not(windows), not(any(feature = "web-cef", feature = "web-webview"))))]

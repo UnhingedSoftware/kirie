@@ -13,6 +13,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MONITORINFOEXW, MonitorFromWindow,
 };
+use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
 use windows_sys::Win32::System::Threading::{
@@ -89,6 +90,27 @@ pub(crate) fn announce_dpi_awareness() {
     let set = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
     if set == 0 {
         tracing::debug!("per-monitor dpi awareness was already set, or is unavailable");
+    }
+}
+
+/// Make this thread a single-threaded COM apartment.
+///
+/// A web wallpaper's WebView2 insists on one, on the thread that owns its
+/// window, and delivers every callback through that thread's message queue.
+/// The render loop is that thread and already pumps it, so all it needs is to
+/// be declared an apartment before anything else claims it as multi-threaded.
+/// Nothing else the backend does minds which kind it is.
+#[allow(unsafe_code)]
+pub(crate) fn enter_apartment() {
+    // SAFETY: the reserved argument is null as documented, and the call only
+    // sets this thread's COM mode. It is never undone, which is fine for a
+    // thread that lives as long as the process.
+    let entered = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    if entered < 0 {
+        tracing::warn!(
+            hresult = entered,
+            "COM was already set up differently here; web wallpapers may not open"
+        );
     }
 }
 
@@ -599,6 +621,12 @@ fn wide(text: &str) -> Vec<u16> {
 /// The handle wgpu needs, as a plain pointer.
 pub(crate) fn as_raw(window: Handle) -> Option<std::ptr::NonNull<c_void>> {
     std::ptr::NonNull::new(window.cast())
+}
+
+/// A window's handle as a plain address, for code outside this crate that
+/// needs the window but has its own Win32 bindings (a web page's view).
+pub(crate) fn address(window: Handle) -> isize {
+    window as isize
 }
 
 #[cfg(test)]

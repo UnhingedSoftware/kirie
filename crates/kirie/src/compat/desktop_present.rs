@@ -84,9 +84,21 @@ pub fn present(args: &CompatArgs) -> ExitCode {
             }
         };
 
-    // Web wallpapers need somewhere for a browser view to live, which so far
-    // only the macOS backend has; on Windows the scene, video and image
-    // wallpapers go up and a web one is refused earlier, by `unrunnable_reason`.
+    // Web wallpapers need somewhere for a browser view to live: a WKWebView
+    // on macOS, a WebView2 on Windows. Each screen gets its own.
+    #[cfg(all(windows, feature = "web-webview2"))]
+    if let Wallpaper::Web { dir, file } = &wallpaper {
+        let sound = Sound {
+            volume: args.volume,
+            silent: args.silent,
+        };
+        for screen in platform.screen_names() {
+            let make = web_page(dir, file, &args.set_properties, sound);
+            let _ = platform
+                .orders()
+                .send(kirie_platform::RenderCommand::SetView { screen, make });
+        }
+    }
     #[cfg(all(target_os = "macos", feature = "web-webview"))]
     if let Wallpaper::Web { dir, file } = &wallpaper {
         let url = resolve::web_entry_url(dir, file);
@@ -148,6 +160,44 @@ pub fn present(args: &CompatArgs) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// How to open a web wallpaper in a screen's window on Windows.
+///
+/// The properties and volume are fixed into the page's first script, which
+/// runs before any of its own, so the page starts with them rather than
+/// hearing about them late.
+#[cfg(all(windows, feature = "web-webview2"))]
+pub(crate) fn web_page(
+    dir: &std::path::Path,
+    file: &str,
+    properties: &[(String, String)],
+    sound: Sound,
+) -> kirie_platform::MakeViewFn {
+    let source = kirie_web::page::PageSource::of(dir, file);
+    let level = crate::compat::desktop_ipc::level_of(sound);
+    let init = kirie_web::page::init_script(&crate::compat::common::web_props_json(dir, properties), level);
+    let data = crate::os::runtime_dir().join("webview2");
+    Box::new(move |window: isize, size: SurfaceSize| {
+        let opened = kirie_web::webview2::DesktopPage::open(
+            window,
+            kirie_web::WebSize {
+                width: size.width,
+                height: size.height,
+            },
+            &source,
+            &init,
+            level <= 0.0,
+            &data,
+        );
+        match opened {
+            Ok(page) => Some(Box::new(page) as Box<dyn kirie_platform::PageView>),
+            Err(err) => {
+                tracing::error!(%err, "cannot open the page");
+                None
+            }
+        }
+    })
 }
 
 fn control_socket(args: &CompatArgs) -> Option<std::path::PathBuf> {
