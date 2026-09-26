@@ -249,6 +249,14 @@ impl ParticleSim {
             overrides: &self.overrides,
             control_points: &self.control_points,
         };
+        // Colour, alpha and size are rebuilt every frame: each operator that
+        // touches them scales the value the ones before it left, so an
+        // oscillator does not compound frame over frame and two fades stack.
+        for p in &mut self.particles {
+            p.color = p.initial.color;
+            p.alpha = p.initial.alpha;
+            p.size = p.initial.size;
+        }
         for op in &self.operators {
             for p in &mut self.particles {
                 op.apply(p, &ctx);
