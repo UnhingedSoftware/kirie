@@ -4,9 +4,10 @@
 //! surface on each, and a loop that draws them and paces itself. What differs
 //! is where the windows go. Windows has exactly one place a wallpaper can
 //! live -- inside Explorer's own desktop window, behind the icons -- so
-//! `win32::wallpaper_host` finds it and every window is a child of it. The
+//! `win32::find_desktop` finds it and every window is a child of it. The
 //! same place also has to be found again whenever Explorer restarts, which it
-//! does on its own schedule and takes our windows' parent with it.
+//! does on its own schedule and takes our windows' parent with it, and on a
+//! raised desktop our windows have to be kept in order among Explorer's own.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +21,8 @@ use crate::win32::{self, Rect};
 
 struct WinOutput {
     window: win32::Handle,
+    /// The layered window `window` sits in on a raised desktop.
+    holder: Option<win32::Handle>,
     name: String,
     rect: Rect,
     format: wgpu::TextureFormat,
@@ -30,6 +33,9 @@ struct WinOutput {
     drawn_at: Option<Instant>,
     due_at: Option<Instant>,
     first_frame_presented: bool,
+    /// Frames in a row the surface would not give out, so that a screen that
+    /// never gets to draw says so rather than staying blank in silence.
+    skipped: u32,
     covered: bool,
     /// A web page drawing this screen instead of a renderer. While there is
     /// one the window has no wgpu surface: the two cannot share a window.
@@ -40,6 +46,13 @@ struct WinOutput {
 }
 
 impl WinOutput {
+    fn made(&self) -> win32::Made {
+        win32::Made {
+            window: self.window,
+            holder: self.holder,
+        }
+    }
+
     fn size(&self) -> SurfaceSize {
         SurfaceSize {
             width: self.rect.width(),
@@ -58,7 +71,7 @@ struct PauseConfig {
 pub struct WindowsPlatform {
     outputs: Vec<WinOutput>,
     gpu: Gpu,
-    host: win32::Handle,
+    desktop: win32::Desktop,
     make_renderer: RendererFactory,
     frame_interval: Duration,
     pointer: bool,
@@ -82,7 +95,7 @@ impl WindowsPlatform {
         win32::announce_dpi_awareness();
         win32::enter_apartment();
 
-        let host = win32::wallpaper_host().ok_or(PlatformError::NoDesktopHost)?;
+        let mut desktop = win32::find_desktop().ok_or(PlatformError::NoDesktopHost)?;
         let chosen = chosen_monitors(&options.screen_roots);
         if chosen.is_empty() {
             return Err(PlatformError::NoCrtcs);
@@ -90,7 +103,7 @@ impl WindowsPlatform {
 
         let mut made = Vec::with_capacity(chosen.len());
         for monitor in chosen {
-            match win32::desktop_window(host, monitor.rect, options.take_clicks) {
+            match win32::desktop_window(&desktop, monitor.rect, options.take_clicks) {
                 Some(window) => made.push((window, monitor)),
                 None => tracing::error!(output = %monitor.name, "no wallpaper window for this screen"),
             }
@@ -98,12 +111,15 @@ impl WindowsPlatform {
         let Some((first, _)) = made.first() else {
             return Err(PlatformError::NoCrtcs);
         };
+        let ours: Vec<win32::Handle> = made.iter().map(|(window, _)| window.outer()).collect();
+        win32::keep_under_icons(&mut desktop, &ours);
 
-        let (gpu, first_surface) = bring_up_gpu(*first)?;
+        let (gpu, first_surface) = bring_up_gpu(first.window, options.gpu.as_deref())?;
         let mut first_surface = Some(first_surface);
 
         let mut outputs = Vec::with_capacity(made.len());
-        for (index, (window, monitor)) in made.into_iter().enumerate() {
+        for (index, (made, monitor)) in made.into_iter().enumerate() {
+            let window = made.window;
             let wgpu_surface = if index == 0 {
                 first_surface.take()
             } else {
@@ -117,6 +133,7 @@ impl WindowsPlatform {
             };
             outputs.push(WinOutput {
                 window,
+                holder: made.holder,
                 name: monitor.name,
                 rect: monitor.rect,
                 format: wgpu::TextureFormat::Bgra8UnormSrgb,
@@ -127,6 +144,7 @@ impl WindowsPlatform {
                 drawn_at: None,
                 due_at: None,
                 first_frame_presented: false,
+                skipped: 0,
                 covered: false,
                 page: None,
                 make_page: None,
@@ -137,7 +155,7 @@ impl WindowsPlatform {
         let mut platform = Self {
             outputs,
             gpu,
-            host,
+            desktop,
             make_renderer,
             frame_interval: frame_interval(options.fps),
             pointer: options.pointer,
@@ -395,33 +413,49 @@ impl WindowsPlatform {
     /// it, which is ordinary rather than exceptional: it happens on a crash, on
     /// a settings change, and whenever the user restarts it by hand. Finding
     /// the host again and re-parenting is all that is needed.
+    ///
+    /// While nothing died, a raised desktop still needs watching: Explorer
+    /// makes its wallpaper layer again when the wallpaper changes, and the new
+    /// one can land on top of ours.
     fn keep_host(&mut self) {
-        if win32::alive(self.host) && self.outputs.iter().all(|output| win32::alive(output.window)) {
+        if win32::alive(self.desktop.parent()) && self.outputs.iter().all(|output| output.made().alive()) {
+            let ours = self.ours();
+            if win32::keep_under_icons(&mut self.desktop, &ours) {
+                tracing::info!("Explorer moved its desktop windows; put the wallpaper back under the icons");
+            }
             return;
         }
-        let Some(host) = win32::wallpaper_host() else {
+        let Some(desktop) = win32::find_desktop() else {
             tracing::warn!("the desktop has no host window right now; waiting for Explorer");
             return;
         };
-        self.host = host;
+        self.desktop = desktop;
         tracing::info!("the desktop window came back; putting the wallpapers back into it");
 
         for index in 0..self.outputs.len() {
             let Some(output) = self.outputs.get(index) else {
                 continue;
             };
-            if win32::alive(output.window) {
-                win32::reparent(output.window, host);
-                win32::place(output.window, output.rect);
+            let made = output.made();
+            if made.alive() {
+                win32::reparent(made.outer(), self.desktop.parent());
+                win32::place(made, output.rect);
                 continue;
             }
-            self.rebuild_window(index, host);
+            self.rebuild_window(index);
         }
+        let ours = self.ours();
+        win32::keep_under_icons(&mut self.desktop, &ours);
+    }
+
+    /// The windows that are children of the desktop, one per screen.
+    fn ours(&self) -> Vec<win32::Handle> {
+        self.outputs.iter().map(|output| output.made().outer()).collect()
     }
 
     /// Make a screen's window again after Explorer destroyed it, and give it a
     /// new surface. The renderer itself survives; only its canvas was lost.
-    fn rebuild_window(&mut self, index: usize, host: win32::Handle) {
+    fn rebuild_window(&mut self, index: usize) {
         let Some(output) = self.outputs.get_mut(index) else {
             return;
         };
@@ -429,16 +463,25 @@ impl WindowsPlatform {
         // it before anything else can ask it for another frame.
         output.wgpu_surface = None;
         output.configured = false;
+        // Whichever half survived goes too, or it would be left on the desktop.
+        output.page = None;
+        win32::destroy(output.window);
+        if let Some(holder) = output.holder.take() {
+            win32::destroy(holder);
+        }
         let (rect, name) = (output.rect, output.name.clone());
-        let Some(window) = win32::desktop_window(host, rect, self.take_clicks) else {
+        let Some(made) = win32::desktop_window(&self.desktop, rect, self.take_clicks) else {
             tracing::error!(output = %name, "could not make the wallpaper window again");
             return;
         };
+        let window = made.window;
+        if let Some(output) = self.outputs.get_mut(index) {
+            output.holder = made.holder;
+        }
         if let Some(output) = self.outputs.get_mut(index)
             && let Some(make) = output.make_page.as_ref()
         {
             // The old page died with its window; make it again in the new one.
-            output.page = None;
             output.page = make(win32::address(window), output.size());
             output.window = window;
             return;
@@ -455,6 +498,7 @@ impl WindowsPlatform {
             output.wgpu_surface = surface;
             output.configured = false;
             output.first_frame_presented = false;
+            output.skipped = 0;
         }
         self.configure_swapchain(index);
     }
@@ -473,11 +517,11 @@ impl WindowsPlatform {
                 continue;
             }
             let rect = monitor.rect;
-            let window = output.window;
+            let made = output.made();
             if let Some(output) = self.outputs.get_mut(index) {
                 output.rect = rect;
             }
-            win32::place(window, rect);
+            win32::place(made, rect);
             if let Some(output) = self.outputs.get_mut(index) {
                 let size = output.size();
                 if let Some(page) = output.page.as_mut() {
@@ -648,10 +692,20 @@ impl WindowsPlatform {
         let texture = match texture {
             wgpu::CurrentSurfaceTexture::Success(t) | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
             other => {
-                tracing::debug!(output = %output.name, status = ?other, "skipping frame");
+                output.skipped = output.skipped.saturating_add(1);
+                if !output.first_frame_presented && output.skipped == SKIPS_WORTH_A_WARNING {
+                    tracing::warn!(
+                        output = %output.name,
+                        status = ?other,
+                        "this screen still has not been given a frame to draw"
+                    );
+                } else {
+                    tracing::debug!(output = %output.name, status = ?other, "skipping frame");
+                }
                 return false;
             }
         };
+        output.skipped = 0;
 
         let view = texture
             .texture
@@ -770,6 +824,9 @@ impl Drop for WindowsPlatform {
             output.page = None;
             output.wgpu_surface = None;
             win32::destroy(output.window);
+            if let Some(holder) = output.holder {
+                win32::destroy(holder);
+            }
         }
     }
 }
@@ -821,6 +878,10 @@ const HIDDEN_FRAME: Duration = Duration::from_secs(1);
 
 const SCREEN_POLL: Duration = Duration::from_secs(2);
 
+/// Tries at a first frame before a screen that never got one is worth a
+/// warning: a few seconds of them, more than any driver needs to warm up.
+const SKIPS_WORTH_A_WARNING: u32 = 60;
+
 fn settled(renderer: Option<&dyn Renderer>) -> bool {
     let Some(renderer) = renderer else {
         return false;
@@ -835,28 +896,103 @@ fn frame_interval(fps: Option<u32>) -> Duration {
     }
 }
 
-fn bring_up_gpu(window: win32::Handle) -> Result<(Gpu, wgpu::Surface<'static>), PlatformError> {
-    // DX12 first because it is what a Windows driver is tuned for; Vulkan is
-    // there for the machines whose DX12 driver is the worse of the two.
-    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-        backends: wgpu::Backends::DX12 | wgpu::Backends::VULKAN,
-        ..wgpu::InstanceDescriptor::new_without_display_handle()
-    });
-
+/// Bring up wgpu on the GPU driving the screen, or the one `wanted` names.
+///
+/// `crate::gpu::preference` says which and why. `WGPU_BACKEND` and
+/// `WGPU_DX12_PRESENTATION_SYSTEM` still apply on top of it, so that a backend
+/// or a presentation path can be tried on a machine without a new build.
+fn bring_up_gpu(
+    window: win32::Handle,
+    wanted: Option<&str>,
+) -> Result<(Gpu, wgpu::Surface<'static>), PlatformError> {
+    let instance = wgpu::Instance::new(
+        wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::VULKAN | wgpu::Backends::DX12,
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        }
+        .with_env(),
+    );
     let surface = create_surface(&instance, window)?;
+
+    let adapters: Vec<wgpu::Adapter> = pollster::block_on(instance.enumerate_adapters(wgpu::Backends::all()))
+        .into_iter()
+        .filter(|adapter| {
+            let info = adapter.get_info();
+            let presents = adapter.is_surface_supported(&surface);
+            tracing::info!(
+                backend = %info.backend,
+                adapter = %info.name,
+                vendor = format_args!("{:#06x}", info.vendor),
+                kind = ?info.device_type,
+                presents,
+                "gpu adapter offered"
+            );
+            presents
+        })
+        .collect();
+    let offers: Vec<crate::gpu::Offer> = adapters
+        .iter()
+        .map(|adapter| {
+            let info = adapter.get_info();
+            crate::gpu::Offer {
+                backend: info.backend,
+                vendor: info.vendor,
+                device: info.device,
+                software: info.device_type == wgpu::DeviceType::Cpu,
+            }
+        })
+        .collect();
+
+    let wanted = wanted
+        .map(str::to_owned)
+        .or_else(|| std::env::var("KIRIE_GPU").ok());
+    let (order, aim) = crate::gpu::preference(&offers, wanted.as_deref());
+    if aim == crate::gpu::Aim::AskedButAbsent {
+        tracing::warn!(
+            gpu = wanted.as_deref().unwrap_or_default(),
+            "no adapter matched --gpu; using the GPU driving the screen"
+        );
+    }
+
+    let mut failed = None;
+    for adapter in order.iter().filter_map(|at| adapters.get(*at)) {
+        let info = adapter.get_info();
+        match pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("kirie-platform-windows"),
+            ..wgpu::DeviceDescriptor::default()
+        })) {
+            Ok((device, queue)) => {
+                tracing::info!(backend = %info.backend, adapter = %info.name, why = ?aim, "selected gpu adapter");
+                return Ok((
+                    Gpu {
+                        instance,
+                        adapter: adapter.clone(),
+                        device,
+                        queue,
+                    },
+                    surface,
+                ));
+            }
+            Err(err) => {
+                tracing::warn!(backend = %info.backend, adapter = %info.name, %err, "this gpu would not start");
+                failed = Some(err);
+            }
+        }
+    }
+    if let Some(err) = failed {
+        return Err(err.into());
+    }
+
+    // Nothing could draw to the window. Asking wgpu the ordinary way gets its
+    // own explanation of why, which is the error worth reporting.
     let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
         compatible_surface: Some(&surface),
-        power_preference: crate::gpu::power_preference(),
         ..wgpu::RequestAdapterOptions::default()
     }))?;
-
-    let info = adapter.get_info();
-    tracing::info!(backend = %info.backend, adapter = %info.name, "selected gpu adapter");
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("kirie-platform-windows"),
         ..wgpu::DeviceDescriptor::default()
     }))?;
-
     Ok((
         Gpu {
             instance,

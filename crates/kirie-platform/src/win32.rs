@@ -24,13 +24,17 @@ use windows_sys::Win32::UI::HiDpi::{
 };
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, EnumWindows, FindWindowExW,
-    FindWindowW, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, MSG, PM_REMOVE, PeekMessageW, RegisterClassW, SM_CXVIRTUALSCREEN,
-    SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SMTO_NORMAL, SW_SHOWNA, SWP_NOACTIVATE,
-    SWP_NOZORDER, SendMessageTimeoutW, SetParent, SetWindowPos, ShowWindow, WM_ERASEBKGND, WNDCLASSW,
-    WS_CHILD, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_VISIBLE,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowExW, FindWindowW, GW_CHILD,
+    GW_HWNDNEXT, GWL_EXSTYLE, GetClassNameW, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongW, GetWindowRect, GetWindowThreadProcessId, HWND_BOTTOM, HWND_TOP, IsWindow, LWA_ALPHA, MSG,
+    PM_REMOVE, PeekMessageW, RegisterClassW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+    SM_YVIRTUALSCREEN, SMTO_NORMAL, SW_SHOWNA, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+    SendMessageTimeoutW, SetLayeredWindowAttributes, SetParent, SetWindowPos, ShowWindow, WM_ERASEBKGND,
+    WNDCLASSW, WS_CHILD, WS_CLIPCHILDREN, WS_CLIPSIBLINGS, WS_EX_LAYERED, WS_EX_NOACTIVATE,
+    WS_EX_NOREDIRECTIONBITMAP, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT,
 };
+
+use crate::desktop_tree::{self, Layout, Seen, Snapshot};
 
 /// A window on the desktop, kept as a raw handle because that is what both
 /// Win32 and wgpu want to be handed.
@@ -188,97 +192,188 @@ pub(crate) fn virtual_screen() -> Rect {
     }
 }
 
-/// The window to put wallpapers inside, which is the same one Wallpaper Engine
-/// and Lively use.
+/// Where on the desktop the wallpaper windows go, with the windows found there.
+pub(crate) type Desktop = Layout<Handle>;
+
+/// Find where the wallpaper goes, the way Wallpaper Engine and Lively do.
 ///
-/// The desktop is drawn by Explorer's `Progman`, and behind the icons there is
-/// room for exactly one more window. Progman only creates that window --
-/// a `WorkerW` -- when it is asked, and the way to ask is an undocumented
-/// message, `0x052C`, that has been the way since Windows 7. Once it exists,
-/// Explorer has two `WorkerW` windows: the one holding `SHELLDLL_DefView`,
-/// which is the icons, and a sibling behind it, which is ours to draw in.
+/// The desktop is Explorer's `Progman`, and there is only room for a wallpaper
+/// behind its icons once it has been asked to make some. The way to ask is an
+/// undocumented message, `0x052C`, which has been the way since Windows 7.
+/// What it makes changed in Windows 11 24H2 (`desktop_tree` has both shapes),
+/// so the message is only sent when what is there is not enough, and then
+/// Explorer is given a moment: it can make the new window lazily.
 ///
-/// Every part of this can fail on a Windows that changed its mind -- the
-/// message can do nothing, the sibling can be absent -- so the fallback is
-/// Progman itself. Drawing there works; it just puts the wallpaper in front of
-/// the icons rather than behind them.
-#[allow(unsafe_code)]
-pub(crate) fn wallpaper_host() -> Option<Handle> {
-    // SAFETY: FindWindowW takes a null-terminated class name and no parent.
-    let progman = unsafe { FindWindowW(wide("Progman").as_ptr(), std::ptr::null()) };
-    if progman.is_null() {
-        tracing::warn!("no Progman window; is Explorer running?");
-        return None;
+/// A classic desktop that will not split is the one case left over. The
+/// wallpaper then goes on Progman in front of the icons, which is visible and
+/// wrong rather than invisible, and says so in the log.
+pub(crate) fn find_desktop() -> Option<Desktop> {
+    let mut seen = snapshot()?;
+    let mut layout = desktop_tree::choose(&seen);
+    if layout.wants_split() {
+        split(seen.progman);
+        for _ in 0..SPLIT_POLLS {
+            std::thread::sleep(SPLIT_POLL);
+            let Some(again) = snapshot() else {
+                break;
+            };
+            seen = again;
+            layout = desktop_tree::choose(&seen);
+            if !layout.wants_split() {
+                break;
+            }
+        }
     }
 
+    let classes = |windows: &[Seen<Handle>]| {
+        windows
+            .iter()
+            .map(|window| {
+                format!(
+                    "{}{}",
+                    window.class,
+                    if window.has_icons { "(icons)" } else { "" }
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    tracing::info!(
+        raised = seen.raised_style,
+        progman_children = %classes(&seen.progman_children),
+        top_level_workers = %classes(&seen.top_workers),
+        ?layout,
+        "found the desktop"
+    );
+    match layout {
+        Layout::Unsplit { .. } => tracing::warn!(
+            "Explorer did not make a window behind the desktop icons; drawing in front of them instead"
+        ),
+        Layout::UnderIcons { layer: None, .. } => tracing::warn!(
+            "Explorer has not made its wallpaper layer, so the icons may still be drawing the wallpaper over ours"
+        ),
+        Layout::UnderIcons { .. } | Layout::Behind { .. } => {}
+    }
+    Some(layout)
+}
+
+/// The message that makes Progman split the desktop. Undocumented; `0xD, 1`
+/// is what Lively, Seelen and FeatherWall send, and unlike `0, 0` it does not
+/// depend on "Animate controls and elements inside windows" being on.
+const SPLIT_DESKTOP: u32 = 0x052C;
+
+const SPLIT_TIMEOUT_MS: u32 = 1_000;
+
+/// How often, and how many times, to look again after asking for the split.
+const SPLIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+const SPLIT_POLLS: u32 = 20;
+
+#[allow(unsafe_code)]
+fn split(progman: Handle) {
     // SAFETY: a message send with a timeout, to a window we just found, whose
     // result we do not read.
     unsafe {
         SendMessageTimeoutW(
             progman,
-            SPAWN_WORKERW,
-            WPARAM::default(),
-            LPARAM::default(),
+            SPLIT_DESKTOP,
+            0xD,
+            0x1,
             SMTO_NORMAL,
-            SPAWN_TIMEOUT_MS,
+            SPLIT_TIMEOUT_MS,
             std::ptr::null_mut(),
         );
     }
-
-    let mut worker: Handle = std::ptr::null_mut();
-    // SAFETY: the callback matches EnumWindows's signature, and the lparam is
-    // the address of `worker`, which outlives the call.
-    unsafe {
-        EnumWindows(Some(find_worker), std::ptr::from_mut(&mut worker) as LPARAM);
-    }
-
-    if worker.is_null() {
-        tracing::warn!(
-            "Explorer did not make a window behind the desktop icons; drawing in front of them instead"
-        );
-        return Some(progman);
-    }
-    Some(worker)
 }
 
-/// The message that makes Progman split the desktop in two. Undocumented, and
-/// the same value every Windows since 7 has answered to.
-const SPAWN_WORKERW: u32 = 0x052C;
-
-const SPAWN_TIMEOUT_MS: u32 = 1_000;
+/// Explorer's desktop windows as they are now.
+#[allow(unsafe_code)]
+fn snapshot() -> Option<Snapshot<Handle>> {
+    // SAFETY: FindWindowW takes a null-terminated class name and no title.
+    let progman = unsafe { FindWindowW(wide("Progman").as_ptr(), std::ptr::null()) };
+    if progman.is_null() {
+        tracing::warn!("no Progman window; is Explorer running?");
+        return None;
+    }
+    Some(snapshot_of(progman))
+}
 
 #[allow(unsafe_code)]
-unsafe extern "system" fn find_worker(window: HWND, out: LPARAM) -> i32 {
-    // SAFETY: `window` comes from EnumWindows and is valid for this call.
-    let shell_view = unsafe {
-        FindWindowExW(
-            window,
-            std::ptr::null_mut(),
-            wide("SHELLDLL_DefView").as_ptr(),
-            std::ptr::null(),
-        )
-    };
-    if shell_view.is_null() {
-        return 1;
+fn snapshot_of(progman: Handle) -> Snapshot<Handle> {
+    // The top-level `WorkerW` windows in z-order: each search starts after the
+    // one before, and a null parent keeps it to top-level windows.
+    let class = wide(desktop_tree::WORKER);
+    let mut top_workers = Vec::new();
+    let mut after: Handle = std::ptr::null_mut();
+    while top_workers.len() < MAX_WINDOWS {
+        // SAFETY: `after` is null or a window the previous search returned, and
+        // `class` is a null-terminated string that outlives the call.
+        let next = unsafe { FindWindowExW(std::ptr::null_mut(), after, class.as_ptr(), std::ptr::null()) };
+        if next.is_null() {
+            break;
+        }
+        top_workers.push(seen(next));
+        after = next;
     }
 
-    // The icons live here, so the window we want is the next WorkerW after it.
-    // SAFETY: searching top-level windows starting after `window`.
-    let sibling = unsafe {
-        FindWindowExW(
-            std::ptr::null_mut(),
-            window,
-            wide("WorkerW").as_ptr(),
-            std::ptr::null(),
-        )
-    };
-    if sibling.is_null() {
-        return 1;
+    Snapshot {
+        progman,
+        raised_style: ex_style(progman) & WS_EX_NOREDIRECTIONBITMAP != 0,
+        progman_children: children(progman).into_iter().map(seen).collect(),
+        top_workers,
     }
+}
 
-    // SAFETY: the lparam is the `&mut Handle` wallpaper_host() passed in.
-    unsafe { *(out as *mut Handle) = sibling };
-    0
+/// No desktop has this many, so a search that gets here is going round in
+/// circles on windows that are being made and destroyed under it.
+const MAX_WINDOWS: usize = 256;
+
+fn seen(window: Handle) -> Seen<Handle> {
+    Seen {
+        window,
+        class: class_of(window),
+        has_icons: has_icons(window),
+    }
+}
+
+/// A window's direct children, topmost first.
+#[allow(unsafe_code)]
+fn children(parent: Handle) -> Vec<Handle> {
+    let mut found = Vec::new();
+    // SAFETY: GetWindow is defined for any handle, and answers null for a
+    // window that has gone.
+    let mut next = unsafe { GetWindow(parent, GW_CHILD) };
+    while !next.is_null() && found.len() < MAX_WINDOWS {
+        found.push(next);
+        // SAFETY: as above.
+        next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+    }
+    found
+}
+
+#[allow(unsafe_code)]
+fn class_of(window: Handle) -> String {
+    let mut name = [0u16; 256];
+    // SAFETY: the buffer's real length is passed, and the call writes at most
+    // that many characters including the terminator.
+    let length = unsafe { GetClassNameW(window, name.as_mut_ptr(), name.len() as i32) };
+    let length = usize::try_from(length).unwrap_or(0).min(name.len());
+    String::from_utf16_lossy(name.get(..length).unwrap_or_default())
+}
+
+#[allow(unsafe_code)]
+fn has_icons(window: Handle) -> bool {
+    let class = wide(desktop_tree::ICONS);
+    // SAFETY: a search of `window`'s direct children for a null-terminated
+    // class name that outlives the call; a dead `window` finds nothing.
+    let icons = unsafe { FindWindowExW(window, std::ptr::null_mut(), class.as_ptr(), std::ptr::null()) };
+    !icons.is_null()
+}
+
+#[allow(unsafe_code)]
+fn ex_style(window: Handle) -> u32 {
+    // SAFETY: reading a window's extended style, which is defined for any
+    // handle and answers 0 for a dead one.
+    (unsafe { GetWindowLongW(window, GWL_EXSTYLE) }) as u32
 }
 
 /// Whether a window handle still names a live window.
@@ -291,16 +386,48 @@ pub(crate) fn alive(window: Handle) -> bool {
     unsafe { IsWindow(window) != 0 }
 }
 
-/// Make a borderless child window covering `rect`, parented into the desktop.
+/// A screen's wallpaper window, and the layered window it sits in on a raised
+/// desktop.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Made {
+    pub(crate) window: Handle,
+    pub(crate) holder: Option<Handle>,
+}
+
+impl Made {
+    /// The window that is a child of the desktop, and so the one to move.
+    pub(crate) fn outer(self) -> Handle {
+        self.holder.unwrap_or(self.window)
+    }
+
+    pub(crate) fn alive(self) -> bool {
+        alive(self.window) && self.holder.is_none_or(alive)
+    }
+}
+
+/// Make a borderless child window covering `rect`, inside the desktop.
 ///
-/// `rect` is in virtual-screen coordinates; the host's client area starts at
+/// `rect` is in virtual-screen coordinates; the desktop's client area starts at
 /// the virtual screen's own origin, so the offset between the two is what turns
 /// one into the other.
+///
+/// On a raised desktop the window goes inside a layered window of its own,
+/// which is what Microsoft asks for there: Progman has no redirection surface,
+/// so a plain child of it has nowhere for a copied (blt) present to land, and
+/// only presents that bypass it would show. The layered window gives every
+/// present somewhere to go, and the wallpaper window inside it stays an
+/// ordinary child for wgpu or a web view to draw into. If Windows will not make
+/// one, the wallpaper window goes straight into Progman, which works for the
+/// presents that do not need it. `KIRIE_NO_LAYERED_HOST` asks for that.
 #[allow(unsafe_code)]
-pub(crate) fn desktop_window(host: Handle, rect: Rect, take_clicks: bool) -> Option<Handle> {
+pub(crate) fn desktop_window(desktop: &Desktop, rect: Rect, take_clicks: bool) -> Option<Made> {
     register_class()?;
 
     let origin = virtual_screen();
+    let at = (
+        rect.left.saturating_sub(origin.left),
+        rect.top.saturating_sub(origin.top),
+    );
     let style_ex = if take_clicks {
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
     } else {
@@ -309,6 +436,19 @@ pub(crate) fn desktop_window(host: Handle, rect: Rect, take_clicks: bool) -> Opt
         WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT
     };
 
+    let holder = match *desktop {
+        Layout::UnderIcons { progman, .. } if std::env::var_os("KIRIE_NO_LAYERED_HOST").is_none() => {
+            layered_holder(progman, at, rect, style_ex)
+        }
+        _ => None,
+    };
+    let (parent, at) = match holder {
+        Some(holder) => (holder, (0, 0)),
+        None => (desktop.parent(), at),
+    };
+
+    // Made hidden, so that it is never seen in front of the icons while it is
+    // still being put behind them.
     // SAFETY: the class is registered above, the parent is a live window, and
     // every pointer is either null or a null-terminated string that outlives
     // the call.
@@ -317,12 +457,12 @@ pub(crate) fn desktop_window(host: Handle, rect: Rect, take_clicks: bool) -> Opt
             style_ex,
             wide(CLASS_NAME).as_ptr(),
             wide("kirie").as_ptr(),
-            WS_CHILD | WS_VISIBLE,
-            rect.left.saturating_sub(origin.left),
-            rect.top.saturating_sub(origin.top),
+            WS_CHILD | WS_CLIPSIBLINGS,
+            at.0,
+            at.1,
             rect.width() as i32,
             rect.height() as i32,
-            host,
+            parent,
             std::ptr::null_mut(),
             module_handle(),
             std::ptr::null(),
@@ -330,53 +470,197 @@ pub(crate) fn desktop_window(host: Handle, rect: Rect, take_clicks: bool) -> Opt
     };
     if window.is_null() {
         tracing::error!("could not create the wallpaper window");
+        if let Some(holder) = holder {
+            destroy(holder);
+        }
         return None;
     }
 
-    // CreateWindowExW already took `host` as the parent, but Explorer restarting
-    // orphans the window, and re-parenting is how it is put back; doing it here
-    // too keeps one path for both.
-    reparent(window, host);
-    // SAFETY: showing a window we just made, without taking focus from whatever
-    // the user is doing.
-    unsafe { ShowWindow(window, SW_SHOWNA) };
-    Some(window)
+    // A new child is linked at the bottom of its siblings, which inside
+    // Progman is behind the icons.
+    let made = Made { window, holder };
+    match *desktop {
+        Layout::UnderIcons { icons, .. } => under_icons(made.outer(), icons),
+        // On an unsplit desktop the icon view draws the wallpaper itself, so
+        // behind it nothing shows; the fallback is in front of it.
+        Layout::Unsplit { .. } => under_icons(made.outer(), None),
+        // Nothing else is in the worker behind the icons.
+        Layout::Behind { .. } => {}
+    }
+    // SAFETY: showing windows we just made, without taking focus from whatever
+    // the user is doing. The holder, when there is one, shows its child with it.
+    unsafe {
+        ShowWindow(window, SW_SHOWNA);
+        if let Some(holder) = holder {
+            ShowWindow(holder, SW_SHOWNA);
+        }
+    }
+    Some(made)
 }
 
-/// Put `window` back inside `host` and over `rect`.
+/// A hidden, opaque, layered child of Progman over `rect`, or `None` when
+/// Windows will not make one.
+///
+/// A layered child needs Windows 8 and an executable whose manifest says it
+/// knows about Windows 8, which kirie's build embeds; without it Windows can
+/// quietly make an ordinary window instead, so the style is read back. A
+/// layered window also stays invisible until its opacity is set.
 #[allow(unsafe_code)]
-pub(crate) fn reparent(window: Handle, host: Handle) {
-    if !alive(window) || !alive(host) {
+fn layered_holder(progman: Handle, at: (i32, i32), rect: Rect, style_ex: u32) -> Option<Handle> {
+    // SAFETY: as for the wallpaper window in `desktop_window`.
+    let holder = unsafe {
+        CreateWindowExW(
+            style_ex | WS_EX_LAYERED,
+            wide(CLASS_NAME).as_ptr(),
+            wide("kirie").as_ptr(),
+            WS_CHILD | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+            at.0,
+            at.1,
+            rect.width() as i32,
+            rect.height() as i32,
+            progman,
+            std::ptr::null_mut(),
+            module_handle(),
+            std::ptr::null(),
+        )
+    };
+    if holder.is_null() {
+        tracing::warn!("Windows would not make a layered window on the desktop; drawing without one");
+        return None;
+    }
+    let layered = ex_style(holder) & WS_EX_LAYERED != 0;
+    // SAFETY: a live window this process just made, with no pointer arguments.
+    let opaque = layered && unsafe { SetLayeredWindowAttributes(holder, 0, 255, LWA_ALPHA) } != 0;
+    if !opaque {
+        tracing::warn!(
+            layered,
+            "Windows would not make a layered window on the desktop; drawing without one"
+        );
+        destroy(holder);
+        return None;
+    }
+    Some(holder)
+}
+
+/// Put `window` directly below the icons, or at the top without them.
+#[allow(unsafe_code)]
+fn under_icons(window: Handle, icons: Option<Handle>) {
+    // SAFETY: a z-order change with no pointer arguments; a dead handle on
+    // either side makes it fail, and the next `keep_under_icons` tries again.
+    unsafe {
+        SetWindowPos(
+            window,
+            icons.unwrap_or(HWND_TOP),
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
+/// Keep `ours` below the icons and above Explorer's wallpaper layer on a
+/// raised desktop, answering whether anything had to move.
+///
+/// Explorer makes its layer again whenever the wallpaper or the slideshow
+/// changes, and a new window can land on top of ours, so the children are
+/// read fresh each time, and only what is out of place is moved.
+#[allow(unsafe_code)]
+pub(crate) fn keep_under_icons(desktop: &mut Desktop, ours: &[Handle]) -> bool {
+    let Layout::UnderIcons {
+        progman,
+        icons,
+        layer,
+    } = desktop
+    else {
+        return false;
+    };
+    let children = children(*progman);
+    let classes: Vec<String> = children.iter().map(|child| class_of(*child)).collect();
+    let first = |wanted: &str| {
+        children
+            .iter()
+            .zip(&classes)
+            .find(|(_, class)| class.as_str() == wanted)
+            .map(|(child, _)| *child)
+    };
+    *icons = first(desktop_tree::ICONS);
+    *layer = first(desktop_tree::WORKER);
+
+    let fix = desktop_tree::restack(&children, ours, *icons, *layer);
+    for window in &fix.lift {
+        under_icons(*window, *icons);
+    }
+    if fix.sink_layer
+        && let Some(layer) = *layer
+    {
+        // SAFETY: as in `under_icons`.
+        unsafe {
+            SetWindowPos(
+                layer,
+                HWND_BOTTOM,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+    fix.is_needed()
+}
+
+/// Put `window` back inside `parent`.
+///
+/// This only moves the window between parents; on a raised desktop the caller
+/// follows it with `keep_under_icons`, because a window given a parent lands on
+/// top of its new siblings, in front of the icons.
+#[allow(unsafe_code)]
+pub(crate) fn reparent(window: Handle, parent: Handle) {
+    if !alive(window) || !alive(parent) {
         return;
     }
     // SAFETY: both handles are live, checked immediately above.
-    unsafe { SetParent(window, host) };
+    unsafe { SetParent(window, parent) };
 }
 
 /// Move and resize a wallpaper window to cover `rect`.
 ///
 /// The z-order argument is null because `SWP_NOZORDER` is set, and that flag
 /// tells Windows to ignore whatever is passed there. Keeping the order is what
-/// is wanted: the wallpaper windows are children of the desktop host, one per
-/// monitor, so they never overlap each other, and sinking one to the bottom of
-/// that sibling list would gain nothing while risking a reshuffle every poll.
+/// is wanted: where a wallpaper sits among Explorer's windows is
+/// `keep_under_icons`'s business, and a move is not a reason to change it.
 #[allow(unsafe_code)]
-pub(crate) fn place(window: Handle, rect: Rect) {
-    if !alive(window) {
-        return;
-    }
+pub(crate) fn place(made: Made, rect: Rect) {
     let origin = virtual_screen();
-    // SAFETY: a live window, and a placement with no pointer arguments.
-    unsafe {
-        SetWindowPos(
-            window,
-            std::ptr::null_mut(),
-            rect.left.saturating_sub(origin.left),
-            rect.top.saturating_sub(origin.top),
-            rect.width() as i32,
-            rect.height() as i32,
-            SWP_NOACTIVATE | SWP_NOZORDER,
-        );
+    let at = (
+        rect.left.saturating_sub(origin.left),
+        rect.top.saturating_sub(origin.top),
+    );
+    let resize = |window: Handle, (x, y): (i32, i32)| {
+        if !alive(window) {
+            return;
+        }
+        // SAFETY: a live window, and a placement with no pointer arguments.
+        unsafe {
+            SetWindowPos(
+                window,
+                std::ptr::null_mut(),
+                x,
+                y,
+                rect.width() as i32,
+                rect.height() as i32,
+                SWP_NOACTIVATE | SWP_NOZORDER,
+            );
+        }
+    };
+    match made.holder {
+        Some(holder) => {
+            resize(holder, at);
+            resize(made.window, (0, 0));
+        }
+        None => resize(made.window, at),
     }
 }
 
@@ -678,5 +962,168 @@ mod tests {
     #[test]
     fn a_string_going_to_win32_is_terminated() {
         assert_eq!(wide("ab"), vec![b'a' as u16, b'b' as u16, 0]);
+    }
+
+    // The tests below make real windows standing in for Explorer's, so that
+    // the calls `desktop_tree`'s decisions go through are checked too: which
+    // way round `GetWindow` lists children, where `SetWindowPos` puts a window,
+    // and that a restack leaves the order it meant to.
+
+    use windows_sys::Win32::UI::WindowsAndMessaging::WS_POPUP;
+
+    /// A hidden window of `class`, registering the class on first use.
+    #[allow(unsafe_code)]
+    fn stand_in(class: &str, parent: Handle, style_ex: u32) -> Handle {
+        let name = wide(class);
+        let registration = WNDCLASSW {
+            style: 0,
+            lpfnWndProc: Some(wallpaper_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: module_handle(),
+            hIcon: std::ptr::null_mut(),
+            hCursor: std::ptr::null_mut(),
+            hbrBackground: std::ptr::null_mut(),
+            lpszMenuName: std::ptr::null(),
+            lpszClassName: name.as_ptr(),
+        };
+        let style = if parent.is_null() { WS_POPUP } else { WS_CHILD };
+        // SAFETY: as in `register_class` and `desktop_window`; registering a
+        // class twice fails harmlessly, which the second test to get here does.
+        let window = unsafe {
+            RegisterClassW(std::ptr::from_ref(&registration));
+            CreateWindowExW(
+                style_ex,
+                name.as_ptr(),
+                name.as_ptr(),
+                style,
+                0,
+                0,
+                64,
+                64,
+                parent,
+                std::ptr::null_mut(),
+                module_handle(),
+                std::ptr::null(),
+            )
+        };
+        assert!(!window.is_null(), "could not make a stand-in {class}");
+        window
+    }
+
+    #[allow(unsafe_code)]
+    fn put_after(window: Handle, after: Handle) {
+        // SAFETY: a z-order change between live windows, no pointer arguments.
+        unsafe {
+            SetWindowPos(
+                window,
+                after,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            )
+        };
+    }
+
+    const SMALL: Rect = Rect {
+        left: 0,
+        top: 0,
+        right: 32,
+        bottom: 32,
+    };
+
+    #[test]
+    fn a_raised_desktop_gets_the_wallpaper_between_the_icons_and_the_layer() {
+        let progman = stand_in(
+            "kirie-test-progman",
+            std::ptr::null_mut(),
+            WS_EX_NOREDIRECTIONBITMAP,
+        );
+        let icons = stand_in(desktop_tree::ICONS, progman, 0);
+        let layer = stand_in(desktop_tree::WORKER, progman, 0);
+        put_after(layer, icons);
+        assert_eq!(
+            children(progman),
+            vec![icons, layer],
+            "children are listed topmost first"
+        );
+
+        let mut desktop = desktop_tree::choose(&snapshot_of(progman));
+        assert_eq!(
+            desktop,
+            Layout::UnderIcons {
+                progman,
+                icons: Some(icons),
+                layer: Some(layer)
+            }
+        );
+        let made = desktop_window(&desktop, SMALL, false).expect("a wallpaper window");
+        let ours = made.outer();
+        assert_eq!(children(progman), vec![icons, ours, layer]);
+        if let Some(holder) = made.holder {
+            assert!(ex_style(holder) & WS_EX_LAYERED != 0, "the holder is layered");
+            assert_eq!(children(holder), vec![made.window]);
+        }
+
+        // Explorer makes its layer again, and the new one lands on top.
+        put_after(layer, HWND_TOP);
+        assert_eq!(children(progman), vec![layer, icons, ours]);
+        assert!(
+            keep_under_icons(&mut desktop, &[ours]),
+            "the layer was out of place"
+        );
+        assert_eq!(children(progman), vec![icons, ours, layer]);
+        assert!(
+            !keep_under_icons(&mut desktop, &[ours]),
+            "nothing moves once in place"
+        );
+
+        // And a window that ends up over the icons goes back under them.
+        put_after(ours, HWND_TOP);
+        assert!(keep_under_icons(&mut desktop, &[ours]));
+        assert_eq!(children(progman), vec![icons, ours, layer]);
+
+        destroy(progman);
+        assert!(!made.alive(), "children go with their parent");
+    }
+
+    #[test]
+    fn a_desktop_that_will_not_split_gets_the_wallpaper_in_front_of_the_icons() {
+        let progman = stand_in("kirie-test-progman", std::ptr::null_mut(), 0);
+        let icons = stand_in(desktop_tree::ICONS, progman, 0);
+
+        let desktop = desktop_tree::choose(&snapshot_of(progman));
+        assert_eq!(desktop, Layout::Unsplit { progman });
+        let made = desktop_window(&desktop, SMALL, false).expect("a wallpaper window");
+        assert!(made.holder.is_none());
+        // Behind the icon view it would be hidden: that is where the wallpaper
+        // Windows draws is on an unsplit desktop.
+        assert_eq!(children(progman), vec![made.window, icons]);
+
+        destroy(progman);
+    }
+
+    #[test]
+    fn a_classic_desktop_gets_the_wallpaper_in_the_worker_behind_the_icons() {
+        let front = stand_in(desktop_tree::WORKER, std::ptr::null_mut(), 0);
+        let _icons = stand_in(desktop_tree::ICONS, front, 0);
+        let behind = stand_in(desktop_tree::WORKER, std::ptr::null_mut(), 0);
+        put_after(behind, front);
+        let progman = stand_in("kirie-test-progman", std::ptr::null_mut(), 0);
+
+        let desktop = desktop_tree::choose(&snapshot_of(progman));
+        assert_eq!(desktop, Layout::Behind { worker: behind });
+        let made = desktop_window(&desktop, SMALL, false).expect("a wallpaper window");
+        assert!(
+            made.holder.is_none(),
+            "only a raised desktop needs a layered window"
+        );
+        assert_eq!(children(behind), vec![made.window]);
+
+        for window in [front, behind, progman] {
+            destroy(window);
+        }
     }
 }

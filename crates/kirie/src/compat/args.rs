@@ -142,6 +142,9 @@ pub struct CompatArgs {
     pub disable_particles: bool,
     pub disable_mouse: bool,
     pub interactive: bool,
+    /// `--gpu`, which Windows reads when it picks an adapter. Linux and macOS
+    /// act on it earlier, by re-running with the Vulkan driver pinned.
+    pub gpu: Option<String>,
     pub disable_parallax: bool,
     pub list_properties: bool,
     pub list_properties_json: bool,
@@ -185,6 +188,7 @@ impl Default for CompatArgs {
             disable_particles: false,
             disable_mouse: false,
             interactive: false,
+            gpu: None,
             disable_parallax: false,
             list_properties: false,
             list_properties_json: false,
@@ -612,7 +616,7 @@ fn parse_with(
                 out.screenshot_delay = n.clamp(0, u32::MAX as i64) as u32;
             }
             "--assets-dir" => out.assets_dir = Some(PathBuf::from(value()?)),
-            "--gpu" => drop(value()?),
+            "--gpu" => out.gpu = Some(value()?),
             "--release-hidden-after" => {
                 let n = scan_int("--release-hidden-after", &value()?)?;
                 out.release_hidden_after = (n > 0).then_some(n as u64);
@@ -816,6 +820,14 @@ mod tests {
         let args = parse(&os(&["kirie", "--bg=", "--fps=45"])).expect("an empty --bg is not a refusal");
         assert_eq!(args.default_background, None);
         assert_eq!(args.fps, 45, "the argument after an empty --bg is still read");
+    }
+
+    #[test]
+    fn the_gpu_haru_picked_is_kept_for_windows() {
+        let args = parse(&os(&["kirie", "--gpu=nvidia"])).expect("--gpu parses");
+        assert_eq!(args.gpu.as_deref(), Some("nvidia"));
+        let args = parse(&os(&["kirie", "--gpu", "intel"])).expect("--gpu parses");
+        assert_eq!(args.gpu.as_deref(), Some("intel"));
     }
 
     #[test]
