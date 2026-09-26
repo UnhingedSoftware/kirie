@@ -8,6 +8,7 @@ pub mod uniforms;
 
 pub mod animation;
 mod bundle;
+pub mod encoder;
 pub mod fbo;
 pub mod load;
 pub mod model;

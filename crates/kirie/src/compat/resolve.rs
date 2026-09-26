@@ -12,14 +12,35 @@ pub fn workshop_dirs() -> Vec<PathBuf> {
     steam::steamapps_dirs(Path::new(WORKSHOP_RELATIVE).join(WORKSHOP_APP_ID))
 }
 
-pub fn translate_background(value: &str) -> Result<String, ParseError> {
+/// Whether `--bg` was handed a path rather than a Workshop id.
+///
+/// A slash settles it everywhere. On Windows the same job is done by a
+/// backslash, a drive letter or a UNC prefix -- without this, a perfectly
+/// ordinary `C:\\Users\\someone\\wallpapers\\1388331347` read as a Workshop id
+/// and the run ended with "Cannot find workshop directory", which is what haru
+/// hands the renderer on every launch.
+fn looks_like_a_path(value: &str) -> bool {
     if value.contains('/') {
+        return true;
+    }
+    if !cfg!(windows) {
+        return false;
+    }
+    let bytes = value.as_bytes();
+    let drive = matches!(bytes, [letter, b':', b'/' | b'\\', ..] if letter.is_ascii_alphabetic());
+    drive || value.starts_with('\\')
+}
+
+pub fn translate_background(value: &str) -> Result<String, ParseError> {
+    if looks_like_a_path(value) {
         return Ok(value.to_owned());
     }
-    if std::env::var_os("HOME").is_none() && std::env::var_os("KIRIE_STEAM_LIBRARY").is_none() {
-        return Err(fatal(
-            "Cannot find home directory, please set the HOME environment variable",
-        ));
+    if steam::home_dir().is_none() && std::env::var_os("KIRIE_STEAM_LIBRARY").is_none() {
+        return Err(fatal(if cfg!(windows) {
+            "Cannot find the user profile directory, please set USERPROFILE or KIRIE_STEAM_LIBRARY"
+        } else {
+            "Cannot find home directory, please set the HOME environment variable"
+        }));
     }
     for dir in workshop_dirs() {
         let candidate = dir.join(value);
@@ -54,9 +75,25 @@ impl Wallpaper {
     pub fn unrunnable_reason(&self) -> Option<String> {
         match self {
             Wallpaper::Video { .. } | Wallpaper::Image { .. } | Wallpaper::Scene { .. } => None,
-            #[cfg(any(feature = "web-cef", feature = "web-webview"))]
+            // On Windows the page lives in WebView2, which is a system component
+            // rather than part of kirie. Asking whether it is there costs a
+            // registry read, and refusing up front with where to get it beats
+            // putting up a window that stays black.
+            #[cfg(all(windows, feature = "web-webview2"))]
+            Wallpaper::Web { .. } => kirie_web::webview2::runtime_version().is_none().then(|| {
+                format!(
+                    "web wallpapers need the Microsoft Edge WebView2 Runtime, which is not installed; \
+                     haru can install it, or get it from {}",
+                    kirie_web::webview2::RUNTIME_DOWNLOAD
+                )
+            }),
+            #[cfg(all(windows, not(feature = "web-webview2")))]
+            Wallpaper::Web { .. } => Some(
+                "web wallpapers need a build with WebView2 (rebuild with --features web-webview2)".to_owned(),
+            ),
+            #[cfg(all(not(windows), any(feature = "web-cef", feature = "web-webview")))]
             Wallpaper::Web { .. } => None,
-            #[cfg(not(any(feature = "web-cef", feature = "web-webview")))]
+            #[cfg(all(not(windows), not(any(feature = "web-cef", feature = "web-webview"))))]
             Wallpaper::Web { .. } => Some(
                 "web wallpapers need a web build (rebuild with --features web-cef or --features web-webview)"
                     .to_owned(),
@@ -260,4 +297,33 @@ pub enum ClassifyError {
     NotFound { path: PathBuf },
     #[error("cannot load {path}: {reason}")]
     Project { path: PathBuf, reason: String },
+}
+
+#[cfg(test)]
+mod path_shape_tests {
+    use super::looks_like_a_path;
+
+    #[test]
+    fn a_slash_means_a_path_on_every_platform() {
+        assert!(looks_like_a_path("/home/someone/wallpapers/1388331347"));
+        assert!(looks_like_a_path("wallpapers/1388331347"));
+        assert!(looks_like_a_path("C:/Users/someone/wall"));
+    }
+
+    #[test]
+    fn a_workshop_id_is_not_a_path() {
+        assert!(!looks_like_a_path("1388331347"));
+    }
+
+    #[test]
+    fn windows_spellings_read_as_paths_on_windows() {
+        // This is what haru puts in `--bg=` on Windows: `Path::display()` uses
+        // the native separator, so there is no forward slash anywhere in it.
+        assert_eq!(
+            looks_like_a_path(r"C:\Users\someone\wallpapers\1388331347"),
+            cfg!(windows)
+        );
+        assert_eq!(looks_like_a_path(r"\\server\share\wall"), cfg!(windows));
+        assert!(!looks_like_a_path(r"wallpapers\1388331347"));
+    }
 }

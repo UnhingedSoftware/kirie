@@ -75,6 +75,19 @@ fn ensure_extracted(exe: &Path) -> io::Result<PathBuf> {
     let blob_len = u64::from_le_bytes(trailer[8..16].try_into().unwrap());
     let key = std::str::from_utf8(&trailer[16..16 + KEY_LEN])
         .map_err(|_| io::Error::other("bad trailer cache key"))?;
+    if !key.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        // The key names a directory under the cache root, so a truncated
+        // download that still happens to carry the magic must not be able to
+        // make that name `..` and put the extraction somewhere else.
+        return Err(io::Error::other("bad trailer cache key"));
+    }
+    // The length comes out of the file being read, so a truncated or edited
+    // binary can claim a blob bigger than the file it is in. Subtracting that
+    // unchecked wraps to an offset near u64::MAX and the seek that follows
+    // reads nothing useful; say what is actually wrong instead.
+    let blob_off = (size - TRAILER_LEN as u64).checked_sub(blob_len).ok_or_else(|| {
+        io::Error::other("kirie self-extracting binary is truncated (payload longer than the file)")
+    })?;
 
     let root = cache_root()?;
     let dir = root.join(key);
@@ -87,7 +100,6 @@ fn ensure_extracted(exe: &Path) -> io::Result<PathBuf> {
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp)?;
 
-    let blob_off = size - TRAILER_LEN as u64 - blob_len;
     f.seek(SeekFrom::Start(blob_off))?;
     let blob = BufReader::new(f.take(blob_len));
     let decoder = zstd::Decoder::new(blob)?;

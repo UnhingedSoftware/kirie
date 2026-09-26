@@ -41,10 +41,35 @@ fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let base = std::env::var_os("XDG_CACHE_HOME")
+    Some(
+        cache_home()?
+            .join("kirie")
+            .join("pipelines")
+            .join(format!("{key}.bin")),
+    )
+}
+
+/// The per-user cache directory, under whatever name this platform gives it.
+///
+/// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so asking only for those
+/// found nothing and the pipeline cache was never written or read there.
+#[cfg(windows)]
+fn cache_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
-    Some(base.join("kirie").join("pipelines").join(format!("{key}.bin")))
+}
+
+#[cfg(unix)]
+fn cache_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })
 }
 
 #[must_use]
@@ -64,7 +89,14 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
         return;
     }
     let data = pipeline_cache_file(adapter).and_then(|p| std::fs::read(p).ok());
-    // SAFETY: the blob is our own previous `get_data()` output for this
+    // SAFETY: `create_pipeline_cache` is unsafe because a driver given a blob
+    // it did not write can do anything with it. This blob is our own previous
+    // `get_data()` output, from a file under this user's cache directory whose
+    // name is the adapter's own name, driver string and backend, so a cache
+    // written by a different GPU or a different driver is never handed back.
+    // `fallback: true` covers the rest: the driver checks its own header and
+    // starts empty rather than trusting a blob it does not recognise, which is
+    // what a truncated or edited file looks like to it.
     let cache = unsafe {
         device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
             label: Some("kirie-pipeline-cache"),

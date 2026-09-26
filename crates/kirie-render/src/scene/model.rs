@@ -13,7 +13,7 @@ use super::renderer::{
     build_bind_group, create_buffer_init, create_ubo, is_scene_rt, resolve_params, tex_res,
 };
 use super::texture::TextureRegistry;
-use super::uniforms::{Builtins, GlobalsLayout, pack_globals};
+use super::uniforms::{Builtins, GlobalsLayout};
 
 pub(super) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 
@@ -47,6 +47,10 @@ struct MeshGpu {
     index_buffer: wgpu::Buffer,
     index_count: u32,
     tex_resolution: [[f32; 4]; 8],
+    /// The bytes last uploaded, so uniforms that did not change are not sent
+    /// again. See `upload_globals`.
+    vs_ubo_sent: Vec<u8>,
+    fs_ubo_sent: Vec<u8>,
 }
 
 impl ModelGpu {
@@ -236,6 +240,8 @@ pub(super) fn build_model(
             index_buffer,
             index_count,
             tex_resolution,
+            vs_ubo_sent: Vec::new(),
+            fs_ubo_sent: Vec::new(),
         });
     }
 
@@ -304,9 +310,9 @@ fn build_tex_resolution(
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn draw_model(
-    encoder: &mut wgpu::CommandEncoder,
+    encoder: &mut super::encoder::FrameEncoder,
     queue: &wgpu::Queue,
-    model: &ModelGpu,
+    model: &mut ModelGpu,
     scene_view: &wgpu::TextureView,
     depth_view: &wgpu::TextureView,
     camera: &kirie_scene::scene::Camera,
@@ -340,31 +346,10 @@ pub(super) fn draw_model(
     let model_matrix = compute_model_matrix(model.origin, angles, model.scale);
     let mvp = matrix::mul(&view_projection, &model_matrix);
 
-    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("kirie-model-pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: scene_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-            view: depth_view,
-            depth_ops: Some(wgpu::Operations {
-                load: wgpu::LoadOp::Clear(1.0),
-                store: wgpu::StoreOp::Store,
-            }),
-            stencil_ops: None,
-        }),
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+    // A model needs a depth buffer, so it cannot share the scene's pass.
+    let rp = encoder.with_depth(scene_view, depth_view, "kirie-model-pass");
 
-    for mesh in &model.meshes {
+    for mesh in &mut model.meshes {
         let builtins = Builtins {
             time,
             daytime: 0.0,
@@ -389,19 +374,30 @@ pub(super) fn draw_model(
             audio32: audio.map_or([0.0; 32], |a| a.audio32),
             audio64: audio.map_or([0.0; 64], |a| a.audio64),
         };
-        if let Some(ubo) = &mesh.vs_ubo {
-            pack_globals(scratch, &mesh.vs_globals, &builtins, &mesh.vs_params);
-            queue.write_buffer(ubo, 0, scratch);
-        }
-        if let Some(ubo) = &mesh.fs_ubo {
-            pack_globals(scratch, &mesh.fs_globals, &builtins, &mesh.fs_params);
-            queue.write_buffer(ubo, 0, scratch);
-        }
+        super::renderer::upload_globals(
+            queue,
+            mesh.vs_ubo.as_ref(),
+            &mut mesh.vs_ubo_sent,
+            scratch,
+            &mesh.vs_globals,
+            &builtins,
+            &mesh.vs_params,
+        );
+        super::renderer::upload_globals(
+            queue,
+            mesh.fs_ubo.as_ref(),
+            &mut mesh.fs_ubo_sent,
+            scratch,
+            &mesh.fs_globals,
+            &builtins,
+            &mesh.fs_params,
+        );
         rp.set_pipeline(&mesh.pipeline);
         rp.set_bind_group(0, &mesh.g0_bind, &[]);
         rp.set_bind_group(1, &mesh.g1_bind, &[]);
         rp.set_vertex_buffer(0, mesh.vertex_buffer.slice(..));
         rp.set_index_buffer(mesh.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        crate::frame_cost::draw(1);
         rp.draw_indexed(0..mesh.index_count, 0, 0..1);
     }
 }
@@ -557,7 +553,7 @@ mod tests {
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor::default());
         let (w, h) = (636u32, 692u32);
         let snapshot = Fbo::new(&device, "diag-snap", w, h);
-        let mg = build_model(
+        let mut mg = build_model(
             &device,
             obj,
             mo,
@@ -573,35 +569,21 @@ mod tests {
 
         let color = Fbo::new(&device, "diag-color", w, h);
         let depth = create_depth_texture(&device, w, h);
-        let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
-        {
-            let _c = enc.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("diag-clear"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color.view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 1.0,
-                            g: 0.0,
-                            b: 1.0,
-                            a: 1.0,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-        }
+        let mut enc = crate::scene::encoder::FrameEncoder::new(
+            &device,
+            wgpu::Color {
+                r: 1.0,
+                g: 0.0,
+                b: 1.0,
+                a: 1.0,
+            },
+        );
+        enc.ensure_cleared(&color.view);
         let aspect = w as f32 / h as f32;
         draw_model(
             &mut enc,
             &queue,
-            &mg,
+            &mut mg,
             &color.view,
             &depth,
             &model.scene.camera,
@@ -615,7 +597,7 @@ mod tests {
             [0.5, 0.5],
             [0.5, 0.5],
         );
-        queue.submit(Some(enc.finish()));
+        enc.submit(&queue);
 
         let padded = (w * 8).div_ceil(256) * 256;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {

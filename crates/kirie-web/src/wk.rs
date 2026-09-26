@@ -285,10 +285,28 @@ fn frame_from_image(image: &NSImage) -> Option<FrameBuffer> {
         return None;
     }
 
+    if rep.isPlanar() {
+        // A planar representation hands back the first plane and measures
+        // `bytesPerRow` per plane, so the arithmetic below would describe a
+        // different buffer from the one being read.
+        return None;
+    }
     let pixels = rep.bitmapData();
+    if pixels.is_null() {
+        // AppKit answers null when the pixels are not available as one meshed
+        // buffer. `from_raw_parts` requires a non-null pointer whatever the
+        // length, so this has to be checked rather than left to the read.
+        return None;
+    }
     let row_bytes = width as usize * 4;
     let total = stride.checked_mul(height as usize)?;
-    // SAFETY: `rep` owns `total` bytes of pixel data for as long as it is alive
+    // SAFETY: `rep` owns `total` bytes of meshed pixel data for as long as it
+    // is alive, which is past the end of this function: it is not planar and
+    // `bitmapData` is not null, both checked immediately above, so
+    // `bytesPerRow * pixelsHigh` is the size of the one buffer it returned.
+    // `total` is checked for overflow, and every row read below goes through
+    // `get`, so a stride narrower than `width * 4` is an early `None` rather
+    // than a read past the end.
     let source = unsafe { std::slice::from_raw_parts(pixels, total) };
 
     let mut data = Vec::with_capacity(row_bytes * height as usize);

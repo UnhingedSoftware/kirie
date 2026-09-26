@@ -13,6 +13,9 @@ portable = ["kirie-video/static-ffmpeg", "kirie-render/static-shaderc"]
 portable-fatlibs = ["kirie-video/static-ffmpeg-from-source", "kirie-render/static-shaderc"]
 web-cef = ["dep:kirie-web", "kirie-web/host"]
 web-webview = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview-mac"]
+# Windows' system browser view. The runtime is part of Windows (or one
+# download from Microsoft), so this adds no files to the release.
+web-webview2 = ["dep:kirie-web", "kirie-web/webview2"]
 web-webview-inproc = ["dep:kirie-web", "kirie-web/webview-client", "kirie-web/webview"]
 vaapi = ["kirie-video/vaapi"]
 

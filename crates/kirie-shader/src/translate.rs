@@ -307,10 +307,31 @@ fn spirv_cache_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = CACHE_DIR_OVERRIDE.with(|c| c.borrow().clone()) {
         return Some(dir);
     }
-    let base = std::env::var_os("XDG_CACHE_HOME")
+    Some(cache_home()?.join("kirie").join("shaders"))
+}
+
+/// The per-user cache directory, under whatever name this platform gives it.
+///
+/// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so asking only for those
+/// found nothing and every shader was translated again from scratch at every
+/// launch.
+#[cfg(windows)]
+fn cache_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("LOCALAPPDATA")
+        .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".cache")))?;
-    Some(base.join("kirie").join("shaders"))
+}
+
+#[cfg(unix)]
+fn cache_home() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .filter(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })
 }
 
 fn write_cache_atomic(path: &std::path::Path, bytes: &[u8]) {

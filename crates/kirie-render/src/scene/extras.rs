@@ -618,31 +618,12 @@ pub fn build_text(
     })
 }
 
-pub fn draw_text(
-    encoder: &mut wgpu::CommandEncoder,
-    tp: &TextPipeline,
-    text: &TextGpu,
-    scene_view: &wgpu::TextureView,
-) {
-    let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("kirie-scene-text-pass"),
-        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-            view: scene_view,
-            depth_slice: None,
-            resolve_target: None,
-            ops: wgpu::Operations {
-                load: wgpu::LoadOp::Load,
-                store: wgpu::StoreOp::Store,
-            },
-        })],
-        depth_stencil_attachment: None,
-        timestamp_writes: None,
-        occlusion_query_set: None,
-        multiview_mask: None,
-    });
+/// Draws a text layer into the scene's render pass.
+pub fn draw_text(rp: &mut wgpu::RenderPass<'_>, tp: &TextPipeline, text: &TextGpu) {
     rp.set_pipeline(&tp.pipeline);
     rp.set_bind_group(0, &text.bind, &[]);
     rp.set_vertex_buffer(0, text.vertex_buffer.slice(..));
+    crate::frame_cost::draw(1);
     rp.draw(0..4, 0..1);
 }
 

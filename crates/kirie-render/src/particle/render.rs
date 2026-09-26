@@ -190,26 +190,12 @@ impl ParticleRenderer {
         n as u32
     }
 
-    pub fn draw(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView, count: u32) {
+    /// Draws the live sprites into the scene's render pass.
+    pub fn draw(&self, rp: &mut wgpu::RenderPass<'_>, count: u32) {
         if count == 0 {
             return;
         }
-        let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("kirie-particle-pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        crate::frame_cost::draw(1);
         rp.set_pipeline(&self.pipeline);
         rp.set_bind_group(0, &self.bind_group, &[]);
         rp.set_vertex_buffer(0, self.instance_buffer.slice(..));

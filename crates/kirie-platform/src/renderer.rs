@@ -121,8 +121,26 @@ pub type CommandSender = smithay_client_toolkit::reexports::calloop::channel::Se
 #[cfg(target_os = "macos")]
 pub type MakeViewFn = Box<dyn FnOnce(SurfaceSize) -> objc2::rc::Retained<objc2_app_kit::NSView> + Send>;
 
+/// A browser view filling a wallpaper window on Windows, in place of a wgpu
+/// surface. It draws itself; the backend only keeps it the right size and
+/// tells it when nobody can see it.
+#[cfg(windows)]
+pub trait PageView {
+    fn resize(&mut self, size: SurfaceSize);
+    fn set_hidden(&mut self, hidden: bool);
+}
+
+/// Make a page view inside the window whose `HWND` is given, at its size.
+///
+/// `Fn` rather than macOS's `FnOnce`, because Explorer restarting destroys the
+/// window the view lives in, and the backend then has to make it again in the
+/// replacement. `None` means the page could not be opened; the reason has
+/// been logged.
+#[cfg(windows)]
+pub type MakeViewFn = Box<dyn Fn(isize, SurfaceSize) -> Option<Box<dyn PageView>> + Send>;
+
 pub enum RenderCommand {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", windows))]
     SetView {
         screen: String,
         make: MakeViewFn,

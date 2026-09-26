@@ -31,7 +31,18 @@ pub fn run() {
     let height: u32 = arg("--height").and_then(|v| v.parse().ok()).unwrap_or(1080);
 
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-        // SAFETY: pre-gtk::init, before any thread is spawned — the process
+        // SAFETY: `set_var` is unsound as soon as another thread might read the
+        // environment, and there is no safe way to set one in Rust 1.94. This
+        // is sound because of where it sits: `run()` is the first thing this
+        // process does after `exec` -- either as `kirie-webviewhost`, whose
+        // `main` is one call to it, or as `kirie __webviewhost`, which
+        // dispatches here before anything else -- and above this line there is
+        // only argument scanning and `tracing_subscriber`, neither of which
+        // spawns a thread. `gtk::init()` and the stdin reader come after.
+        //
+        // It is a fallback for a host someone started by hand: `spawn_host`
+        // puts the variable in the child's environment, so on kirie's own paths
+        // the check above finds it and this never runs.
         unsafe { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1") };
     }
 

@@ -315,7 +315,9 @@ kirie ask --socket /run/user/1000/lwe.sock set fps 60
 
 Without `--socket` it uses `$XDG_RUNTIME_DIR/lwe.sock`, falling back to a
 per-user `0700` directory under the system temp dir when `XDG_RUNTIME_DIR` is
-unset (macOS, or a bare login).
+unset (macOS, or a bare login). Windows has no `XDG_RUNTIME_DIR`, so there it is
+`%LOCALAPPDATA%\kirie\lwe.sock`, with the same temp-directory fallback when
+`LOCALAPPDATA` is unset.
 
 ### `kirie preview`
 
@@ -564,21 +566,34 @@ KIRIE_SCREENSHOT_SIZE=2560x1440 kirie --bg 1388331347 --screenshot shot.png
 | `--render-debug <MODE>` | Narrow what gets drawn; repeatable |
 
 `--render-debug` takes `base-only`, `no-solid-final`, `pass-log`,
-`pass-readback`, `object=<ID>`, `skip-object=<ID>` or `skip-effect=<ID>`.
+`pass-readback`, `frame-cost`, `object=<ID>`, `skip-object=<ID>` or
+`skip-effect=<ID>`.
+
+`frame-cost` logs what each frame asks of the GPU — render passes, draw calls,
+scene copies and uniform uploads, plus the copies and uploads that were skipped
+because nothing had changed — every five seconds. It is the way to see what a
+wallpaper costs on your own machine.
+
+Layers that composite into the scene share one render pass. Setting
+`KIRIE_UNBATCHED_PASSES=1` goes back to a render pass per layer, which is
+slower but is there if a driver ever misbehaves with the shared one; the
+picture is the same either way.
 
 ```sh
 kirie --bg 1388331347 --dump-structure
 kirie --bg 1388331347 --screenshot shot.png --render-debug base-only
 kirie --bg 1388331347 --screenshot shot.png --render-debug skip-effect=3
+RUST_LOG=info kirie --bg 1388331347 --render-debug frame-cost
 ```
 
 Set `RUST_LOG=debug` for tracing output alongside any of these.
 
 ## Control socket
 
-A running kirie listens on a Unix socket — `$XDG_RUNTIME_DIR/lwe.sock` unless
-`--control-socket <PATH>` says otherwise — and reads one command per
-connection. Use `kirie ask`, or write to it directly with `socat`.
+A running kirie listens on a Unix socket — `$XDG_RUNTIME_DIR/lwe.sock`, or
+`%LOCALAPPDATA%\kirie\lwe.sock` on Windows, unless `--control-socket <PATH>`
+says otherwise — and reads one command per connection. It is a unix-domain
+socket at a path on disk on Windows too, not a named pipe. Use `kirie ask`, or write to it directly with `socat`.
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg 1388331347 --control-socket /tmp/kirie.sock &

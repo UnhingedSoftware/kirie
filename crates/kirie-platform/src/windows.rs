@@ -15,7 +15,7 @@ use raw_window_handle::{RawDisplayHandle, RawWindowHandle, Win32WindowHandle, Wi
 use crate::backend::PresentOptions;
 use crate::error::PlatformError;
 use crate::gpu::Gpu;
-use crate::renderer::{RenderTarget, Renderer, RendererFactory, SurfaceSize};
+use crate::renderer::{MakeViewFn, PageView, RenderTarget, Renderer, RendererFactory, SurfaceSize};
 use crate::win32::{self, Rect};
 
 struct WinOutput {
@@ -31,6 +31,12 @@ struct WinOutput {
     due_at: Option<Instant>,
     first_frame_presented: bool,
     covered: bool,
+    /// A web page drawing this screen instead of a renderer. While there is
+    /// one the window has no wgpu surface: the two cannot share a window.
+    page: Option<Box<dyn PageView>>,
+    /// How that page was made, kept so it can be made again when Explorer
+    /// takes the window down with it.
+    make_page: Option<MakeViewFn>,
 }
 
 impl WinOutput {
@@ -74,6 +80,7 @@ impl WindowsPlatform {
         options: PresentOptions,
     ) -> Result<Self, PlatformError> {
         win32::announce_dpi_awareness();
+        win32::enter_apartment();
 
         let host = win32::wallpaper_host().ok_or(PlatformError::NoDesktopHost)?;
         let chosen = chosen_monitors(&options.screen_roots);
@@ -121,6 +128,8 @@ impl WindowsPlatform {
                 due_at: None,
                 first_frame_presented: false,
                 covered: false,
+                page: None,
+                make_page: None,
             });
         }
 
@@ -181,6 +190,7 @@ impl WindowsPlatform {
 
         while let Ok(order) = self.incoming.try_recv() {
             match order {
+                RenderCommand::SetView { screen, make } => self.show_page(&screen, make),
                 RenderCommand::Build { screen, build, .. } | RenderCommand::Swap { screen, build, .. } => {
                     self.install(&screen, build);
                 }
@@ -263,17 +273,72 @@ impl WindowsPlatform {
     /// Put a freshly built wallpaper on a screen, unless building it failed --
     /// in which case what is already up is better than nothing.
     fn adopt(&mut self, at: usize, renderer: Box<dyn Renderer>) {
+        if renderer.is_placeholder() {
+            let name = self
+                .outputs
+                .get(at)
+                .map(|output| output.name.clone())
+                .unwrap_or_default();
+            tracing::error!(screen = %name, "keeping the wallpaper that is up");
+            return;
+        }
+        self.take_back(at);
         let Some(output) = self.outputs.get_mut(at) else {
             return;
         };
-        if renderer.is_placeholder() {
-            tracing::error!(screen = %output.name, "keeping the wallpaper that is up");
-            return;
-        }
         output.renderer = Some(renderer);
         output.last_frame = None;
         output.due_at = None;
         output.first_frame_presented = false;
+    }
+
+    /// Hand a screen to a web page: the renderer and its surface go, and the
+    /// page is made inside the same window.
+    fn show_page(&mut self, screen: &str, make: MakeViewFn) {
+        let Some(at) = self.output_at(screen) else {
+            return;
+        };
+        let Some(output) = self.outputs.get_mut(at) else {
+            return;
+        };
+        // The page and the swapchain cannot both own the window, and the old
+        // page has to be gone before a new one is made in its place.
+        output.page = None;
+        output.renderer = None;
+        output.wgpu_surface = None;
+        output.configured = false;
+        let page = make(win32::address(output.window), output.size());
+        if page.is_none() {
+            tracing::error!(screen = %output.name, "the page could not be opened; this screen stays empty");
+        } else {
+            tracing::info!(output = %output.name, "a web page owns this screen now");
+        }
+        output.page = page;
+        output.make_page = Some(make);
+    }
+
+    /// Take a screen back from a web page, so a renderer can draw it again.
+    fn take_back(&mut self, at: usize) {
+        let Some(output) = self.outputs.get_mut(at) else {
+            return;
+        };
+        if output.make_page.is_none() {
+            return;
+        }
+        output.page = None;
+        output.make_page = None;
+        let (window, name) = (output.window, output.name.clone());
+        match create_surface(&self.gpu.instance, window) {
+            Ok(surface) => {
+                if let Some(output) = self.outputs.get_mut(at) {
+                    output.wgpu_surface = Some(surface);
+                    output.first_frame_presented = false;
+                }
+                self.configure_swapchain(at);
+                tracing::info!(output = %name, "drawing this screen again");
+            }
+            Err(err) => tracing::error!(output = %name, %err, "cannot draw this screen again"),
+        }
     }
 
     fn output_at(&self, screen: &str) -> Option<usize> {
@@ -369,6 +434,15 @@ impl WindowsPlatform {
             tracing::error!(output = %name, "could not make the wallpaper window again");
             return;
         };
+        if let Some(output) = self.outputs.get_mut(index)
+            && let Some(make) = output.make_page.as_ref()
+        {
+            // The old page died with its window; make it again in the new one.
+            output.page = None;
+            output.page = make(win32::address(window), output.size());
+            output.window = window;
+            return;
+        }
         let surface = match create_surface(&self.gpu.instance, window) {
             Ok(surface) => Some(surface),
             Err(err) => {
@@ -404,6 +478,13 @@ impl WindowsPlatform {
                 output.rect = rect;
             }
             win32::place(window, rect);
+            if let Some(output) = self.outputs.get_mut(index) {
+                let size = output.size();
+                if let Some(page) = output.page.as_mut() {
+                    page.resize(size);
+                    continue;
+                }
+            }
             self.configure_swapchain(index);
         }
     }
@@ -467,6 +548,17 @@ impl WindowsPlatform {
             } else {
                 true
             };
+        }
+    }
+
+    /// A page under a full-screen window stops drawing, the way a renderer
+    /// slows to a frame a second. WebView2 throttles a hidden view itself.
+    fn hide_covered_pages(&mut self) {
+        for output in &mut self.outputs {
+            let covered = output.covered;
+            if let Some(page) = output.page.as_mut() {
+                page.set_hidden(covered);
+            }
         }
     }
 
@@ -627,6 +719,7 @@ impl WindowsPlatform {
                 self.keep_host();
                 self.resize_to_screens();
                 self.notice_whats_on_top();
+                self.hide_covered_pages();
             }
 
             if let Some(deadline) = deadline
@@ -674,6 +767,7 @@ impl Drop for WindowsPlatform {
         // desktop as a dead grey rectangle until the next restart.
         for output in &mut self.outputs {
             output.renderer = None;
+            output.page = None;
             output.wgpu_surface = None;
             win32::destroy(output.window);
         }
