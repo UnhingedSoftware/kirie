@@ -30,6 +30,7 @@ fn main() {
     println!("cargo:rustc-env=KIRIE_WEBVIEWHOST_BLOB={}", blob.display());
 
     link_media_foundation();
+    embed_manifest();
 }
 
 // vcpkg's ffmpeg builds avcodec with the Media Foundation encoder, so avcodec.lib
@@ -47,4 +48,24 @@ fn link_media_foundation() {
         println!("cargo:rustc-link-lib=mfuuid");
         println!("cargo:rustc-link-lib=strmiids");
     }
+}
+
+// kirie.exe says which Windows versions it knows about (kirie.exe.manifest has
+// why). The release build is MSVC, whose linker embeds a manifest given these
+// two flags. A build without one still runs; it only loses the layered window
+// on a raised desktop and draws straight into Progman instead.
+fn embed_manifest() {
+    let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
+    let msvc = std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if !(windows && msvc) {
+        return;
+    }
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("kirie.exe.manifest");
+    println!("cargo:rerun-if-changed={}", manifest.display());
+    println!("cargo:rustc-link-arg-bin=kirie=/MANIFEST:EMBED");
+    println!(
+        "cargo:rustc-link-arg-bin=kirie=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }

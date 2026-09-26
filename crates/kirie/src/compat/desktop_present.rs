@@ -72,6 +72,7 @@ pub fn present(args: &CompatArgs) -> ExitCode {
         playback_speed: args.playback_speed,
         pointer: !args.disable_mouse,
         take_clicks: args.interactive,
+        gpu: args.gpu.clone(),
         ..PresentOptions::default()
     };
 

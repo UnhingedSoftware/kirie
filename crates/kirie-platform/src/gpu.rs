@@ -20,6 +20,113 @@ pub fn power_preference() -> wgpu::PowerPreference {
     }
 }
 
+/// One adapter wgpu offered on Windows, as much of it as choosing needs.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Offer {
+    pub(crate) backend: wgpu::Backend,
+    /// PCI ids, which are the same whichever backend reports the GPU, and so
+    /// what tells one GPU's Vulkan and DX12 adapters apart from another's.
+    pub(crate) vendor: u32,
+    pub(crate) device: u32,
+    pub(crate) software: bool,
+}
+
+/// Which GPU `preference` put first, and why.
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Aim {
+    /// The one `--gpu` or `KIRIE_GPU` named.
+    Asked,
+    /// `--gpu` named a GPU this machine does not have, so the screen's.
+    AskedButAbsent,
+    /// The GPU driving the screen.
+    Screen,
+    /// No DX12 adapter to say which GPU drives the screen, which happens when
+    /// `WGPU_BACKEND` leaves DX12 out, so wgpu's own order.
+    Anything,
+}
+
+/// The order to try `offers` in, best first, for a Windows desktop.
+///
+/// The GPU to use is the one driving the screen, not the most frugal one: a
+/// wallpaper drawn anywhere else has to be copied across to it every frame,
+/// and on a desktop with the monitor on the graphics card and the integrated
+/// GPU still enabled, that copy is where frames went missing. DXGI lists that
+/// GPU first -- it is also where Windows' own per-app graphics setting moves
+/// whichever GPU the user picked -- and wgpu keeps DXGI's order for its DX12
+/// adapters, so the first DX12 adapter names it. `--gpu` overrides it with a
+/// word from `kirie gpus`.
+///
+/// On the chosen GPU Vulkan comes before DX12, because Vulkan is what kirie's
+/// shaders are written and tested against; DX12 is there for a GPU without a
+/// Vulkan driver. Every other adapter follows as a fallback, software last.
+#[cfg(any(windows, test))]
+pub(crate) fn preference(offers: &[Offer], wanted: Option<&str>) -> (Vec<usize>, Aim) {
+    let key = |offer: &Offer| (offer.vendor, offer.device);
+    let screen = offers
+        .iter()
+        .find(|offer| offer.backend == wgpu::Backend::Dx12 && !offer.software)
+        .map(key);
+
+    let wanted = wanted
+        .map(str::trim)
+        .filter(|word| !word.is_empty() && !word.eq_ignore_ascii_case("auto"));
+    let asked = wanted.and_then(|word| {
+        let named: Vec<&Offer> = offers.iter().filter(|offer| names(word, offer)).collect();
+        // Of two GPUs from one vendor, the one on the screen, or else the one
+        // DXGI puts first.
+        named
+            .iter()
+            .find(|offer| Some(key(offer)) == screen)
+            .or_else(|| named.iter().find(|offer| offer.backend == wgpu::Backend::Dx12))
+            .or_else(|| named.first())
+            .map(|offer| key(offer))
+    });
+    let (target, aim) = match (asked, wanted, screen) {
+        (Some(asked), _, _) => (Some(asked), Aim::Asked),
+        (None, Some(_), _) => (screen, Aim::AskedButAbsent),
+        (None, None, Some(screen)) => (Some(screen), Aim::Screen),
+        (None, None, None) => (None, Aim::Anything),
+    };
+
+    let mut order: Vec<usize> = (0..offers.len()).collect();
+    order.sort_by_key(|at| {
+        let Some(offer) = offers.get(*at) else {
+            return (u8::MAX, u8::MAX, *at);
+        };
+        let tier = if target.is_some_and(|target| key(offer) == target) {
+            0
+        } else if offer.software {
+            2
+        } else {
+            1
+        };
+        let backend = match offer.backend {
+            wgpu::Backend::Vulkan => 0,
+            wgpu::Backend::Dx12 => 1,
+            _ => 2,
+        };
+        (tier, backend, *at)
+    });
+    (order, aim)
+}
+
+/// Whether a `--gpu` word, as `kirie gpus` lists them, names this adapter.
+#[cfg(any(windows, test))]
+fn names(word: &str, offer: &Offer) -> bool {
+    let word = word.to_ascii_lowercase();
+    match word.as_str() {
+        "lvp" | "software" | "cpu" => offer.software,
+        _ if offer.software => false,
+        "nvidia" => offer.vendor == 0x10DE,
+        "amd" => matches!(offer.vendor, 0x1002 | 0x1022),
+        "intel" => offer.vendor == 0x8086,
+        "virtio" => offer.vendor == 0x1AF4,
+        _ => false,
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub(crate) struct Gpu {
     pub instance: wgpu::Instance,
@@ -220,4 +327,103 @@ fn create_wgpu_surface(
     }?;
 
     Ok(surface)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wgpu::Backend::{Dx12, Gl, Vulkan};
+
+    const NVIDIA: (u32, u32) = (0x10DE, 0x2484);
+    const INTEL: (u32, u32) = (0x8086, 0x4680);
+    const WARP: (u32, u32) = (0x1414, 0x008C);
+
+    fn offer(backend: wgpu::Backend, (vendor, device): (u32, u32)) -> Offer {
+        Offer {
+            backend,
+            vendor,
+            device,
+            software: (vendor, device) == WARP,
+        }
+    }
+
+    /// A desktop with its monitor on the graphics card and the integrated GPU
+    /// still enabled, listed the way wgpu lists them: Vulkan, then DX12 in
+    /// DXGI's order.
+    fn desktop() -> Vec<Offer> {
+        vec![
+            offer(Vulkan, INTEL),
+            offer(Vulkan, NVIDIA),
+            offer(Dx12, NVIDIA),
+            offer(Dx12, INTEL),
+            offer(Dx12, WARP),
+        ]
+    }
+
+    #[test]
+    fn the_gpu_driving_the_screen_comes_first_on_vulkan() {
+        let (order, aim) = preference(&desktop(), None);
+        assert_eq!(order, vec![1, 2, 0, 3, 4]);
+        assert_eq!(aim, Aim::Screen);
+    }
+
+    #[test]
+    fn a_laptop_panel_on_the_integrated_gpu_keeps_it() {
+        let laptop = vec![
+            offer(Vulkan, INTEL),
+            offer(Vulkan, NVIDIA),
+            offer(Dx12, INTEL),
+            offer(Dx12, NVIDIA),
+            offer(Dx12, WARP),
+        ];
+        assert_eq!(preference(&laptop, None).0, vec![0, 2, 1, 3, 4]);
+    }
+
+    #[test]
+    fn gpu_names_the_vendor_whichever_gpu_drives_the_screen() {
+        let (order, aim) = preference(&desktop(), Some("intel"));
+        assert_eq!(order, vec![0, 3, 1, 2, 4]);
+        assert_eq!(aim, Aim::Asked);
+        assert_eq!(preference(&desktop(), Some(" NVIDIA ")).0.first(), Some(&1));
+    }
+
+    #[test]
+    fn auto_and_nothing_mean_the_screen() {
+        for word in [None, Some(""), Some("auto"), Some("Auto")] {
+            assert_eq!(
+                preference(&desktop(), word),
+                preference(&desktop(), None),
+                "{word:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_gpu_this_machine_lacks_falls_back_to_the_screen() {
+        for word in ["amd", "banana"] {
+            let (order, aim) = preference(&desktop(), Some(word));
+            assert_eq!(order.first(), Some(&1), "{word}");
+            assert_eq!(aim, Aim::AskedButAbsent, "{word}");
+        }
+    }
+
+    #[test]
+    fn software_is_last_unless_asked_for() {
+        assert_eq!(preference(&desktop(), None).0.last(), Some(&4));
+        assert_eq!(preference(&desktop(), Some("lvp")).0.first(), Some(&4));
+    }
+
+    #[test]
+    fn without_dx12_the_order_is_wgpus_own() {
+        let vulkan_only = vec![offer(Vulkan, NVIDIA), offer(Vulkan, INTEL), offer(Gl, NVIDIA)];
+        let (order, aim) = preference(&vulkan_only, None);
+        assert_eq!(order, vec![0, 1, 2]);
+        assert_eq!(aim, Aim::Anything);
+    }
+
+    #[test]
+    fn a_gpu_without_vulkan_still_gets_dx12() {
+        let no_vulkan = vec![offer(Vulkan, INTEL), offer(Dx12, NVIDIA), offer(Dx12, INTEL)];
+        assert_eq!(preference(&no_vulkan, None).0, vec![1, 0, 2]);
+    }
 }

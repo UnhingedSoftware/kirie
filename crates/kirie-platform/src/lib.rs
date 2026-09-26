@@ -2,6 +2,10 @@
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 mod backend;
+// Pure, so it is built for tests everywhere; only Windows uses it.
+#[cfg(any(windows, test))]
+#[cfg_attr(not(windows), allow(dead_code))]
+mod desktop_tree;
 mod error;
 mod gpu;
 #[cfg(target_os = "macos")]

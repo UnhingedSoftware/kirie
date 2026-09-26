@@ -22,6 +22,10 @@ pub struct PresentOptions {
     pub activity_paused: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub pointer: bool,
     pub take_clicks: bool,
+    /// The GPU to draw on, as a word from `kirie gpus`. Only Windows reads it;
+    /// elsewhere `--gpu` has already pinned the Vulkan driver by the time the
+    /// platform starts.
+    pub gpu: Option<String>,
 }
 
 impl Default for PresentOptions {
@@ -38,6 +42,7 @@ impl Default for PresentOptions {
             activity_paused: None,
             pointer: true,
             take_clicks: false,
+            gpu: None,
         }
     }
 }

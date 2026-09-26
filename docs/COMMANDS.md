@@ -162,7 +162,9 @@ kirie gpus --json
 kirie --gpu nvidia --screen-root HDMI-A-1 --bg 1388331347
 ```
 
-`auto` is always listed first and means "no pinning".
+`auto` is always listed first and means "no pinning". On Windows it means the
+GPU driving the screen, which is where Windows' own per-app graphics setting
+also points.
 
 ### `kirie extract`
 
@@ -451,7 +453,7 @@ unknown name fails with the list of names that do exist.
 | `--playback-speed <X>` | `1.0` | Animation speed multiplier (alias `--clock`) |
 | `--render-scale <X>` | `1.0` | Render below or above native, then scale |
 | `--fit-render-to-output` | off | Render at the output size rather than the scene's |
-| `--gpu <SELECTOR>` | `auto` | Pin to one Vulkan adapter, from `kirie gpus` |
+| `--gpu <SELECTOR>` | `auto` | Draw on one GPU, from `kirie gpus` (on Windows, `auto` is the GPU driving the screen) |
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg 1388331347 --fps 60
@@ -669,6 +671,8 @@ kirie ask workshop subscribe 1388331347
 | `KIRIE_NO_PIPELINE_CACHE` | Skip the on-disk pipeline cache |
 | `KIRIE_SHADER_DUMP`, `KIRIE_SHADER_DUMP_ALL` | Write translated shaders to disk |
 | `KIRIE_WEB_CONSOLE` | Forward web-wallpaper console output to the log |
+| `KIRIE_NO_LAYERED_HOST` | Windows 11 24H2 and later: draw straight into the desktop instead of inside a layered window under the icons |
+| `WGPU_BACKEND` | Windows: limit the GPU backends kirie tries, e.g. `dx12` or `vulkan` |
 | `KIRIE_CORPUS` | Wallpaper corpus directory used by the tests |
 | `RUST_LOG` | Tracing filter, e.g. `RUST_LOG=debug` |
 | `XDG_RUNTIME_DIR` | Where the default control socket lives |
