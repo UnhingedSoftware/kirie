@@ -154,10 +154,34 @@ impl Manifest {
         ];
         let value: serde_json::Value =
             serde_json::from_slice(bytes).map_err(|e| PackError::BadManifest(e.to_string()))?;
-        if let Some(fields) = value.as_object()
-            && let Some(unknown) = fields.keys().find(|k| !KNOWN.contains(&k.as_str()))
+        check_fields(&value, "", &KNOWN)?;
+        if let Some(provenance) = value.get("provenance") {
+            check_fields(provenance, "provenance.", &["origin", "source", "source_id"])?;
+        }
+        for (i, property) in value
+            .get("properties")
+            .and_then(|p| p.as_array())
+            .into_iter()
+            .flatten()
+            .enumerate()
         {
-            return Err(PackError::BadManifest(format!("unknown field {unknown:?}")));
+            let extra: &[&str] = match property.get("type").and_then(|t| t.as_str()) {
+                Some("slider") => &["min", "max", "step", "default"],
+                Some("choice") => &["options", "default"],
+                _ => &["default"],
+            };
+            let allowed: Vec<&str> = ["key", "label", "type"].iter().chain(extra).copied().collect();
+            let at = format!("properties[{i}].");
+            check_fields(property, &at, &allowed)?;
+            for (j, option) in property
+                .get("options")
+                .and_then(|o| o.as_array())
+                .into_iter()
+                .flatten()
+                .enumerate()
+            {
+                check_fields(option, &format!("{at}options[{j}]."), &["value", "label"])?;
+            }
         }
         serde_json::from_value(value).map_err(|e| PackError::BadManifest(e.to_string()))
     }
@@ -272,6 +296,17 @@ impl PropertyValue {
     }
 }
 
+/// Refuse fields of a JSON object that are not in `allowed`, naming the
+/// first one with its place in the manifest.
+fn check_fields(value: &serde_json::Value, at: &str, allowed: &[&str]) -> Result<(), PackError> {
+    if let Some(fields) = value.as_object()
+        && let Some(unknown) = fields.keys().find(|k| !allowed.contains(&k.as_str()))
+    {
+        return Err(PackError::BadManifest(format!("unknown field {at}{unknown}")));
+    }
+    Ok(())
+}
+
 fn is_version(v: &str) -> bool {
     let parts: Vec<&str> = v.split('.').collect();
     parts.len() == 3
@@ -373,5 +408,24 @@ mod tests {
         let text = br#"{"id":"a","title":"A","kind":"video","entry":"a.mp4","colour":"red"}"#;
         assert!(Manifest::from_json_strict(text).is_err());
         Manifest::from_json(text).unwrap();
+
+        let nested = [
+            br#"{"id":"a","title":"A","kind":"video","entry":"a.mp4","properties":[
+                {"key":"s","label":"S","type":"slider","min":0,"max":2,"step":1,"default":1,"defualt":0}]}"#
+                .as_slice(),
+            br#"{"id":"a","title":"A","kind":"video","entry":"a.mp4","properties":[
+                {"key":"m","label":"M","type":"choice","default":"d",
+                 "options":[{"value":"d","label":"D","lable":"x"}]}]}"#,
+            br#"{"id":"a","title":"A","kind":"video","entry":"a.mp4",
+                "provenance":{"origin":"original","sorce":"x"}}"#,
+        ];
+        for text in nested {
+            assert!(
+                Manifest::from_json_strict(text).is_err(),
+                "{}",
+                String::from_utf8_lossy(text)
+            );
+            Manifest::from_json(text).unwrap();
+        }
     }
 }

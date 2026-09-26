@@ -102,8 +102,37 @@ pub(crate) fn check_entry_path(path: &str) -> Result<(), PackError> {
             "." | ".." => return Err(bad("it has a . or .. component")),
             _ => {}
         }
+        if part.contains(['<', '>', '"', '|', '?', '*']) {
+            return Err(bad(
+                "it contains a character Windows does not allow in file names",
+            ));
+        }
+        if part.ends_with(['.', ' ']) {
+            return Err(bad("a component ends in a dot or space, which Windows drops"));
+        }
+        if is_windows_device_name(part) {
+            return Err(bad("a component is a reserved Windows device name"));
+        }
     }
     Ok(())
+}
+
+/// `CON`, `nul.txt`, `COM1` and the like name devices on Windows whatever
+/// their extension, so a file by that name cannot be unpacked there.
+fn is_windows_device_name(part: &str) -> bool {
+    let stem = part
+        .split('.')
+        .next()
+        .unwrap_or(part)
+        .trim_end()
+        .to_ascii_uppercase();
+    match stem.as_str() {
+        "CON" | "PRN" | "AUX" | "NUL" => true,
+        _ => {
+            let digit = stem.strip_prefix("COM").or_else(|| stem.strip_prefix("LPT"));
+            digit.is_some_and(|d| d.len() == 1 && d.as_bytes()[0].is_ascii_digit() && d != "0")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -123,10 +152,26 @@ mod tests {
             "a\\b",
             "a\nb",
             "a/",
+            "a?b",
+            "dir./x",
+            "x ",
+            "CON",
+            "web/nul.txt",
+            "com1.json",
+            "Lpt9",
+            "aux .png",
         ] {
             assert!(check_entry_path(bad).is_err(), "{bad:?} should be refused");
         }
-        for good in ["scene.bin", "shaders/water.spv", "web/index.html", "a b/c-d_e.f"] {
+        for good in [
+            "scene.bin",
+            "shaders/water.spv",
+            "web/index.html",
+            "a b/c-d_e.f",
+            "console.js",
+            "com10.png",
+            "com0",
+        ] {
             check_entry_path(good).unwrap();
         }
     }
