@@ -10,6 +10,7 @@ pub mod gpus;
 pub mod info;
 pub mod list;
 mod os;
+pub mod pack;
 pub mod preview;
 mod preview_render;
 pub mod soak;
@@ -81,6 +82,15 @@ enum Command {
         fps: Option<u32>,
         #[arg(long)]
         size: Option<u32>,
+    },
+    /// Package a folder holding kirie.json into a .kpk, or with --inspect,
+    /// show and check an existing package.
+    Pack {
+        path: PathBuf,
+        #[arg(short = 'o', long = "output", conflicts_with = "inspect")]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        inspect: bool,
     },
     Extract {
         path: PathBuf,
@@ -168,6 +178,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
         Some(sub)
             if sub == "info"
                 || sub == "extract"
+                || sub == "pack"
                 || sub == "check"
                 || sub == "list"
                 || sub == "gpus"
@@ -241,6 +252,17 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             tex_to_png,
         } => extract::run(&path, &output, tex_to_png),
         Command::List { dir, json } => list::run(dir.as_deref(), json),
+        Command::Pack {
+            path,
+            output,
+            inspect,
+        } => {
+            if inspect {
+                pack::inspect(&path)
+            } else {
+                pack::run(&path, output)
+            }
+        }
         Command::Gpus { json } => gpus::run(json),
         Command::Update { check, force } => update::run(check, force),
         Command::Workshop { command } => match command {

@@ -5,6 +5,7 @@ members = [
     "crates/kirie-formats",
     "crates/kirie-scene",
     "crates/kirie-bake",
+    "crates/kirie-pack",
     "crates/kirie-render",
     "crates/kirie-shader",
     "crates/kirie-audio",
@@ -25,6 +26,7 @@ repository = "https://github.com/UnhingedSoftware/kirie"
 
 [workspace.dependencies]
 kirie-formats = { path = "crates/kirie-formats" }
+kirie-pack = { path = "crates/kirie-pack" }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 thiserror = "2"
