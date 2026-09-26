@@ -476,9 +476,16 @@ pub(crate) fn desktop_window(desktop: &Desktop, rect: Rect, take_clicks: bool) -
         return None;
     }
 
+    // A new child is linked at the bottom of its siblings, which inside
+    // Progman is behind the icons.
     let made = Made { window, holder };
-    if let Layout::UnderIcons { icons, .. } = *desktop {
-        under_icons(made.outer(), icons);
+    match *desktop {
+        Layout::UnderIcons { icons, .. } => under_icons(made.outer(), icons),
+        // On an unsplit desktop the icon view draws the wallpaper itself, so
+        // behind it nothing shows; the fallback is in front of it.
+        Layout::Unsplit { .. } => under_icons(made.outer(), None),
+        // Nothing else is in the worker behind the icons.
+        Layout::Behind { .. } => {}
     }
     // SAFETY: showing windows we just made, without taking focus from whatever
     // the user is doing. The holder, when there is one, shows its child with it.
@@ -1080,6 +1087,22 @@ mod tests {
 
         destroy(progman);
         assert!(!made.alive(), "children go with their parent");
+    }
+
+    #[test]
+    fn a_desktop_that_will_not_split_gets_the_wallpaper_in_front_of_the_icons() {
+        let progman = stand_in("kirie-test-progman", std::ptr::null_mut(), 0);
+        let icons = stand_in(desktop_tree::ICONS, progman, 0);
+
+        let desktop = desktop_tree::choose(&snapshot_of(progman));
+        assert_eq!(desktop, Layout::Unsplit { progman });
+        let made = desktop_window(&desktop, SMALL, false).expect("a wallpaper window");
+        assert!(made.holder.is_none());
+        // Behind the icon view it would be hidden: that is where the wallpaper
+        // Windows draws is on an unsplit desktop.
+        assert_eq!(children(progman), vec![made.window, icons]);
+
+        destroy(progman);
     }
 
     #[test]

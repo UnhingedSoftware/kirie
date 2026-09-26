@@ -453,7 +453,7 @@ unknown name fails with the list of names that do exist.
 | `--playback-speed <X>` | `1.0` | Animation speed multiplier (alias `--clock`) |
 | `--render-scale <X>` | `1.0` | Render below or above native, then scale |
 | `--fit-render-to-output` | off | Render at the output size rather than the scene's |
-| `--gpu <SELECTOR>` | `auto` | Draw on one GPU, from `kirie gpus` (on Windows, `auto` is the GPU driving the screen) |
+| `--gpu <SELECTOR>` | `auto` | Draw on one GPU, from `kirie gpus` (on Windows it applies to the desktop wallpaper, and `auto` is the GPU driving the screen) |
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg 1388331347 --fps 60
