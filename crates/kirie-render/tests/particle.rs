@@ -559,3 +559,51 @@ fn disabled_override_freezes_sim() {
     }
     assert_eq!(sim.total_spawned(), 0);
 }
+
+fn run_frames(ops: serde_json::Value, frames: usize) -> Vec<kirie_render::particle::SpriteInstance> {
+    let mut def = serde_json::Map::new();
+    def.insert("maxcount".into(), json!(1));
+    def.insert("emitter".into(), json!([{"name":"boxrandom","rate":1000.0}]));
+    def.insert(
+        "initializer".into(),
+        json!([{"name":"lifetimerandom","min":100.0,"max":100.0}]),
+    );
+    def.insert("operator".into(), ops);
+    let system = ParticleSystem::from_value(&serde_json::Value::Object(def));
+    let mut sim = ParticleSim::new(
+        &system,
+        &InstanceOverride::default(),
+        SimConfig { seed: 1, sheet: None },
+    );
+    let mut out = Vec::new();
+    for _ in 0..frames {
+        sim.update(1.0 / 60.0);
+    }
+    sim.write_sprites(&mut out);
+    out
+}
+
+#[test]
+fn oscillatealpha_does_not_compound_over_frames() {
+    // A twinkle between 50% and 100% must never go below 50%, however many
+    // frames it has run.
+    let ops = json!([{"name":"oscillatealpha","frequencymin":1.0,"frequencymax":1.0,
+                      "scalemin":0.5,"scalemax":1.0}]);
+    for frames in [1, 30, 120, 600] {
+        let sprites = run_frames(ops.clone(), frames);
+        let alpha = sprites[0].color[3];
+        assert!(alpha >= 0.5 - 1e-4, "after {frames} frames alpha is {alpha}");
+    }
+}
+
+#[test]
+fn two_alpha_operators_multiply() {
+    // alphachange halves the alpha from the start; alphafade keeps it whole in
+    // mid-life. The particle shows both, not just whichever came last.
+    let ops = json!([
+        {"name":"alphachange","startvalue":0.5,"endvalue":0.5},
+        {"name":"alphafade","fadeintime":0.0001,"fadeouttime":0.0001}
+    ]);
+    let sprites = run_frames(ops, 60);
+    approx(sprites[0].color[3], 0.5);
+}
