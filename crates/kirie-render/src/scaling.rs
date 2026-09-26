@@ -66,7 +66,9 @@ impl ScalingMode {
 
         match self {
             Self::Stretch => UvWindow::FULL,
-            Self::Fill => {
+            // Wallpaper Engine covers the screen: scale until both sides fit,
+            // centre, and crop the overhang. Never bars, never stretched edges.
+            Self::Default | Self::Fill => {
                 if wide > tall {
                     UvWindow::with_u(u_range(cw, ch, vw, vh))
                 } else if tall > wide {
@@ -83,16 +85,6 @@ impl ScalingMode {
                 } else {
                     UvWindow::FULL
                 }
-            }
-            Self::Default => {
-                let mut window = UvWindow::FULL;
-                if (vh > vw && cw >= ch) || (vw > vh && ch > cw) {
-                    (window.u0, window.u1) = u_range(cw, ch, vw, vh);
-                }
-                if (vw > vh && cw >= ch) || (vh > vw && ch > cw) {
-                    (window.v0, window.v1) = v_range(cw, ch, vw, vh);
-                }
-                window
             }
         }
     }
@@ -274,61 +266,42 @@ mod tests {
     }
 
     #[test]
-    fn default_landscape_viewport_landscape_content_adjusts_v() {
-        assert_eq!(window(ScalingMode::Default, HD, (1920, 1080)), UvWindow::FULL);
-
-        let w = window(ScalingMode::Default, HD, (2560, 1080));
-        assert_eq!((w.u0, w.u1), (0.0, 1.0));
-        assert_eq!((w.v0, w.v1), (0.125, 0.875));
-
-        let w = window(ScalingMode::Default, HD, (1024, 768));
-        let two_thirds = 2.0f32 / 3.0;
-        assert_eq!((w.u0, w.u1), (0.0, 1.0));
-        assert_eq!((w.v0, w.v1), (0.5 - two_thirds, 0.5 + two_thirds));
-    }
-
-    #[test]
-    fn default_portrait_viewport_landscape_content_adjusts_u() {
-        let w = window(ScalingMode::Default, HD, (1080, 1920));
-        assert_eq!((w.u0, w.u1), (0.5 - 81.0 / 512.0, 0.5 + 81.0 / 512.0));
-        assert_eq!((w.v0, w.v1), (0.0, 1.0));
-    }
-
-    #[test]
-    fn default_landscape_viewport_portrait_content_adjusts_u() {
-        let w = window(ScalingMode::Default, HD_PORTRAIT, (1920, 1080));
-        let half = (1920.0f32 * 1920.0) / (2.0 * 1080.0 * 1080.0);
-        assert_eq!((w.u0, w.u1), (0.5 - half, 0.5 + half));
-        assert_eq!((w.v0, w.v1), (0.0, 1.0));
-    }
-
-    #[test]
-    fn default_portrait_viewport_portrait_content_adjusts_v() {
-        assert_eq!(
-            window(ScalingMode::Default, HD_PORTRAIT, (1080, 1920)),
-            UvWindow::FULL
-        );
-
-        let w = window(ScalingMode::Default, HD_PORTRAIT, (1080, 2520));
-        assert_eq!((w.u0, w.u1), (0.0, 1.0));
-        assert_eq!((w.v0, w.v1), (0.5 - 0.65625, 0.5 + 0.65625));
-    }
-
-    #[test]
-    fn default_square_viewport_touches_nothing() {
-        for content in [HD, HD_PORTRAIT, SQUARE] {
-            assert_eq!(
-                window(ScalingMode::Default, content, (1000, 1000)),
-                UvWindow::FULL
-            );
+    fn default_covers_the_screen_like_fill() {
+        for content in [HD, HD_PORTRAIT, SQUARE, (2560, 1080)] {
+            for viewport in [
+                (1920, 1080),
+                (1920, 1200),
+                (1024, 768),
+                (2560, 1080),
+                (1080, 1920),
+                (1000, 1000),
+            ] {
+                assert_eq!(
+                    window(ScalingMode::Default, content, viewport),
+                    window(ScalingMode::Fill, content, viewport),
+                    "{content:?} on {viewport:?}"
+                );
+            }
         }
     }
 
     #[test]
-    fn default_square_content_counts_as_landscape() {
-        let w = window(ScalingMode::Default, SQUARE, (1080, 1920));
-        assert_eq!((w.u0, w.u1), (0.5 - 0.28125, 0.5 + 0.28125));
-        assert_eq!((w.v0, w.v1), (0.0, 1.0));
+    fn default_never_reaches_past_the_content() {
+        // A 16:9 scene on a 16:10 or 4:3 screen crops the sides; it used to
+        // overscan the height and smear the top and bottom rows.
+        for viewport in [(1920, 1200), (1024, 768), (1000, 1000), (1080, 1920)] {
+            let w = window(ScalingMode::Default, HD, viewport);
+            assert!(
+                w.u0 >= 0.0 && w.u1 <= 1.0 && w.v0 >= 0.0 && w.v1 <= 1.0,
+                "{viewport:?}: {w:?}"
+            );
+            let shown = (w.u1 - w.u0) * 1920.0 / ((w.v1 - w.v0) * 1080.0);
+            let screen = viewport.0 as f32 / viewport.1 as f32;
+            assert!(
+                (shown - screen).abs() < 1e-4,
+                "{viewport:?}: aspect {shown} vs {screen}"
+            );
+        }
     }
 
     #[test]

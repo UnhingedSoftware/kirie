@@ -628,9 +628,22 @@ fn globals_layout(
                 .clone()
                 .or_else(|| globals_block.get(i).cloned())
                 .unwrap_or_default();
-            let ty = builtin_type(&name)
-                .or_else(|| param_types.get(&name).copied())
-                .unwrap_or(GlType::Float);
+            // A `uniform int` stays an int in the block; its bytes must be
+            // an i32, or 1 reads back as 1065353216.
+            let is_int = matches!(
+                module.types[m.ty].inner,
+                naga::TypeInner::Scalar(naga::Scalar {
+                    kind: naga::ScalarKind::Sint | naga::ScalarKind::Uint,
+                    ..
+                })
+            );
+            let ty = if is_int {
+                GlType::Int
+            } else {
+                builtin_type(&name)
+                    .or_else(|| param_types.get(&name).copied())
+                    .unwrap_or(GlType::Float)
+            };
             Member {
                 name,
                 ty,
