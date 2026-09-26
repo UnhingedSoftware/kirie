@@ -320,6 +320,7 @@ pub(super) fn draw_model(
     ambient: [f32; 3],
     skylight: [f32; 3],
     time: f32,
+    daytime: f32,
     texel: [f32; 2],
     audio: Option<&AudioSpectrum>,
     scratch: &mut Vec<u8>,
@@ -352,7 +353,7 @@ pub(super) fn draw_model(
     for mesh in &mut model.meshes {
         let builtins = Builtins {
             time,
-            daytime: 0.0,
+            daytime,
             brightness: 1.0,
             alpha: 1.0,
             color: [1.0, 1.0, 1.0, 1.0],
@@ -590,6 +591,7 @@ mod tests {
             aspect,
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 0.0],
+            0.0,
             0.0,
             [1.0 / w as f32, 1.0 / h as f32],
             None,
