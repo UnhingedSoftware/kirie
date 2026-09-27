@@ -310,6 +310,7 @@ pub struct TextureRegistry {
     queue: wgpu::Queue,
     cache: std::sync::Mutex<HashMap<String, TextureCell>>,
     white: std::sync::Arc<GpuTexture>,
+    transparent: std::sync::Arc<GpuTexture>,
     videos: std::sync::Mutex<Vec<VideoTexture>>,
     atlases: std::sync::Mutex<HashMap<String, std::sync::Arc<AtlasTexture>>>,
 }
@@ -338,6 +339,16 @@ impl TextureRegistry {
             true,
             true,
         ));
+        let transparent = std::sync::Arc::new(upload_rgba8(
+            device,
+            queue,
+            "kirie-transparent",
+            1,
+            1,
+            &[0, 0, 0, 0],
+            true,
+            true,
+        ));
         TextureRegistry {
             device: device.clone(),
             queue: queue.clone(),
@@ -345,7 +356,13 @@ impl TextureRegistry {
             videos: std::sync::Mutex::new(Vec::new()),
             atlases: std::sync::Mutex::new(HashMap::new()),
             white,
+            transparent,
         }
+    }
+
+    #[must_use]
+    pub fn transparent(&self) -> std::sync::Arc<GpuTexture> {
+        self.transparent.clone()
     }
 
     #[must_use]

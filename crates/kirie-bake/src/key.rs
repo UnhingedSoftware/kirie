@@ -1,6 +1,6 @@
 use std::fmt;
 
-pub const BAKE_FORMAT_VERSION: u32 = 2;
+pub const BAKE_FORMAT_VERSION: u32 = 3;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BundleKey([u8; 32]);

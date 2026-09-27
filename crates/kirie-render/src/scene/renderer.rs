@@ -1575,8 +1575,18 @@ fn build_object(
     }
 
     let layer_tex = base_layer_texture(image, source, registry);
+    let transparent = registry.transparent();
     let layer_reads_scene = base_layer_name(image).as_deref().is_some_and(is_scene_rt);
-    let mut reads_scene = layer_reads_scene;
+    // A compose layer with "copy background" off draws its effects on a
+    // transparent canvas, not on a copy of the scene behind it.
+    let empty_canvas = layer_reads_scene
+        && !image.copybackground
+        && image
+            .material
+            .as_ref()
+            .and_then(|m| m.passes.first())
+            .is_some_and(|p| is_compose_layer(&p.shader));
+    let mut reads_scene = layer_reads_scene && !empty_canvas;
     let layer_atlas = base_layer_name(image)
         .filter(|n| !n.starts_with("_rt_") && !n.starts_with("_alias_"))
         .and_then(|n| registry.atlas_for(&n));
@@ -1758,6 +1768,12 @@ fn build_object(
         let composite = is_composite(&target);
 
         let mut raw_pass = raw_pass;
+        if i == 0
+            && empty_canvas
+            && let Some(first) = raw_pass.textures.first_mut()
+        {
+            *first = Some(EMPTY_CANVAS.to_owned());
+        }
         for (slot, name) in &binds {
             let idx = *slot as usize;
             if idx >= raw_pass.textures.len() {
@@ -1837,7 +1853,9 @@ fn build_object(
         let fs_params = resolve_params(&params_fs, &raw_pass);
 
         let (input_view, input_sampler): (&wgpu::TextureView, &wgpu::Sampler) = if reads_layer {
-            if layer_reads_scene {
+            if empty_canvas {
+                (&transparent.view, &transparent.sampler)
+            } else if layer_reads_scene {
                 (&scene_snapshot.view, fbo_sampler)
             } else {
                 (&layer_tex.view, &layer_tex.sampler)
@@ -1859,6 +1877,7 @@ fn build_object(
             named.insert(name.as_str(), (view, fbo_sampler));
         }
         named.insert("previous", (comp_view, fbo_sampler));
+        named.insert(EMPTY_CANVAS, (&transparent.view, &transparent.sampler));
         named.insert(comp_a.as_str(), (comp_view, fbo_sampler));
         named.insert(comp_b.as_str(), (comp_view, fbo_sampler));
         for (name, fbo) in &named_fbos {
@@ -2098,6 +2117,7 @@ fn build_text_layer(
         effects: tobj.effects.clone(),
         animationlayers: Vec::new(),
         instance: None,
+        copybackground: true,
     };
     let mut built = build_object(
         device,
@@ -3789,6 +3809,9 @@ fn samples_scene_by_default(pass: &kirie_scene::material::Pass, samplers: &[Samp
         }
     })
 }
+
+/// The texture name slot 0 of an empty compose layer is rebound to.
+const EMPTY_CANVAS: &str = "\u{0}kirie-empty-canvas";
 
 pub(super) fn is_compose_layer(shader: &str) -> bool {
     shader
