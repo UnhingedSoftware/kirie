@@ -12,17 +12,14 @@ pub fn run(dir: &Path, output: Option<PathBuf>) -> Result<()> {
         PathBuf::from(format!("{name}.{}", kirie_pack::EXTENSION))
     });
     // Write beside the destination and rename, so a failed pack never
-    // leaves a half-written package where a good one was.
-    let partial = output.with_extension(format!("{}.partial", kirie_pack::EXTENSION));
-    // A partial file left by an earlier failed run is removed, then the new
-    // one is created exclusively, so a link planted at that path is never
-    // followed.
-    match std::fs::remove_file(&partial) {
-        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            return Err(err).with_context(|| format!("cannot remove {}", partial.display()));
-        }
-        _ => {}
-    }
+    // leaves a half-written package where a good one was. The partial file
+    // is hidden (so packing into the source folder skips it), named after
+    // this process (so two runs to the same output do not share it), and
+    // created exclusively (so a link planted at that path is not followed).
+    let file_name = output
+        .file_name()
+        .map_or_else(|| "wallpaper".into(), |n| n.to_string_lossy().into_owned());
+    let partial = output.with_file_name(format!(".{file_name}.{}.partial", std::process::id()));
     let mut file = std::fs::File::create_new(&partial)
         .with_context(|| format!("cannot create {}", partial.display()))?;
     let summary = match kirie_pack::pack_dir(dir, &mut file) {
