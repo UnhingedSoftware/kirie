@@ -1579,8 +1579,9 @@ fn build_object(
     let layer_reads_scene = base_layer_name(image).as_deref().is_some_and(is_scene_rt);
     // A compose layer with "copy background" off draws its effects on a
     // transparent canvas, not on a copy of the scene behind it.
-    let empty_canvas = layer_reads_scene
-        && !image.copybackground
+    // The compose material may name the scene in slot 0 or leave it to the
+    // shader's default; either way the canvas replaces it.
+    let empty_canvas = !image.copybackground
         && image
             .material
             .as_ref()
@@ -1768,11 +1769,11 @@ fn build_object(
         let composite = is_composite(&target);
 
         let mut raw_pass = raw_pass;
-        if i == 0
-            && empty_canvas
-            && let Some(first) = raw_pass.textures.first_mut()
-        {
-            *first = Some(EMPTY_CANVAS.to_owned());
+        if i == 0 && empty_canvas {
+            if raw_pass.textures.is_empty() {
+                raw_pass.textures.push(None);
+            }
+            raw_pass.textures[0] = Some(EMPTY_CANVAS.to_owned());
         }
         for (slot, name) in &binds {
             let idx = *slot as usize;

@@ -51,17 +51,30 @@ impl AssetSource for Memory {
     }
 }
 
-fn scene(copybackground: bool) -> (Scene, Memory) {
+fn scene(copybackground: bool, names_the_scene: bool) -> (Scene, Memory) {
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     files.insert("shaders/util/composelayer.vert".into(), VERT.into());
-    files.insert("shaders/util/composelayer.frag".into(), PASS_FRAG.into());
+
     files.insert("shaders/tint.vert".into(), VERT.into());
     files.insert("shaders/tint.frag".into(), TINT_FRAG.into());
-    files.insert(
-        "materials/util/composelayer.json".into(),
-        br#"{"passes":[{"shader":"util/composelayer","blending":"translucent","textures":["_rt_FullFrameBuffer"]}]}"#
-            .to_vec(),
-    );
+    // Either the material names the scene in slot 0, or the shader's
+    // sampler defaults to it.
+    let (material, frag) = if names_the_scene {
+        (
+            br#"{"passes":[{"shader":"util/composelayer","blending":"translucent","textures":["_rt_FullFrameBuffer"]}]}"#.to_vec(),
+            PASS_FRAG.to_owned(),
+        )
+    } else {
+        (
+            br#"{"passes":[{"shader":"util/composelayer","blending":"translucent"}]}"#.to_vec(),
+            PASS_FRAG.replace(
+                "uniform sampler2D g_Texture0;",
+                r#"uniform sampler2D g_Texture0; // {"default":"_rt_FullFrameBuffer"}"#,
+            ),
+        )
+    };
+    files.insert("materials/util/composelayer.json".into(), material);
+    files.insert("shaders/util/composelayer.frag".into(), frag.into_bytes());
     files.insert(
         "models/util/composelayer.json".into(),
         br#"{"material":"materials/util/composelayer.json"}"#.to_vec(),
@@ -116,8 +129,13 @@ fn gpu() -> Option<(wgpu::Device, wgpu::Queue)> {
     }
 }
 
-fn centre_pixel(device: &wgpu::Device, queue: &wgpu::Queue, copybackground: bool) -> [u8; 4] {
-    let (scene, source) = scene(copybackground);
+fn centre_pixel(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    copybackground: bool,
+    names_the_scene: bool,
+) -> [u8; 4] {
+    let (scene, source) = scene(copybackground, names_the_scene);
     let bag = PropertyBag::default();
     let mut model = SceneModel::resolve(scene, &bag);
     let problems = model.load_assets(&source, &bag);
@@ -222,15 +240,17 @@ fn read_back(device: &wgpu::Device, queue: &wgpu::Queue, texture: &wgpu::Texture
 fn a_compose_layer_without_copy_background_starts_empty() {
     let Some((device, queue)) = gpu() else { return };
 
-    let copied = centre_pixel(&device, &queue, true);
-    assert!(
-        copied[0] < 16,
-        "the tint ran on a copy of the red scene: {copied:?}"
-    );
+    for names_the_scene in [true, false] {
+        let copied = centre_pixel(&device, &queue, true, names_the_scene);
+        assert!(
+            copied[0] < 16,
+            "the tint ran on a copy of the red scene ({names_the_scene}): {copied:?}"
+        );
 
-    let empty = centre_pixel(&device, &queue, false);
-    assert!(
-        empty[0] > 240 && empty[1] < 16 && empty[2] < 16,
-        "the scene behind an empty compose layer shows through untouched: {empty:?}"
-    );
+        let empty = centre_pixel(&device, &queue, false, names_the_scene);
+        assert!(
+            empty[0] > 240 && empty[1] < 16 && empty[2] < 16,
+            "the scene behind an empty compose layer shows through untouched ({names_the_scene}): {empty:?}"
+        );
+    }
 }
