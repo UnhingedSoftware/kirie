@@ -21,12 +21,30 @@ pub(crate) fn runtime_dir() -> PathBuf {
         return PathBuf::from(runtime);
     }
     let dir = std::env::temp_dir().join(format!("kirie-{}", current_user_tag()));
-    if std::fs::create_dir_all(&dir).is_ok() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+    if let Err(err) = make_private_dir(&dir) {
+        tracing::warn!(path = %dir.display(), %err, "the control-socket directory is not private");
     }
     dir
+}
+
+/// Make `dir` 0700, or check that the one already there is ours and make it
+/// 0700. Anyone can create a name in the shared temp dir first, and a
+/// directory someone else owns lets them replace the socket inside it.
+#[cfg(unix)]
+fn make_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        other => return other,
+    }
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.is_dir() || own_uid().is_some_and(|uid| uid != meta.uid()) {
+        return Err(std::io::Error::other(
+            "it belongs to another account, or is not a directory",
+        ));
+    }
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 
 /// Windows has no `XDG_RUNTIME_DIR` and no mode bits to set, but it does have a
@@ -47,14 +65,17 @@ pub(crate) fn runtime_dir() -> PathBuf {
 /// directory only one of them should use.
 #[cfg(unix)]
 pub(crate) fn current_user_tag() -> String {
+    own_uid().map_or_else(named_user, |uid| uid.to_string())
+}
+
+/// This account's uid, read off its home directory: the crate forbids the
+/// `unsafe` a `getuid` call would need.
+#[cfg(unix)]
+fn own_uid() -> Option<u32> {
     use std::os::unix::fs::MetadataExt;
 
-    if let Some(home) = std::env::var_os("HOME")
-        && let Ok(meta) = std::fs::metadata(&home)
-    {
-        return meta.uid().to_string();
-    }
-    named_user()
+    let home = std::env::var_os("HOME")?;
+    std::fs::metadata(home).ok().map(|meta| meta.uid())
 }
 
 #[cfg(windows)]
@@ -67,6 +88,28 @@ fn named_user() -> String {
         .or_else(|_| std::env::var("LOGNAME"))
         .or_else(|_| std::env::var("USERNAME"))
         .unwrap_or_else(|_| "shared".to_owned())
+}
+
+/// The per-user configuration directory: `XDG_CONFIG_HOME` or `~/.config`
+/// on Unix, `%APPDATA%` on Windows, which sets neither `XDG_CONFIG_HOME` nor
+/// `HOME`.
+#[cfg(unix)]
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|home| !home.is_empty())
+                .map(|home| PathBuf::from(home).join(".config"))
+        })
+}
+
+#[cfg(windows)]
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("APPDATA")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 /// Mark a file we just downloaded as something that can be run.
