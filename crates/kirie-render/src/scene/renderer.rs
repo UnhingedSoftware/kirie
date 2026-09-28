@@ -4,7 +4,6 @@ use std::sync::Arc;
 use kirie_audio::{AudioCapture, AudioSpectrum};
 use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 use kirie_scene::SceneModel;
-use kirie_scene::material::Blending;
 use kirie_scene::object::{ImageObject, Object, ObjectKind};
 use kirie_scene::resolve::AssetSource;
 use kirie_scene::scene::Projection;
@@ -150,7 +149,6 @@ struct PassGpu {
     output: PassOutput,
     geometry: Geometry,
     model_matrix: Mat4,
-    blending: Blending,
     tex_resolution: [[f32; 4]; 8],
     /// The bytes last uploaded to `vs_ubo` / `fs_ubo`. A layer that is not
     /// driven by time, audio or the pointer packs the same uniforms every
@@ -173,7 +171,13 @@ struct ObjectGpu {
     color: [f32; 4],
     visible: bool,
     skip_final: bool,
+    /// Draws at its place in the scene's order because a pass samples the
+    /// scene as it stands there.
     reads_scene: bool,
+    /// A pass that samples the scene also draws into it, or runs after the
+    /// pass that does, so it reads a snapshot taken before the layer draws.
+    /// Otherwise the passes sample the scene buffer itself and no copy is made.
+    needs_snapshot: bool,
     offscreen_donor: bool,
     parallax_depth: [f32; 2],
     scene_center: [f32; 2],
@@ -288,6 +292,9 @@ pub struct SceneRenderer {
     runtime_white: std::sync::Arc<super::texture::GpuTexture>,
     runtime_seq: i64,
     runtime_pipeline: Option<(wgpu::RenderPipeline, wgpu::Buffer, usize)>,
+    /// The bind group for each texture the runtime layers drew with last
+    /// frame, so a frame that draws the same layers creates none.
+    runtime_binds: Vec<(Arc<super::texture::GpuTexture>, wgpu::BindGroup)>,
     parallax_disp: [f32; 2],
     text_pipeline: Option<TextPipeline>,
     text_fonts: Option<TextFonts>,
@@ -494,7 +501,6 @@ impl SceneRenderer {
                 fbo_w,
                 fbo_h,
                 &scene_fbo.view,
-                &scene_snapshot.view,
                 env_f("KIRIE_BLOOM_STRENGTH").unwrap_or(scene.general.bloomstrength.value),
                 env_f("KIRIE_BLOOM_THRESHOLD").unwrap_or(scene.general.bloomthreshold.value),
             )
@@ -538,7 +544,7 @@ impl SceneRenderer {
                     object,
                     image,
                     (proj_w, proj_h),
-                    &screen_mvp,
+                    &scene_fbo.view,
                     source,
                     &resolver,
                     &registry,
@@ -592,7 +598,7 @@ impl SceneRenderer {
                         object,
                         image,
                         (proj_w, proj_h),
-                        &screen_mvp,
+                        &scene_fbo.view,
                         source,
                         &resolver,
                         &registry,
@@ -647,7 +653,7 @@ impl SceneRenderer {
                         object,
                         tobj,
                         (proj_w, proj_h),
-                        &screen_mvp,
+                        &scene_fbo.view,
                         source,
                         &resolver,
                         &registry,
@@ -707,7 +713,7 @@ impl SceneRenderer {
 
         let scene_snapshot = (bloom.is_some()
             || items.iter().any(|it| match it {
-                SceneItem::Image(o) => o.reads_scene,
+                SceneItem::Image(o) => o.needs_snapshot,
                 SceneItem::Model(m) => m.reads_scene,
                 _ => false,
             }))
@@ -734,8 +740,13 @@ impl SceneRenderer {
             }
         }
 
-        let (blit_pipeline, blit_bind, blit_window) =
-            build_blit(device, target.format, &scene_fbo, &fbo_sampler);
+        // With bloom on, the finished frame is the combine's output in the
+        // snapshot buffer rather than the scene buffer.
+        let shown = match (&bloom, &scene_snapshot) {
+            (Some(_), Some(snap)) => &snap.view,
+            _ => &scene_fbo.view,
+        };
+        let (blit_pipeline, blit_bind, blit_window) = build_blit(device, target.format, shown, &fbo_sampler);
 
         let script = ScriptHost::build(model, (proj_w, proj_h), user_props);
         let animator = PropertyAnimator::build(model);
@@ -836,6 +847,7 @@ impl SceneRenderer {
             runtime_white,
             runtime_seq: 0,
             runtime_pipeline: None,
+            runtime_binds: Vec::new(),
             text_pipeline,
             text_fonts,
             scene_fbo,
@@ -1246,7 +1258,7 @@ impl SceneRenderer {
                                     self.scene_snapshot.as_ref(),
                                     &self.locals,
                                     (self.proj_w, self.proj_h),
-                                    &self.screen_mvp,
+                                    &self.scene_fbo.view,
                                     o,
                                 );
                             }
@@ -1480,7 +1492,7 @@ fn build_object(
     object: &Object,
     image: &ImageObject,
     scene_size: (u32, u32),
-    screen_mvp: &Mat4,
+    scene_view: &wgpu::TextureView,
     source: &dyn AssetSource,
     resolver: &dyn IncludeResolver,
     registry: &TextureRegistry,
@@ -1587,7 +1599,7 @@ fn build_object(
             .as_ref()
             .and_then(|m| m.passes.first())
             .is_some_and(|p| is_compose_layer(&p.shader));
-    let mut reads_scene = layer_reads_scene && !empty_canvas;
+    let reads_scene_as_layer = layer_reads_scene && !empty_canvas;
     let layer_atlas = base_layer_name(image)
         .filter(|n| !n.starts_with("_rt_") && !n.starts_with("_alias_"))
         .and_then(|n| registry.atlas_for(&n));
@@ -1751,6 +1763,48 @@ fn build_object(
         }
     }
 
+    for (i, sv) in built.iter_mut().enumerate() {
+        if i == 0 && empty_canvas {
+            if sv.raw.textures.is_empty() {
+                sv.raw.textures.push(None);
+            }
+            sv.raw.textures[0] = Some(EMPTY_CANVAS.to_owned());
+        }
+        for (slot, name) in &sv.binds {
+            let idx = *slot as usize;
+            if idx >= sv.raw.textures.len() {
+                sv.raw.textures.resize(idx + 1, None);
+            }
+            if sv.raw.textures[idx].is_none() {
+                sv.raw.textures[idx] = Some(name.clone());
+            }
+        }
+    }
+    let samples_scene: Vec<bool> = built
+        .iter()
+        .enumerate()
+        .map(|(i, sv)| {
+            (i == 0 && reads_scene_as_layer)
+                || sv.raw.textures.iter().flatten().any(|n| is_scene_rt(n))
+                || samples_scene_by_default(&sv.raw, &sv.built.vs_samplers)
+                || samples_scene_by_default(&sv.raw, &sv.built.fs_samplers)
+        })
+        .collect();
+    let reads_scene = samples_scene.iter().any(|&s| s);
+    // A pass can sample the scene buffer itself only while it draws somewhere
+    // else and the layer has not drawn into the scene yet; the scene pass is
+    // `last_comp`, and everything after it runs once the scene has changed.
+    let scene_pass = (!offscreen_donor).then_some(last_comp);
+    let needs_snapshot = samples_scene
+        .iter()
+        .enumerate()
+        .any(|(i, &s)| s && scene_pass.is_some_and(|k| i >= k));
+    let scene_read = if needs_snapshot {
+        &scene_snapshot.view
+    } else {
+        scene_view
+    };
+
     let mut passes = Vec::with_capacity(n);
     let mut comp_front: Option<usize> = None;
     for (i, sv) in built.into_iter().enumerate() {
@@ -1760,30 +1814,12 @@ fn build_object(
             params_vs,
             params_fs,
             target,
-            binds,
             is_puppet_base,
             effect_index,
             ..
         } = sv;
         let is_scene = i == last_comp && !offscreen_donor;
         let composite = is_composite(&target);
-
-        let mut raw_pass = raw_pass;
-        if i == 0 && empty_canvas {
-            if raw_pass.textures.is_empty() {
-                raw_pass.textures.push(None);
-            }
-            raw_pass.textures[0] = Some(EMPTY_CANVAS.to_owned());
-        }
-        for (slot, name) in &binds {
-            let idx = *slot as usize;
-            if idx >= raw_pass.textures.len() {
-                raw_pass.textures.resize(idx + 1, None);
-            }
-            if raw_pass.textures[idx].is_none() {
-                raw_pass.textures[idx] = Some(name.clone());
-            }
-        }
 
         let geometry = if is_puppet_base {
             if is_scene {
@@ -1857,7 +1893,7 @@ fn build_object(
             if empty_canvas {
                 (&transparent.view, &transparent.sampler)
             } else if layer_reads_scene {
-                (&scene_snapshot.view, fbo_sampler)
+                (scene_read, fbo_sampler)
             } else {
                 (&layer_tex.view, &layer_tex.sampler)
             }
@@ -1885,13 +1921,6 @@ fn build_object(
             named.insert(name.as_str(), (&fbo.view, fbo_sampler));
         }
 
-        if raw_pass.textures.iter().flatten().any(|n| is_scene_rt(n))
-            || samples_scene_by_default(&raw_pass, &built_pass.vs_samplers)
-            || samples_scene_by_default(&raw_pass, &built_pass.fs_samplers)
-        {
-            reads_scene = true;
-        }
-
         let vs_ubo =
             (!built_pass.vs_globals.is_empty()).then(|| create_ubo(device, built_pass.vs_globals.size));
         let fs_ubo =
@@ -1908,7 +1937,7 @@ fn build_object(
             registry,
             source,
             &raw_pass,
-            (&scene_snapshot.view, fbo_sampler),
+            (scene_read, fbo_sampler),
             &named,
             true,
         );
@@ -1923,7 +1952,7 @@ fn build_object(
             registry,
             source,
             &raw_pass,
-            (&scene_snapshot.view, fbo_sampler),
+            (scene_read, fbo_sampler),
             &named,
             true,
         );
@@ -1985,7 +2014,6 @@ fn build_object(
             uv_crop,
             effect_index,
             model_matrix,
-            blending: effective_blending(is_puppet_base, raw_pass.blending),
             tex_resolution,
             params_vs,
             params_fs,
@@ -1994,12 +2022,6 @@ fn build_object(
             material_pass: raw_pass,
         });
     }
-    let _ = screen_mvp;
-    tracing::trace!(target: "kirie_render::ptrdbg",
-        id = object.base.id,
-        n_passes = passes.len(),
-        geoms = ?passes.iter().map(|p| format!("{:?}", p.geometry)).collect::<Vec<_>>(),
-        "object built");
     Some(ObjectGpu {
         id: object.base.id,
         parent: object.base.parent,
@@ -2013,6 +2035,7 @@ fn build_object(
         skip_final: NO_SOLID_FINAL.load(std::sync::atomic::Ordering::Relaxed)
             && image.model.as_ref().is_some_and(|m| m.solidlayer),
         reads_scene,
+        needs_snapshot,
         offscreen_donor,
         final_front: comp_front,
         parallax_depth: image.parallax_depth.value,
@@ -2073,7 +2096,7 @@ fn build_text_layer(
     object: &Object,
     tobj: &kirie_scene::object::TextObject,
     scene_size: (u32, u32),
-    screen_mvp: &Mat4,
+    scene_view: &wgpu::TextureView,
     source: &dyn AssetSource,
     resolver: &dyn IncludeResolver,
     registry: &TextureRegistry,
@@ -2125,7 +2148,7 @@ fn build_text_layer(
         object,
         &image,
         scene_size,
-        screen_mvp,
+        scene_view,
         source,
         resolver,
         registry,
@@ -2163,7 +2186,7 @@ fn refresh_text_layer(
     scene_snapshot: Option<&Fbo>,
     locals: &HashMap<i64, LocalXf>,
     scene_size: (u32, u32),
-    screen_mvp: &Mat4,
+    scene_view: &wgpu::TextureView,
     o: &mut ObjectGpu,
 ) {
     let Some(mut text) = o.text.take() else {
@@ -2191,7 +2214,7 @@ fn refresh_text_layer(
         &text.object,
         &text.image,
         scene_size,
-        screen_mvp,
+        scene_view,
         &ctx.source,
         &SourceIncludes(&ctx.source),
         &ctx.registry,
@@ -2547,7 +2570,7 @@ impl Renderer for SceneRenderer {
                                     self.scene_snapshot.as_ref(),
                                     &self.locals,
                                     (self.proj_w, self.proj_h),
-                                    &self.screen_mvp,
+                                    &self.scene_fbo.view,
                                     o,
                                 );
                             }
@@ -2772,10 +2795,15 @@ impl Renderer for SceneRenderer {
                         && (!object.visible
                             || !ancestors_visible(parent_by_id, visible_by_id, object.parent)) => {}
                 SceneItem::Image(object) => {
-                    if object.reads_scene
-                        && let Some(snap_tex) = snap_tex
-                    {
-                        encoder.refresh_snapshot(scene_view, scene_tex, snap_tex, copy_extent);
+                    if object.reads_scene {
+                        match snap_tex {
+                            Some(snap_tex) if object.needs_snapshot => {
+                                encoder.refresh_snapshot(scene_view, scene_tex, snap_tex, copy_extent);
+                            }
+                            // The passes sample the scene buffer itself, which
+                            // still holds the previous frame until it is cleared.
+                            _ => encoder.ensure_cleared(scene_view),
+                        }
                     }
                     draw_image_object(
                         &mut encoder,
@@ -2952,13 +2980,18 @@ impl Renderer for SceneRenderer {
                 }
                 if let Some((pipeline, buf, _)) = &self.runtime_pipeline {
                     self.queue.write_buffer(buf, 0, bytemuck::cast_slice(&verts));
-                    let layout = pipeline.get_bind_group_layout(0);
-                    let binds: Vec<wgpu::BindGroup> = batches
-                        .iter()
-                        .map(|(t, _, _)| {
+                    let mut binds: Vec<(Arc<super::texture::GpuTexture>, wgpu::BindGroup)> =
+                        Vec::with_capacity(batches.len());
+                    for (t, _, _) in &batches {
+                        let cached = binds
+                            .iter()
+                            .chain(&self.runtime_binds)
+                            .find(|(c, _)| Arc::ptr_eq(c, t))
+                            .map(|(_, b)| b.clone());
+                        let bind = cached.unwrap_or_else(|| {
                             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                                 label: Some("kirie-runtime-layer-tex"),
-                                layout: &layout,
+                                layout: &pipeline.get_bind_group_layout(0),
                                 entries: &[
                                     wgpu::BindGroupEntry {
                                         binding: 0,
@@ -2970,16 +3003,18 @@ impl Renderer for SceneRenderer {
                                     },
                                 ],
                             })
-                        })
-                        .collect();
+                        });
+                        binds.push((t.clone(), bind));
+                    }
                     let rp = encoder.scene(scene_view);
                     rp.set_pipeline(pipeline);
                     rp.set_vertex_buffer(0, buf.slice(..));
-                    for ((_, first, count), bind) in batches.iter().zip(&binds) {
+                    for ((_, first, count), (_, bind)) in batches.iter().zip(&binds) {
                         rp.set_bind_group(0, bind, &[]);
                         crate::frame_cost::draw(1);
                         rp.draw(*first..*first + *count, 0..1);
                     }
+                    self.runtime_binds = binds;
                 }
             }
         }
@@ -2989,7 +3024,7 @@ impl Renderer for SceneRenderer {
         encoder.ensure_cleared(scene_view);
 
         if let (Some(bloom), Some(snap)) = (&self.bloom, &self.scene_snapshot) {
-            bloom.run(encoder.raw(), &self.scene_fbo, snap);
+            bloom.run(encoder.raw(), &snap.view);
         }
 
         {
@@ -3174,7 +3209,6 @@ fn collect_runtime_templates(
             }
             _ => {}
         }
-        let _ = &object.base;
     }
 
     let lookup = |name: &str| -> Option<&kirie_scene::PropertyValue> {
@@ -3703,13 +3737,15 @@ fn draw_image_object(
         };
         let rp = match offscreen {
             None => encoder.scene(scene_view),
-            // An output buffer that failed to build fell back to the scene
-            // view with a clear, and still does.
-            Some(view) => encoder.offscreen(
-                view.unwrap_or(scene_view),
+            Some(Some(view)) => encoder.offscreen(
+                view,
                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 "kirie-scene-offscreen",
             ),
+            // Every offscreen output is allocated when the layer is built.
+            // Drawing into the scene instead would be wrong, and invalid for
+            // a pass that samples the scene buffer.
+            Some(None) => continue,
         };
         rp.set_pipeline(&pass.pipeline);
         rp.set_bind_group(0, &pass.g0_bind, &[]);
@@ -3722,7 +3758,6 @@ fn draw_image_object(
         } else {
             rp.draw(0..4, 0..1);
         }
-        let _ = pass.blending;
     }
 }
 
@@ -4326,7 +4361,7 @@ pub(super) fn build_bind_group(
 fn build_blit(
     device: &wgpu::Device,
     surface_format: wgpu::TextureFormat,
-    scene_fbo: &Fbo,
+    shown: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
 ) -> (wgpu::RenderPipeline, wgpu::BindGroup, wgpu::Buffer) {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4380,7 +4415,7 @@ fn build_blit(
             },
             wgpu::BindGroupEntry {
                 binding: 1,
-                resource: wgpu::BindingResource::TextureView(&scene_fbo.view),
+                resource: wgpu::BindingResource::TextureView(shown),
             },
             wgpu::BindGroupEntry {
                 binding: 2,
