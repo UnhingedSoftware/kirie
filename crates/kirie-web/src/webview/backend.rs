@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::rc::Rc;
 
 use gtk::glib;
@@ -203,7 +204,15 @@ impl WebviewBackend {
             let start = (row * stride) as usize;
             out.extend_from_slice(&data[start..start + (w * 4) as usize]);
         }
-        std::fs::write(path, &out).ok()?;
+        // The path can be in a shared temporary directory, so an existing
+        // file or symlink there is refused rather than written through.
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .ok()?;
+        std::io::Write::write_all(&mut file, &out).ok()?;
         Some((w, h))
     }
 

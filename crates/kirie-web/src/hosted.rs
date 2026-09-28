@@ -54,11 +54,14 @@ impl HostedBackend {
             }
             let w = u32::from_le_bytes(shm[8..12].try_into().unwrap_or_default());
             let h = u32::from_le_bytes(shm[12..16].try_into().unwrap_or_default());
-            let len = (w as usize) * (h as usize) * 4;
-            if w == 0 || h == 0 || SHM_HEADER + len > shm.len() {
+            let Some(pixels) = (w as usize)
+                .checked_mul(h as usize)
+                .and_then(|px| px.checked_mul(4))
+                .filter(|&len| len > 0)
+                .and_then(|len| shm.get(SHM_HEADER..SHM_HEADER.checked_add(len)?))
+            else {
                 return;
-            }
-            let pixels = &shm[SHM_HEADER..SHM_HEADER + len];
+            };
             let buf = match self.cached.as_mut() {
                 Some(b) => {
                     b.data.clear();

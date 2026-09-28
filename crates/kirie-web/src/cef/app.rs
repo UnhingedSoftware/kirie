@@ -59,7 +59,6 @@ wrap_app! {
             switch(cmd, "disable-gpu-shader-disk-cache");
             switch(cmd, "disable-site-isolation-trials");
             switch(cmd, "disable-web-security");
-            switch_val(cmd, "remote-allow-origins", "*");
             switch_val(cmd, "autoplay-policy", "no-user-gesture-required");
             switch(cmd, "disable-background-timer-throttling");
             switch(cmd, "disable-backgrounding-occluded-windows");

@@ -21,10 +21,13 @@ pub enum PageSource {
 impl PageSource {
     /// Classify what a `project.json` names as its `file`: a web address stays
     /// one, anything else is a page inside the wallpaper's folder.
+    ///
+    /// A `file://` address is not a web address: taking it as one would let a
+    /// downloaded wallpaper open any file on the machine in its view.
     #[must_use]
     pub fn of(dir: &Path, file: &str) -> Self {
         let lower = file.to_ascii_lowercase();
-        if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://") {
+        if lower.starts_with("http://") || lower.starts_with("https://") {
             return Self::Url(file.to_owned());
         }
         Self::Folder {
@@ -119,6 +122,13 @@ mod tests {
     fn an_address_is_left_alone() {
         let source = PageSource::of(Path::new(r"C:\walls\123"), "https://example.com/wall");
         assert_eq!(source.address(), "https://example.com/wall");
+    }
+
+    #[test]
+    fn a_file_address_stays_inside_the_folder() {
+        let source = PageSource::of(Path::new("/walls/123"), "file:///etc/passwd");
+        assert!(matches!(source, PageSource::Folder { .. }));
+        assert!(source.address().starts_with("https://wallpaper.kirie.invalid/"));
     }
 
     #[test]

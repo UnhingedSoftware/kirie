@@ -523,5 +523,10 @@ fn throwaway_cache_dir() -> PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
         .unwrap_or(0);
-    std::env::temp_dir().join(format!("kirie-cef-{}-{nanos}", std::process::id()))
+    // The per-user runtime directory first: the shared temporary directory
+    // would leave the page's profile where other accounts can look.
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map_or_else(std::env::temp_dir, PathBuf::from);
+    base.join(format!("kirie-cef-{}-{nanos}", std::process::id()))
 }
