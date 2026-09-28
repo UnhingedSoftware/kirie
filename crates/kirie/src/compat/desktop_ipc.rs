@@ -724,7 +724,6 @@ impl Renderer for Blank {
 mod tests {
     use super::*;
     use std::ffi::OsString;
-    use std::io::Read as _;
     use std::sync::mpsc::Receiver;
 
     fn argv(parts: &[&str]) -> Vec<OsString> {
