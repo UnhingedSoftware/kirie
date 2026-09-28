@@ -1,6 +1,7 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 
 use crossbeam_channel::{Receiver, Sender};
@@ -61,9 +62,27 @@ struct Inner {
     paused: AtomicBool,
     shutdown: AtomicBool,
     cap_bytes: u64,
+    /// Items with a job queued or waiting out a pause. A download or an
+    /// unpack fires a watcher event per write, and each job hashes the whole
+    /// package, so a second job for an item that already has one is dropped.
+    pending: Mutex<HashSet<PathBuf>>,
 }
 
 impl Inner {
+    fn claim(&self, item: &Path) -> bool {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(item.to_path_buf())
+    }
+
+    fn release(&self, item: &Path) {
+        self.pending
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(item);
+    }
+
     fn paused_now(&self) -> bool {
         self.paused.load(Ordering::Relaxed) || (self.should_pause)()
     }
@@ -111,6 +130,7 @@ impl BackgroundBaker {
             paused: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             cap_bytes: config.cap_bytes,
+            pending: Mutex::new(HashSet::new()),
         });
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.num_threads.max(1))
@@ -180,9 +200,7 @@ impl BackgroundBaker {
 
     pub fn shutdown(&mut self) {
         self.watchers.clear();
-        self.inner
-            .shutdown
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.inner.shutdown.store(true, Ordering::Relaxed);
         let _ = self.tx.send(Msg::Stop);
         if let Some(h) = self.coordinator.take() {
             let _ = h.join();
@@ -202,12 +220,18 @@ fn coordinator_loop(inner: &Arc<Inner>, pool: &rayon::ThreadPool, rx: &Receiver<
             Msg::Item(p) => p,
             Msg::Stop => break,
         };
+        if !inner.claim(&item) {
+            continue;
+        }
         let job = Arc::clone(inner);
         pool.spawn(move || {
             loop {
+                // Released before baking, so a change that lands while this
+                // bake runs queues another pass instead of being dropped.
+                job.release(&item);
                 match job.bake_item(&item) {
                     Ok(BakeOutcome::Paused) => {
-                        if job.shutdown.load(std::sync::atomic::Ordering::Relaxed) {
+                        if job.shutdown.load(Ordering::Relaxed) || !job.claim(&item) {
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(5));

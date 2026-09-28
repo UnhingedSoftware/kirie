@@ -73,7 +73,7 @@ fn collect_meta(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<Str
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
             collect_meta(root, &path, out);
             continue;
         }
