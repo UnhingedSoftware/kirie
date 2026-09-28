@@ -310,18 +310,14 @@ fn parse_bg(cur: &mut Cursor<'_>) -> (String, PathBuf) {
         return (EVERY_SCREEN.to_owned(), PathBuf::new());
     }
     if looks_like_a_path(whole) {
-        return (EVERY_SCREEN.to_owned(), path_of(cur.rest()));
+        return (EVERY_SCREEN.to_owned(), path_from_bytes(cur.rest()));
     }
     let screen = token_string(cur);
     let path = cur.rest();
     if path.is_empty() {
         return (EVERY_SCREEN.to_owned(), PathBuf::from(screen));
     }
-    (screen, path_of(path))
-}
-
-fn path_of(bytes: &[u8]) -> PathBuf {
-    path_from_bytes(bytes)
+    (screen, path_from_bytes(path))
 }
 
 fn parse_workshop(cur: &mut Cursor<'_>) -> Request {
