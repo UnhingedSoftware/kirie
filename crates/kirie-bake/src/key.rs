@@ -69,12 +69,23 @@ fn binary_fingerprint() -> [u8; 32] {
     })
 }
 
+/// How deep [`collect_meta`] walks. Symlinked directories are followed, so a
+/// shader edited behind one still changes the key, and this bound is what
+/// keeps a link that points back up the tree from recursing forever.
+const MAX_META_DEPTH: usize = 16;
+
 fn collect_meta(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>) {
+    collect_meta_at(root, dir, out, 0);
+}
+
+fn collect_meta_at(root: &std::path::Path, dir: &std::path::Path, out: &mut Vec<String>, depth: usize) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
     for entry in rd.flatten() {
         let path = entry.path();
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            collect_meta(root, &path, out);
+        if path.is_dir() {
+            if depth < MAX_META_DEPTH {
+                collect_meta_at(root, &path, out, depth + 1);
+            }
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };

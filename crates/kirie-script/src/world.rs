@@ -186,11 +186,21 @@ impl World {
                         key: key_owned.clone(),
                         message: e.to_string(),
                     })?;
-                let (module, _promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
+                let (module, promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
                     key: key_owned.clone(),
                     message: e.to_string(),
                 })?;
                 drain_jobs(&ctx);
+                // A top level that ran out of budget, or never finished, left
+                // a module half set up: don't register it. One that threw is
+                // still registered, as before, since its hoisted exports work.
+                let unfinished = matches!(promise.state(), rquickjs::promise::PromiseState::Pending);
+                if unfinished || self.deadline.expired() {
+                    return Err(ScriptError::Load {
+                        key: key_owned.clone(),
+                        message: "the module's top level did not finish within its time budget".to_owned(),
+                    });
+                }
                 let namespace = module.namespace().internal()?;
                 let register: Function = global(&ctx, "__registerModule")?;
                 register

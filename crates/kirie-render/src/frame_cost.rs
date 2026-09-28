@@ -123,7 +123,7 @@ pub fn end_frame() {
         copies_skipped = cost.snapshots_skipped,
         "frame cost"
     );
-    reset();
+    clear();
     *since = Some(std::time::Instant::now());
 }
 
@@ -143,6 +143,11 @@ pub struct FrameCost {
 /// Zero the counters and start counting, without the periodic log.
 pub fn reset() {
     ON.store(true, Ordering::Relaxed);
+    REPORTING.store(false, Ordering::Relaxed);
+    clear();
+}
+
+fn clear() {
     for counter in [
         &RENDER_PASSES,
         &DRAWS,

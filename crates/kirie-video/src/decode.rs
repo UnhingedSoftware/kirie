@@ -56,12 +56,18 @@ pub const FRAME_QUEUE_CAP: usize = 4;
 
 const FALLBACK_FRAME_DUR: f64 = 1.0 / 30.0;
 
-/// Twice 8K. Every frame is converted into a buffer of this size, so a file
-/// claiming more is refused rather than trusted.
+/// Twice 8K on either side. Every frame is converted into a buffer of its
+/// size, so a file claiming more is refused rather than trusted.
 const MAX_DIMENSION: u32 = 16_384;
 
+/// 8192 x 8192: a 256 MiB RGBA frame, with a decoder surface and a texture on
+/// top. Wide panoramas fit under this; a 16K square does not.
+const MAX_PIXELS: u64 = 8192 * 8192;
+
 fn plausible_size(width: u32, height: u32) -> bool {
-    (1..=MAX_DIMENSION).contains(&width) && (1..=MAX_DIMENSION).contains(&height)
+    (1..=MAX_DIMENSION).contains(&width)
+        && (1..=MAX_DIMENSION).contains(&height)
+        && u64::from(width) * u64::from(height) <= MAX_PIXELS
 }
 
 #[derive(Debug)]

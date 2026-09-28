@@ -21,10 +21,33 @@ pub(crate) fn runtime_dir() -> PathBuf {
         return PathBuf::from(runtime);
     }
     let dir = std::env::temp_dir().join(format!("kirie-{}", current_user_tag()));
-    if let Err(err) = make_private_dir(&dir) {
-        tracing::warn!(path = %dir.display(), %err, "the control-socket directory is not private");
+    match make_private_dir(&dir) {
+        Ok(()) => dir,
+        Err(err) => {
+            // Someone else's directory could swap the socket out from under
+            // us. A private one of our own is safer, even though haru, which
+            // computes the shared name, will not find the socket there.
+            tracing::error!(path = %dir.display(), %err, "the control-socket directory is not private");
+            fresh_private_dir().unwrap_or(dir)
+        }
     }
-    dir
+}
+
+#[cfg(unix)]
+fn fresh_private_dir() -> Option<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_nanos());
+    let dir = std::env::temp_dir().join(format!(
+        "kirie-{}-{}-{stamp}",
+        current_user_tag(),
+        std::process::id()
+    ));
+    std::fs::DirBuilder::new().mode(0o700).create(&dir).ok()?;
+    tracing::warn!(path = %dir.display(), "using a private control-socket directory of this process's own");
+    Some(dir)
 }
 
 /// Make `dir` 0700, or check that the one already there is ours and make it
@@ -44,6 +67,8 @@ fn make_private_dir(dir: &Path) -> std::io::Result<()> {
             "it belongs to another account, or is not a directory",
         ));
     }
+    // Only the owner may chmod, so this also proves ownership when no uid
+    // could be read.
     std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
 }
 

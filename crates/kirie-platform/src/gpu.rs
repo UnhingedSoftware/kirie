@@ -217,9 +217,17 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     }
 }
 
-/// Size of the blob last written, so a wallpaper swap that compiled nothing
+/// Hash of the blob last written, so a wallpaper swap that compiled nothing
 /// new does not rewrite megabytes from the render thread.
-static PERSISTED_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static PERSISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn blob_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
 
 pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
     use std::sync::atomic::Ordering;
@@ -228,7 +236,8 @@ pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
         return;
     };
     let Some(data) = cache.get_data() else { return };
-    if data.len() == PERSISTED_LEN.load(Ordering::Relaxed) {
+    let hash = blob_hash(&data);
+    if hash == PERSISTED.load(Ordering::Relaxed) {
         return;
     }
     let Some(path) = pipeline_cache_file(adapter) else {
@@ -240,7 +249,7 @@ pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
     // file so two saving at once cannot interleave into one.
     let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
     if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
-        PERSISTED_LEN.store(data.len(), Ordering::Relaxed);
+        PERSISTED.store(hash, Ordering::Relaxed);
     } else {
         let _ = std::fs::remove_file(&tmp);
     }

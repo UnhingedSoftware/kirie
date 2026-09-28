@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -65,22 +65,42 @@ struct Inner {
     /// Items with a job queued or waiting out a pause. A download or an
     /// unpack fires a watcher event per write, and each job hashes the whole
     /// package, so a second job for an item that already has one is dropped.
-    pending: Mutex<HashSet<PathBuf>>,
+    /// Items with a job queued or running, and whether a change arrived for
+    /// one while its bake was running and so needs one more pass.
+    pending: Mutex<HashMap<PathBuf, bool>>,
 }
 
 impl Inner {
+    /// Start a job for `item`, or mark the one already queued or running for
+    /// another pass. True when the caller should start a job.
     fn claim(&self, item: &Path) -> bool {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(item.to_path_buf())
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match pending.get_mut(item) {
+            Some(dirty) => {
+                *dirty = true;
+                false
+            }
+            None => {
+                pending.insert(item.to_path_buf(), false);
+                true
+            }
+        }
     }
 
-    fn release(&self, item: &Path) {
-        self.pending
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(item);
+    /// End a pass over `item`. True when a change arrived during it and the
+    /// job should bake once more; otherwise the item is released.
+    fn finish(&self, item: &Path) -> bool {
+        let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
+        match pending.get_mut(item) {
+            Some(dirty) if *dirty => {
+                *dirty = false;
+                true
+            }
+            _ => {
+                pending.remove(item);
+                false
+            }
+        }
     }
 
     fn paused_now(&self) -> bool {
@@ -130,7 +150,7 @@ impl BackgroundBaker {
             paused: AtomicBool::new(false),
             shutdown: AtomicBool::new(false),
             cap_bytes: config.cap_bytes,
-            pending: Mutex::new(HashSet::new()),
+            pending: Mutex::new(HashMap::new()),
         });
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(config.num_threads.max(1))
@@ -226,20 +246,29 @@ fn coordinator_loop(inner: &Arc<Inner>, pool: &rayon::ThreadPool, rx: &Receiver<
         let job = Arc::clone(inner);
         pool.spawn(move || {
             loop {
-                // Released before baking, so a change that lands while this
-                // bake runs queues another pass instead of being dropped.
-                job.release(&item);
+                // The item stays claimed while it bakes; a change that lands
+                // meanwhile marks it for one more pass rather than a second job.
                 match job.bake_item(&item) {
                     Ok(BakeOutcome::Paused) => {
-                        if job.shutdown.load(Ordering::Relaxed) || !job.claim(&item) {
+                        if job.shutdown.load(Ordering::Relaxed) {
+                            job.pending
+                                .lock()
+                                .unwrap_or_else(PoisonError::into_inner)
+                                .remove(&item);
                             return;
                         }
                         std::thread::sleep(std::time::Duration::from_secs(5));
                     }
-                    Ok(_) => return,
+                    Ok(_) => {
+                        if !job.finish(&item) {
+                            return;
+                        }
+                    }
                     Err(e) => {
                         tracing::warn!(item = %item.display(), error = %e, "background bake failed");
-                        return;
+                        if !job.finish(&item) {
+                            return;
+                        }
                     }
                 }
             }

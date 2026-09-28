@@ -30,9 +30,15 @@ pub fn run(dir: &Path, output: Option<PathBuf>) -> Result<()> {
             return Err(err).with_context(|| format!("cannot pack {}", dir.display()));
         }
     };
-    file.sync_all()?;
+    let synced = file.sync_all();
     drop(file);
-    std::fs::rename(&partial, &output).with_context(|| format!("cannot write {}", output.display()))?;
+    let finished = synced
+        .and_then(|()| std::fs::rename(&partial, &output))
+        .with_context(|| format!("cannot write {}", output.display()));
+    if finished.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    finished?;
     println!(
         "{}: {} entries, {} bytes",
         output.display(),

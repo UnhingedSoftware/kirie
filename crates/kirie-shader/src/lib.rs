@@ -78,7 +78,14 @@ impl IncludeResolver for FsIncludeResolver {
             return None;
         }
         for root in &self.roots {
-            let path = root.join(include_name);
+            // A symlink inside a root must not carry the read back out of it.
+            let Ok(root) = root.canonicalize() else { continue };
+            let Ok(path) = root.join(include_name).canonicalize() else {
+                continue;
+            };
+            if !path.starts_with(&root) {
+                continue;
+            }
             if let Ok(text) = std::fs::read_to_string(&path) {
                 return Some(text);
             }
@@ -192,6 +199,21 @@ mod tests {
         assert!(resolver.resolve("/etc/hostname").is_none());
         assert!(resolver.resolve("../etc/hostname").is_none());
         assert!(resolver.resolve("").is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_in_a_root_does_not_lead_out_of_it() {
+        let base = std::env::temp_dir().join(format!("kirie-shader-include-{}", std::process::id()));
+        let root = base.join("root");
+        std::fs::create_dir_all(&root).expect("scratch");
+        std::fs::write(base.join("secret.h"), "secret").expect("scratch");
+        std::fs::write(root.join("common.h"), "ok").expect("scratch");
+        std::os::unix::fs::symlink(base.join("secret.h"), root.join("link.h")).expect("symlink");
+        let resolver = FsIncludeResolver::new(vec![root]);
+        assert_eq!(resolver.resolve("common.h").as_deref(), Some("ok"));
+        assert!(resolver.resolve("link.h").is_none());
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
