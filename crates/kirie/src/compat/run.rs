@@ -377,6 +377,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
         fullscreen_pause_only_active: args.fullscreen_pause_only_active,
         fullscreen_pause_ignore_appids: args.fullscreen_pause_ignore_appid.clone(),
         release_hidden_after: args.release_hidden_after.map(Duration::from_secs),
+        pointer: !args.disable_mouse,
         ..Default::default()
     };
 
@@ -410,7 +411,7 @@ fn run_wallpapers(args: CompatArgs) -> ExitCode {
             height: u32::try_from(w.h.max(1)).unwrap_or(1),
         });
     let connected = match asked_window {
-        Some(mode) => Platform::connect_x11(mode, factory),
+        Some(mode) => Platform::connect_x11(mode, &present, factory),
         None => Platform::connect_with(kirie_platform::Backend::from_env(), present, factory),
     };
     let exit = match connected {
