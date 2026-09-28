@@ -450,6 +450,9 @@ impl TextureRegistry {
             return None;
         }
         let page = content.pages.first()?;
+        if !fits_device(&self.device, name, page.width, page.height) {
+            return None;
+        }
         let fr = content.frames.first()?;
         if fr.axes[1].abs() > 1e-4 || fr.axes[2].abs() > 1e-4 {
             return None;
@@ -459,7 +462,9 @@ impl TextureRegistry {
         let fy = (fr.translation[1] * th as f32).round() as i64;
         let fw = ((fr.axes[0] * tw as f32).round() as i64).max(1);
         let fh = ((fr.axes[3] * th as f32).round() as i64).max(1);
-        if fx < 0 || fy < 0 || fx + fw > tw || fy + fh > th {
+        // The frame rectangle comes from the file; a huge width saturates to
+        // i64::MAX, so the bound is checked without adding to it.
+        if fx < 0 || fy < 0 || fw > tw - fx || fh > th - fy {
             return None;
         }
         let (fx, fy, fw, fh) = (fx as usize, fy as usize, fw as usize, fh as usize);
@@ -467,7 +472,7 @@ impl TextureRegistry {
         let mut cropped = Vec::with_capacity(fw * fh * 4);
         for row in 0..fh {
             let start = (fy + row) * stride + fx * 4;
-            cropped.extend_from_slice(&page.pixels[start..start + fw * 4]);
+            cropped.extend_from_slice(page.pixels.get(start..start + fw * 4)?);
         }
         let gpu = upload_rgba8(
             &self.device,
@@ -495,6 +500,9 @@ impl TextureRegistry {
         };
         content.pad_pages_to_max();
         let page = content.pages.first()?;
+        if !fits_device(&self.device, name, page.width, page.height) {
+            return None;
+        }
         let uv_crop = match content.frames.as_slice() {
             [only] => [only.axes[0], only.axes[3]],
             _ => [1.0, 1.0],
@@ -552,12 +560,7 @@ impl TextureRegistry {
 
         let tex = kirie_formats::tex::Tex::parse(tex_bytes).ok()?;
         let payload = tex.video_payload().ok()?;
-        let mut key: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in &*payload {
-            key = (key ^ u64::from(*b)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        let file = std::env::temp_dir().join(format!("kirie-vtex-{key:016x}.mp4"));
-        std::fs::write(&file, &payload).ok()?;
+        let file = write_private_temp(&payload)?;
 
         let opened = kirie_video::VideoPlayer::open(
             &file,
@@ -580,13 +583,16 @@ impl TextureRegistry {
         };
         let _ = std::fs::remove_file(&file);
         let frame = frame?;
-        if frame.width == 0 || frame.height == 0 {
+        if frame.width == 0
+            || frame.height == 0
+            || !fits_device(&self.device, name, frame.width, frame.height)
+        {
             return None;
         }
 
         let is_nv12 = frame.pixels == kirie_video::FramePixels::Nv12;
         let rgba_seed: std::borrow::Cow<[u8]> = if is_nv12 {
-            std::borrow::Cow::Owned(vec![0u8; (frame.width * frame.height * 4) as usize])
+            std::borrow::Cow::Owned(vec![0u8; frame.width as usize * frame.height as usize * 4])
         } else {
             std::borrow::Cow::Borrowed(&frame.data)
         };
@@ -666,6 +672,54 @@ fn atlas_animates(content: &ImageContent) -> Option<bool> {
     Some(content.frames.iter().any(|f| f.page != 0))
 }
 
+/// Writes a video payload where the decoder can open it by path. The name is
+/// unique to this process and the file is created fresh (`create_new` refuses
+/// an existing file or a planted symlink in a shared temp directory), readable
+/// only by this user.
+fn write_private_temp(payload: &[u8]) -> Option<std::path::PathBuf> {
+    use std::io::Write;
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!("kirie-vtex-{}-{seq}.mp4", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = match options.open(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::debug!(path = %path.display(), error = %e, "video texture temp file not created");
+            return None;
+        }
+    };
+    if file.write_all(payload).is_err() {
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+        return None;
+    }
+    Some(path)
+}
+
+/// A texture larger than the GPU allows would fail validation, which wgpu
+/// treats as fatal; the file's own size is untrusted, so it is checked first.
+fn fits_device(device: &wgpu::Device, name: &str, width: u32, height: u32) -> bool {
+    let max = device.limits().max_texture_dimension_2d;
+    if width <= max && height <= max {
+        return true;
+    }
+    tracing::warn!(
+        texture = name,
+        width,
+        height,
+        max,
+        "texture larger than the gpu allows; drawing white"
+    );
+    false
+}
+
 #[allow(clippy::too_many_arguments)]
 fn upload_rgba8(
     device: &wgpu::Device,
@@ -693,7 +747,7 @@ fn upload_rgba8(
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });
-    let need = (width * height * 4) as usize;
+    let need = width as usize * height as usize * 4;
     if pixels.len() >= need {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
