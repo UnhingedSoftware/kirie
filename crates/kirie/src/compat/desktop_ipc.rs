@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
-use kirie_ipc::{UnixListener, UnixStream};
+use kirie_ipc::UnixStream;
 use kirie_platform::{RenderCommand, RenderTarget, Renderer, SurfaceSize};
 
 use crate::compat::args::{ClampMode, CompatArgs, ScalingMode};
@@ -130,6 +130,10 @@ impl Showing {
     }
 }
 
+/// The longest request line read, as on Linux: room for any path, and a
+/// bound on what a client that never sends a newline can make us hold.
+const MAX_REQUEST: u64 = 1 << 20;
+
 #[must_use]
 pub fn already_running(socket: &Path) -> bool {
     let Ok(stream) = UnixStream::connect(socket) else {
@@ -146,8 +150,8 @@ pub fn already_running(socket: &Path) -> bool {
 }
 
 pub fn serve(socket: PathBuf, orders: Sender<RenderCommand>, showing: Arc<Showing>, args: CompatArgs) {
-    let _ = std::fs::remove_file(&socket);
-    let listener = match UnixListener::bind(&socket) {
+    let _ = kirie_ipc::remove_stale_socket(&socket);
+    let listener = match kirie_ipc::bind_private(&socket) {
         Ok(listener) => listener,
         Err(err) => {
             tracing::error!(path = %socket.display(), %err, "cannot open the control socket");
@@ -169,8 +173,8 @@ pub fn serve(socket: PathBuf, orders: Sender<RenderCommand>, showing: Arc<Showin
 }
 
 pub fn serve_relaunching(socket: PathBuf, showing: Arc<Showing>) {
-    let _ = std::fs::remove_file(&socket);
-    let listener = match UnixListener::bind(&socket) {
+    let _ = kirie_ipc::remove_stale_socket(&socket);
+    let listener = match kirie_ipc::bind_private(&socket) {
         Ok(listener) => listener,
         Err(err) => {
             tracing::error!(path = %socket.display(), %err, "cannot open the control socket");
@@ -182,7 +186,7 @@ pub fn serve_relaunching(socket: PathBuf, showing: Arc<Showing>) {
     for stream in listener.incoming() {
         let Ok(stream) = stream else { continue };
         let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
-        let mut reader = BufReader::new(&stream);
+        let mut reader = BufReader::new((&stream).take(MAX_REQUEST));
         let mut line = String::new();
         if reader.read_line(&mut line).is_err() || line.is_empty() {
             continue;
@@ -268,7 +272,7 @@ where
 fn answer(stream: &UnixStream, orders: &Sender<RenderCommand>, showing: &Arc<Showing>, args: &CompatArgs) {
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
 
-    let mut reader = BufReader::new(stream);
+    let mut reader = BufReader::new(stream.take(MAX_REQUEST));
     let mut line = String::new();
     if reader.read_line(&mut line).is_err() || line.is_empty() {
         return;

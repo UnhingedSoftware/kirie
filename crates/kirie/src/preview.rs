@@ -4,7 +4,7 @@ use std::sync::mpsc::{Receiver, TryRecvError, channel};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use kirie_ipc::{UnixListener, UnixStream};
+use kirie_ipc::UnixStream;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
@@ -102,9 +102,9 @@ const IDLE_EXIT: Duration = Duration::from_secs(30);
 const DEFAULT_EDGE: u32 = 960;
 
 pub fn run(socket: &Path, background: &Path, fps: Option<u32>, edge: Option<u32>) -> Result<()> {
-    let _ = std::fs::remove_file(socket);
-    let listener =
-        UnixListener::bind(socket).with_context(|| format!("bind preview socket {}", socket.display()))?;
+    let _ = kirie_ipc::remove_stale_socket(socket);
+    let listener = kirie_ipc::bind_private(socket)
+        .with_context(|| format!("bind preview socket {}", socket.display()))?;
     tracing::info!(socket = %socket.display(), "preview listening");
 
     let requested_fps = fps.unwrap_or(DEFAULT_FPS).clamp(1, 120);
@@ -123,7 +123,7 @@ pub fn run(socket: &Path, background: &Path, fps: Option<u32>, edge: Option<u32>
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 if waiting_since.elapsed() >= IDLE_EXIT {
                     tracing::info!("no preview client; exiting");
-                    let _ = std::fs::remove_file(socket);
+                    let _ = kirie_ipc::remove_stale_socket(socket);
                     return Ok(());
                 }
                 std::thread::sleep(Duration::from_millis(100));
