@@ -6,7 +6,7 @@
 //! way a real wallpaper does.
 //!
 //! ```text
-//! cargo run --release --example frame_cost -- [layers] [effect_every] [composite_every] [frames]
+//! cargo run --release --example frame_cost -- [layers] [effect_every] [composite_every] [frames] [bloom]
 //! ```
 
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ impl AssetSource for Memory {
     }
 }
 
-fn build(layers: usize, effect_every: usize, composite_every: usize) -> (String, Memory) {
+fn build(layers: usize, effect_every: usize, composite_every: usize, bloom: bool) -> (String, Memory) {
     let mut files: HashMap<String, Vec<u8>> = HashMap::new();
     files.insert("shaders/bench.vert".into(), VERT.into());
     files.insert("shaders/bench.frag".into(), FRAG.into());
@@ -103,10 +103,14 @@ fn build(layers: usize, effect_every: usize, composite_every: usize) -> (String,
         } else {
             "models/bench.json"
         };
+        // Each layer tints differently and lets some of the scene through, so
+        // the frame digest changes if any layer composites differently.
+        let tint = |k: usize| ((i * k + 3) % 10) as f32 / 10.0;
+        let (r, g, b) = (tint(3), tint(7), tint(9));
         objects.push(format!(
             r#"{{"id":{i},"name":"layer{i}","image":"{model}","visible":true,
-                "origin":"0 0 0","scale":"1 1 1","angles":"0 0 0","alpha":1.0,
-                "color":"1 1 1","size":"1920 1080",{effects}
+                "origin":"0 0 0","scale":"1 1 1","angles":"0 0 0","alpha":0.7,
+                "color":"{r} {g} {b}","size":"1920 1080",{effects}
                 "alignment":"center"}}"#
         ));
     }
@@ -114,7 +118,7 @@ fn build(layers: usize, effect_every: usize, composite_every: usize) -> (String,
     let scene = format!(
         r#"{{"camera":{{"eye":"0 0 100","center":"0 0 0","up":"0 1 0"}},
             "general":{{"orthogonalprojection":{{"width":1920,"height":1080}},
-                        "clearcolor":"0 0 0","bloom":false}},
+                        "clearcolor":"0 0 0","bloom":{bloom}}},
             "objects":[{}]}}"#,
         objects.join(",")
     );
@@ -144,6 +148,7 @@ fn main() {
     let effect_every: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(4);
     let composite_every: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(6);
     let frames: usize = args.next().and_then(|a| a.parse().ok()).unwrap_or(120);
+    let bloom = args.next().is_some_and(|a| a == "1" || a == "bloom");
     let (width, height) = (1920u32, 1080u32);
 
     if std::env::var_os("RUST_LOG").is_some() {
@@ -157,7 +162,7 @@ fn main() {
         std::process::exit(1);
     };
 
-    let (scene_json, source) = build(layers, effect_every, composite_every);
+    let (scene_json, source) = build(layers, effect_every, composite_every, bloom);
     let scene = Scene::from_slice(scene_json.as_bytes()).expect("synthetic scene.json parses");
     let bag = PropertyBag::default();
     let mut model = SceneModel::resolve(scene, &bag);
@@ -235,7 +240,7 @@ fn main() {
 
     println!("adapter        {adapter}");
     println!(
-        "scene          {layers} layers, an effect on every {effect_every}, a scene-reading layer on every {composite_every}, {width}x{height}"
+        "scene          {layers} layers, an effect on every {effect_every}, a scene-reading layer on every {composite_every}, bloom {bloom}, {width}x{height}"
     );
     println!("frames         {frames}");
     println!("record median  {median:.3} ms/frame (CPU time inside render())");
