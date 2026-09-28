@@ -16,8 +16,8 @@ pub fn parse_bvec3(value: Option<&Value>, default: Vec3) -> Vec3 {
             }
             out
         }
-        Some(Value::Number(_)) => {
-            let n = coerce_f64(value.unwrap()).unwrap_or(0.0) as f32;
+        Some(number @ Value::Number(_)) => {
+            let n = coerce_f64(number).unwrap_or(0.0) as f32;
             [n, n, n]
         }
         _ => default,
