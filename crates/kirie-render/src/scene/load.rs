@@ -134,7 +134,6 @@ pub fn load_workshop_scene(
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer + Send>, SceneLoadError> {
-    kirie_shader::translate::set_cache_dir(Some(scene_dir.join(".kirie-cache")));
     let pkg_path = scene_package(scene_dir);
     let pkg = match kirie_bake::map_readonly(&pkg_path) {
         Ok(map) => OwnedPkg::from_external(map),
@@ -291,7 +290,6 @@ pub fn start_background_prebake(
         })?;
         let pkg =
             OwnedPkg::from_external(map).map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
-        kirie_shader::translate::set_cache_dir(Some(item.join(".kirie-cache")));
         let scene = {
             let bytes = pkg
                 .read_name(&scene_entry(&pkg, item))
