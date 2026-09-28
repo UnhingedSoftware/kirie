@@ -563,61 +563,6 @@ impl MacPlatform {
     }
 }
 
-pub struct DesktopSurface {
-    window: Retained<NSWindow>,
-    name: String,
-    size: SurfaceSize,
-}
-
-impl DesktopSurface {
-    #[must_use]
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    #[must_use]
-    pub const fn size(&self) -> SurfaceSize {
-        self.size
-    }
-
-    pub fn show(&self, view: &objc2_app_kit::NSView) {
-        view.setFrame(self.window.contentLayoutRect());
-        self.window.setContentView(Some(view));
-        self.window.orderFrontRegardless();
-    }
-}
-
-pub fn open_desktop(screen_roots: &[String]) -> Result<Vec<DesktopSurface>, PlatformError> {
-    let mtm = MainThreadMarker::new().ok_or(PlatformError::NotMainThread)?;
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    finish_launching(&app);
-
-    let screens = chosen_screens(mtm, screen_roots);
-    if screens.is_empty() {
-        return Err(PlatformError::NoCrtcs);
-    }
-
-    Ok(screens
-        .into_iter()
-        .map(|(screen, name)| DesktopSurface {
-            size: pixel_size(&screen),
-            window: desktop_window(mtm, &screen),
-            name,
-        })
-        .collect())
-}
-
-pub fn pump_desktop_events() {
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let app = NSApplication::sharedApplication(mtm);
-    while let Some(event) = next_event(&app) {
-        app.sendEvent(&event);
-    }
-}
-
 fn chosen_screens(mtm: MainThreadMarker, roots: &[String]) -> Vec<(Retained<NSScreen>, String)> {
     let all: Vec<(Retained<NSScreen>, String)> = NSScreen::screens(mtm)
         .iter()
@@ -661,7 +606,7 @@ fn battery_fps() -> Option<u32> {
 }
 
 fn on_battery() -> bool {
-    let asked = std::process::Command::new("pmset")
+    let asked = std::process::Command::new("/usr/bin/pmset")
         .args(["-g", "ps"])
         .stdin(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

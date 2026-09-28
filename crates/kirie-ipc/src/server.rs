@@ -2,21 +2,27 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use std::{fs, thread};
 
 use crossbeam_channel::{Sender, bounded};
 
 use crate::command::{Request, parse_request};
 use crate::error::IpcError;
 use crate::event::{CommandOutcome, IpcEvent};
-use crate::os::{UnixListener, UnixStream, socket_is_foreign};
+use crate::os::{UnixListener, UnixStream, bind_private, remove_stale_socket, socket_is_foreign};
 use crate::status::format_status;
 
 const READ_TIMEOUT: Duration = Duration::from_millis(50);
 
 const READ_CHUNK: usize = 1024;
+
+/// The longest request line read. Every command is a word or two and at most
+/// one path, so this is room for any path Windows or Linux can name; without
+/// a cap a client that never sends a newline grows the buffer for the whole
+/// connection deadline.
+const MAX_REQUEST: usize = 1 << 20;
 
 const CONNECTION_DEADLINE: Duration = Duration::from_secs(2);
 
@@ -37,9 +43,7 @@ pub struct ControlSocket {
 impl ControlSocket {
     pub fn bind(path: impl Into<PathBuf>, events: Sender<IpcEvent>) -> Result<Self, IpcError> {
         let path = path.into();
-        if let Err(e) = fs::remove_file(&path)
-            && e.kind() != ErrorKind::NotFound
-        {
+        if let Err(e) = remove_stale_socket(&path) {
             // A shared temp dir plus a fixed name means the socket can belong to
             // a different account; /tmp's sticky bit then refuses the unlink and
             // the bind below fails with a bare EADDRINUSE. Say what is wrong.
@@ -48,7 +52,7 @@ impl ControlSocket {
             }
             tracing::debug!(path = %path.display(), error = %e, "stale socket unlink failed");
         }
-        let listener = UnixListener::bind(&path).map_err(|source| IpcError::Bind {
+        let listener = bind_private(&path).map_err(|source| IpcError::Bind {
             path: path.clone(),
             source,
         })?;
@@ -87,7 +91,7 @@ impl ControlSocket {
                     "could not wake control-socket thread; detaching it");
             }
         }
-        let _ = fs::remove_file(&self.path);
+        let _ = remove_stale_socket(&self.path);
     }
 }
 
@@ -135,6 +139,13 @@ fn handle_connection(mut stream: UnixStream, events: &Sender<IpcEvent>) {
                 buf.extend_from_slice(&chunk[..n]);
                 if has_newline {
                     break;
+                }
+                if buf.len() > MAX_REQUEST {
+                    tracing::debug!(bytes = buf.len(), "control-socket request too long; refused");
+                    if let Err(e) = stream.write_all(RESP_ERROR) {
+                        tracing::debug!(error = %e, "control-socket response write failed");
+                    }
+                    return;
                 }
             }
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => break,

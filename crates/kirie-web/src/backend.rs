@@ -29,7 +29,10 @@ pub struct FrameBuffer {
 impl FrameBuffer {
     #[must_use]
     pub fn is_consistent(&self) -> bool {
-        self.data.len() == (self.width as usize) * (self.height as usize) * 4
+        (self.width as usize)
+            .checked_mul(self.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            == Some(self.data.len())
     }
 }
 

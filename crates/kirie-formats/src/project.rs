@@ -382,7 +382,10 @@ fn float_prefix(s: &str) -> &str {
     let bytes = s.as_bytes();
     let mut i = usize::from(matches!(bytes.first(), Some(b'+' | b'-')));
     for token in ["infinity", "inf", "nan"] {
-        if s.len() >= i + token.len() && s[i..i + token.len()].eq_ignore_ascii_case(token) {
+        if bytes
+            .get(i..i + token.len())
+            .is_some_and(|word| word.eq_ignore_ascii_case(token.as_bytes()))
+        {
             return &s[..i + token.len()];
         }
     }
@@ -1499,6 +1502,7 @@ mod tests {
         assert_eq!(parse_property_color("1 1 1 ").unwrap(), [1.0, 1.0, 1.0]);
         assert_eq!(parse_property_color("a b c").unwrap(), [0.0, 0.0, 0.0]);
         assert_eq!(parse_property_color("1.5x 2 3").unwrap(), [1.5, 2.0, 3.0]);
+        assert_eq!(parse_property_color("i€€€ n€€ -i€€").unwrap(), [0.0, 0.0, 0.0]);
 
         assert_eq!(parse_property_color("#fff").unwrap(), [1.0, 1.0, 1.0]);
         assert_eq!(parse_property_color("#f00f").unwrap(), [1.0, 0.0, 0.0]);

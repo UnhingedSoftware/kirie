@@ -71,8 +71,23 @@ impl AssetSource for CompositeSource<'_> {
         if let Ok(bytes) = self.pkg.read_name(path.as_bytes()) {
             return Some(bytes.to_vec());
         }
-        std::fs::read(self.assets?.join(path)).ok()
+        let Some(relative) = inside_assets(path) else {
+            tracing::debug!(%path, "asset path leaves the assets directory; refused");
+            return None;
+        };
+        std::fs::read(self.assets?.join(relative)).ok()
     }
+}
+
+/// Asset names come from the wallpaper's own files; one that climbs out with
+/// `..` or is absolute (which `join` would take as-is) must not reach outside
+/// the shared assets directory.
+fn inside_assets(path: &str) -> Option<&Path> {
+    let relative = Path::new(path);
+    relative
+        .components()
+        .all(|c| matches!(c, std::path::Component::Normal(_) | std::path::Component::CurDir))
+        .then_some(relative)
 }
 
 #[must_use]
@@ -119,7 +134,6 @@ pub fn load_workshop_scene(
     audio: Option<Arc<AudioCapture>>,
     properties: &[(String, String)],
 ) -> Result<Box<dyn Renderer + Send>, SceneLoadError> {
-    kirie_shader::translate::set_cache_dir(Some(scene_dir.join(".kirie-cache")));
     let pkg_path = scene_package(scene_dir);
     let pkg = match kirie_bake::map_readonly(&pkg_path) {
         Ok(map) => OwnedPkg::from_external(map),
@@ -276,7 +290,6 @@ pub fn start_background_prebake(
         })?;
         let pkg =
             OwnedPkg::from_external(map).map_err(|e| kirie_bake::BakeError::Serialize(e.to_string()))?;
-        kirie_shader::translate::set_cache_dir(Some(item.join(".kirie-cache")));
         let scene = {
             let bytes = pkg
                 .read_name(&scene_entry(&pkg, item))
@@ -371,5 +384,23 @@ impl Renderer for ClearColorRenderer {
             });
         }
         self.queue.submit(Some(encoder.finish()));
+    }
+}
+
+#[cfg(test)]
+mod asset_path_tests {
+    use super::inside_assets;
+
+    #[test]
+    fn plain_asset_names_stay_inside() {
+        assert!(inside_assets("materials/foo.tex").is_some());
+        assert!(inside_assets("shaders/common.h").is_some());
+    }
+
+    #[test]
+    fn climbing_or_absolute_names_are_refused() {
+        assert!(inside_assets("../../etc/passwd").is_none());
+        assert!(inside_assets("materials/../../secret").is_none());
+        assert!(inside_assets("/etc/passwd").is_none());
     }
 }

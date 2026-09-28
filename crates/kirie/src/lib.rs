@@ -10,6 +10,7 @@ pub mod gpus;
 pub mod info;
 pub mod list;
 mod os;
+pub mod pack;
 pub mod preview;
 mod preview_render;
 pub mod soak;
@@ -81,6 +82,15 @@ enum Command {
         fps: Option<u32>,
         #[arg(long)]
         size: Option<u32>,
+    },
+    /// Package a folder holding kirie.json into a .kpk, or with --inspect,
+    /// show and check an existing package.
+    Pack {
+        path: PathBuf,
+        #[arg(short = 'o', long = "output", conflicts_with = "inspect")]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        inspect: bool,
     },
     Extract {
         path: PathBuf,
@@ -168,6 +178,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
         Some(sub)
             if sub == "info"
                 || sub == "extract"
+                || sub == "pack"
                 || sub == "check"
                 || sub == "list"
                 || sub == "gpus"
@@ -183,16 +194,26 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
     }
 }
 
-pub(crate) fn default_control_socket() -> PathBuf {
-    os::runtime_dir().join("lwe.sock")
+/// `None` when there is no private directory to put it in; see
+/// [`os::runtime_dir`].
+pub(crate) fn default_control_socket() -> Option<PathBuf> {
+    os::runtime_dir().map(|dir| dir.join("lwe.sock"))
+}
+
+fn control_socket_or_default(socket: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    socket
+        .or_else(default_control_socket)
+        .ok_or_else(|| anyhow::anyhow!("no private directory for the control socket; pass --socket"))
 }
 
 fn run_subcommand(args: Vec<OsString>) -> ExitCode {
     kirie_bake::limit_malloc_arenas(2);
     let cli = Cli::parse_from(args);
     if let Command::Ask { socket, words } = &cli.command {
-        let path = socket.clone().unwrap_or_else(default_control_socket);
-        return match ask::run(&path, &words.join(" ")) {
+        let said = control_socket_or_default(socket.clone())
+            .map_err(|err| err.to_string())
+            .and_then(|path| ask::run(&path, &words.join(" ")));
+        return match said {
             Ok(said) => {
                 print!("{said}");
                 ExitCode::SUCCESS
@@ -241,6 +262,17 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
             tex_to_png,
         } => extract::run(&path, &output, tex_to_png),
         Command::List { dir, json } => list::run(dir.as_deref(), json),
+        Command::Pack {
+            path,
+            output,
+            inspect,
+        } => {
+            if inspect {
+                pack::inspect(&path)
+            } else {
+                pack::run(&path, output)
+            }
+        }
         Command::Gpus { json } => gpus::run(json),
         Command::Update { check, force } => update::run(check, force),
         Command::Workshop { command } => match command {
@@ -273,13 +305,8 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
                 apply,
                 socket,
                 json,
-            } => workshop::run_subscribe(
-                &id,
-                wait,
-                apply.as_deref(),
-                &socket.unwrap_or_else(default_control_socket),
-                json,
-            ),
+            } => control_socket_or_default(socket)
+                .and_then(|socket| workshop::run_subscribe(&id, wait, apply.as_deref(), &socket, json)),
             WorkshopCommand::Unsubscribe { id, json } => workshop::run_unsubscribe(&id, json),
             WorkshopCommand::State { id, json } => workshop::run_state(&id, json),
             #[cfg(feature = "tui")]
@@ -328,6 +355,6 @@ mod socket_tests {
     // two agreeing on the file name is what makes them able to talk at all.
     #[test]
     fn the_socket_is_named_the_same_on_every_platform() {
-        assert!(super::default_control_socket().ends_with("lwe.sock"));
+        assert!(super::default_control_socket().is_some_and(|path| path.ends_with("lwe.sock")));
     }
 }

@@ -58,8 +58,6 @@ wrap_app! {
                  RendererCodeIntegrityEnabled,site-per-process");
             switch(cmd, "disable-gpu-shader-disk-cache");
             switch(cmd, "disable-site-isolation-trials");
-            switch(cmd, "disable-web-security");
-            switch_val(cmd, "remote-allow-origins", "*");
             switch_val(cmd, "autoplay-policy", "no-user-gesture-required");
             switch(cmd, "disable-background-timer-throttling");
             switch(cmd, "disable-backgrounding-occluded-windows");
@@ -68,8 +66,6 @@ wrap_app! {
             switch(cmd, "disable-breakpad");
             switch(cmd, "disable-field-trial-config");
             switch(cmd, "no-experiments");
-
-            switch(cmd, "allow-file-access-from-files");
 
             if std::env::var_os("WPE_CEF_NO_IPG").is_none() {
                 switch(cmd, "in-process-gpu");

@@ -116,7 +116,7 @@ impl Platform {
                 options,
             )?)),
             #[cfg(target_os = "linux")]
-            Backend::X11 => Self::connect_x11(X11Mode::Desktop, make_renderer),
+            Backend::X11 => Self::connect_x11(X11Mode::Desktop, &options, make_renderer),
             #[cfg(target_os = "macos")]
             Backend::Mac => Ok(Self::Mac(crate::macos::MacPlatform::connect_with(
                 make_renderer,
@@ -131,8 +131,12 @@ impl Platform {
     }
 
     #[cfg(target_os = "linux")]
-    pub fn connect_x11(mode: X11Mode, make_renderer: RendererFactory) -> Result<Self, PlatformError> {
-        Ok(Self::X11(X11Platform::connect(mode, make_renderer)?))
+    pub fn connect_x11(
+        mode: X11Mode,
+        options: &PresentOptions,
+        make_renderer: RendererFactory,
+    ) -> Result<Self, PlatformError> {
+        Ok(Self::X11(X11Platform::connect(mode, options, make_renderer)?))
     }
 
     #[must_use]

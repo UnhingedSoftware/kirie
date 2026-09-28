@@ -261,27 +261,13 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             state.properties = super::saved_props::with_saved(&path, &staged)
                 .into_iter()
                 .collect();
+            let props = property_list(state);
             if !staged.is_empty() {
-                let all: Vec<(String, String)> = state
-                    .properties
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                super::saved_props::write(&path, &all);
+                super::saved_props::write(&path, &props);
             }
-            let sc = state
-                .swap
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
-            let Some((cmd_tx, build_ctx)) = sc else {
+            let Some((cmd_tx, build_ctx)) = swap_parts(state) else {
                 return CommandOutcome::Refused("the renderer is not ready yet".to_owned());
             };
-            let props: Vec<(String, String)> = state
-                .properties
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
             #[cfg(any(feature = "web-cef", feature = "web-webview"))]
             let props_web = props.clone();
             if let Some(build) = build_ctx.build_fn(screen.clone(), &path, props) {
@@ -305,24 +291,14 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             CommandOutcome::Refused(why_not(&path))
         }
         Command::Preload { path } => {
-            if let Some((cmd_tx, build_ctx)) = state
-                .swap
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())))
+            if let Some((cmd_tx, build_ctx)) = swap_parts(state)
+                && let Some(build) = build_ctx.build_fn("*".to_owned(), &path, property_list(state))
             {
-                let props: Vec<(String, String)> = state
-                    .properties
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                if let Some(build) = build_ctx.build_fn("*".to_owned(), &path, props) {
-                    let _ = cmd_tx.send(RenderCommand::Build {
-                        screen: "*".to_owned(),
-                        stash: Some(path.to_string_lossy().into_owned()),
-                        build,
-                    });
-                }
+                let _ = cmd_tx.send(RenderCommand::Build {
+                    screen: "*".to_owned(),
+                    stash: Some(path.to_string_lossy().into_owned()),
+                    build,
+                });
             }
             CommandOutcome::Ok
         }
@@ -335,12 +311,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
             if let Some(showing) = state.screens.get(&screen).and_then(|e| e.bg.clone()) {
                 super::saved_props::remember(&showing, &key, &value);
             }
-            let sc = state
-                .swap
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())));
-            if let Some((cmd_tx, build_ctx)) = sc {
+            if let Some((cmd_tx, build_ctx)) = swap_parts(state) {
                 let structural = Arc::new(std::sync::atomic::AtomicBool::new(true));
                 let _ = cmd_tx.send(RenderCommand::SetProperty {
                     screen: screen.clone(),
@@ -348,15 +319,9 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     value,
                     structural: structural.clone(),
                 });
-                if !screen.is_empty()
-                    && let Some(path) = state.screens.get(&screen).and_then(|e| e.bg.clone())
-                {
+                if let Some(path) = state.screens.get(&screen).and_then(|e| e.bg.clone()) {
                     use std::sync::atomic::Ordering;
-                    let props: Vec<(String, String)> = state
-                        .properties
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
+                    let props = property_list(state);
                     let generation = state.prop_gen.fetch_add(1, Ordering::SeqCst) + 1;
                     let gen_slot = state.prop_gen.clone();
                     let screen_c = screen.clone();
@@ -425,12 +390,7 @@ fn apply_command(state: &mut AppState, command: Command) -> CommandOutcome {
                     return CommandOutcome::Error;
                 }
             }
-            let cmd_tx = state
-                .swap
-                .lock()
-                .ok()
-                .and_then(|g| g.as_ref().map(|s| s.cmd_tx.clone()));
-            let Some(cmd_tx) = cmd_tx else {
+            let Some(cmd_tx) = cmd_sender(state) else {
                 return CommandOutcome::Error;
             };
             let capture: CaptureFn = Box::new(move |device, queue, renderer, size, format| {
@@ -472,6 +432,14 @@ fn swap_parts(state: &AppState) -> Option<(kirie_platform::CommandSender, Arc<su
         .and_then(|g| g.as_ref().map(|s| (s.cmd_tx.clone(), s.build.clone())))
 }
 
+fn property_list(state: &AppState) -> Vec<(String, String)> {
+    state
+        .properties
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
 fn cmd_sender(state: &AppState) -> Option<kirie_platform::CommandSender> {
     swap_parts(state).map(|(tx, _)| tx)
 }
@@ -481,11 +449,7 @@ fn rebuild_current(state: &mut AppState) {
         return;
     };
     state.prop_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let props: Vec<(String, String)> = state
-        .properties
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect();
+    let props = property_list(state);
     let screens: Vec<(String, std::path::PathBuf)> = state
         .screens
         .iter()

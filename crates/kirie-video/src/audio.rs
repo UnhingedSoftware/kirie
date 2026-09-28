@@ -84,7 +84,7 @@ fn run_thread(
 ) {
     let setup = || -> Result<Option<(DecodeState, cpal::Stream, AudioLink)>, VideoError> {
         ffmpeg::init()?;
-        let input = ffmpeg::format::input(path)?;
+        let input = crate::decode::open_input(path)?;
         let Some(stream) = input.streams().best(ffmpeg::media::Type::Audio) else {
             return Ok(None);
         };

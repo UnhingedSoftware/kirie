@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CString, c_char, c_int, c_void};
 use std::path::{Path, PathBuf};
 
 pub const APP_ID: u32 = 431_960;
@@ -146,13 +146,10 @@ impl Session {
 
             let init_flat: unsafe extern "C" fn(*mut c_char) -> c_int =
                 std::mem::transmute(sym(b"SteamAPI_InitFlat\0")?);
-            let mut err_msg = [0i8; 1024];
+            let mut err_msg: [c_char; 1024] = [0; 1024];
             let rc = init_flat(err_msg.as_mut_ptr());
             if rc != 0 {
-                let why = CStr::from_ptr(err_msg.as_ptr())
-                    .to_string_lossy()
-                    .trim()
-                    .to_owned();
+                let why = c_field(&err_msg).trim().to_owned();
                 return Err(SteamError::InitFailed(if why.is_empty() {
                     format!("code {rc}")
                 } else {
@@ -296,7 +293,7 @@ impl Session {
 
     #[must_use]
     pub fn app_install_dir(&self) -> Option<PathBuf> {
-        let mut buf = [0i8; 4096];
+        let mut buf: [c_char; 4096] = [0; 4096];
         // SAFETY: the buffer and its length are handed over together, and Steam
         // writes at most that many bytes into it and NUL-terminates. The
         // buffer is a live local for the whole call, and `c_field` below reads
@@ -313,10 +310,8 @@ impl Session {
         if written == 0 {
             return None;
         }
-        // SAFETY: Steam nul-terminates within the buffer it was given.
-        let path = unsafe { CStr::from_ptr(buf.as_ptr()) };
-        let path = path.to_string_lossy();
-        (!path.is_empty()).then(|| PathBuf::from(path.as_ref()))
+        let path = c_field(&buf);
+        (!path.is_empty()).then(|| PathBuf::from(path))
     }
 }
 
@@ -512,7 +507,7 @@ impl Session {
     #[must_use]
     pub fn item_install_info(&self, id: u64) -> Option<InstallInfo> {
         let mut size = 0u64;
-        let mut folder = [0i8; 4096];
+        let mut folder: [c_char; 4096] = [0; 4096];
         let mut updated = 0u32;
         // SAFETY: every out-pointer is a live local that outlives the call,
         // and the buffer's length is passed alongside it, so Steam writes at
@@ -739,7 +734,7 @@ impl Session {
                 }
                 let d = details.assume_init();
 
-                let mut url = [0i8; 1024];
+                let mut url: [c_char; 1024] = [0; 1024];
                 let has_preview = (self.get_preview_url)(
                     ugc,
                     handle,
@@ -747,9 +742,7 @@ impl Session {
                     url.as_mut_ptr(),
                     u32::try_from(url.len()).unwrap_or(u32::MAX),
                 );
-                let preview_url = has_preview
-                    .then(|| CStr::from_ptr(url.as_ptr()).to_string_lossy().into_owned())
-                    .filter(|u| !u.is_empty());
+                let preview_url = has_preview.then(|| c_field(&url)).filter(|u| !u.is_empty());
 
                 if !layout_plausible(&d) {
                     release(handle);
@@ -763,7 +756,7 @@ impl Session {
                 let num_tags = (self.get_num_tags)(ugc, handle, index).min(MAX_TAGS);
                 let mut tags: Vec<String> = Vec::with_capacity(num_tags as usize);
                 for tag_index in 0..num_tags {
-                    let mut buf = [0i8; 256];
+                    let mut buf: [c_char; 256] = [0; 256];
                     let got = (self.get_tag)(
                         ugc,
                         handle,

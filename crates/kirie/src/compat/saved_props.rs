@@ -8,10 +8,7 @@ pub fn store() -> Option<PathBuf> {
     if let Some(set) = std::env::var_os("KIRIE_PROPERTY_STORE") {
         return Some(PathBuf::from(set));
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))?;
-    Some(base.join(DIRECTORY))
+    Some(crate::os::config_dir()?.join(DIRECTORY))
 }
 
 #[must_use]

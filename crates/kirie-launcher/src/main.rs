@@ -166,7 +166,11 @@ fn cache_root() -> io::Result<PathBuf> {
     let base = std::env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|h| !h.is_empty())
+                .map(|h| PathBuf::from(h).join(".cache"))
+        })
         .ok_or_else(|| io::Error::other("neither XDG_CACHE_HOME nor HOME is set"))?;
     Ok(base.join("kirie").join("rt"))
 }

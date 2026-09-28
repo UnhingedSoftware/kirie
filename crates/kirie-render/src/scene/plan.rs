@@ -320,6 +320,7 @@ mod tests {
             effects: vec![],
             animationlayers: vec![],
             instance: None,
+            copybackground: true,
         }
     }
 

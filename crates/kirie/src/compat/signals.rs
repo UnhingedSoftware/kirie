@@ -64,11 +64,10 @@ fn unlink(socket_path: Option<&std::path::Path>, signal: i32) {
         tracing::info!(signal, "signal received; shutting down");
         return;
     };
-    match std::fs::remove_file(path) {
+    match kirie_ipc::remove_stale_socket(path) {
         Ok(()) => {
             tracing::info!(path = %path.display(), signal, "signal received; control socket unlinked");
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "failed to unlink control socket on signal");
         }

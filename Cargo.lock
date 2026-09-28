@@ -2334,6 +2334,7 @@ dependencies = [
  "kirie-bake",
  "kirie-formats",
  "kirie-ipc",
+ "kirie-pack",
  "kirie-platform",
  "kirie-render",
  "kirie-steam-helper",
@@ -2415,6 +2416,17 @@ dependencies = [
  "blake3",
  "tar",
  "zstd",
+]
+
+[[package]]
+name = "kirie-pack"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "lz4_flex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

@@ -73,10 +73,15 @@ pub struct X11Platform {
     conn: XCBConnection,
     make_renderer: RendererFactory,
     frame_interval: Duration,
+    playback_speed: f32,
 }
 
 impl X11Platform {
-    pub(crate) fn connect(mode: X11Mode, make_renderer: RendererFactory) -> Result<Self, PlatformError> {
+    pub(crate) fn connect(
+        mode: X11Mode,
+        options: &crate::PresentOptions,
+        make_renderer: RendererFactory,
+    ) -> Result<Self, PlatformError> {
         let (conn, screen_num) =
             XCBConnection::connect(None).map_err(|e| PlatformError::X11Connect(e.to_string()))?;
 
@@ -147,7 +152,17 @@ impl X11Platform {
             gpu,
             conn,
             make_renderer,
-            frame_interval: Duration::from_micros(16_666),
+            frame_interval: options
+                .fps
+                .filter(|fps| *fps > 0)
+                .map_or(Duration::from_micros(16_666), |fps| {
+                    Duration::from_secs_f64(1.0 / f64::from(fps))
+                }),
+            playback_speed: if options.playback_speed > 0.0 {
+                options.playback_speed as f32
+            } else {
+                1.0
+            },
         };
 
         for index in 0..platform.outputs.len() {
@@ -193,6 +208,7 @@ impl X11Platform {
 
     fn draw(&mut self, index: usize) {
         let (device, queue) = (self.gpu.device.clone(), self.gpu.queue.clone());
+        let speed = self.playback_speed;
 
         let Some(ctx) = self.outputs.get_mut(index) else {
             return;
@@ -250,7 +266,8 @@ impl X11Platform {
         let dt = ctx
             .last_frame
             .map(|prev| now.duration_since(prev).as_secs_f32())
-            .unwrap_or(0.0);
+            .unwrap_or(0.0)
+            * speed;
         ctx.last_frame = Some(now);
 
         renderer.render(&view, ctx.physical_size, dt);

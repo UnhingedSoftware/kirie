@@ -13,6 +13,6 @@ pub use event::{CommandOutcome, IpcEvent};
 // Windows has AF_UNIX too; only the standard library's door to it is
 // Unix-only. Everything in kirie that talks to the control socket goes through
 // these rather than `std::os::unix::net`, so there is one place to change.
-pub use os::{UnixListener, UnixStream, path_bytes, path_from_bytes};
+pub use os::{UnixListener, UnixStream, bind_private, path_bytes, path_from_bytes, remove_stale_socket};
 pub use server::ControlSocket;
 pub use status::{ScreenStatus, StatusSnapshot};

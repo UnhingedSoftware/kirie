@@ -178,7 +178,9 @@ pub(crate) fn web_page(
     let source = kirie_web::page::PageSource::of(dir, file);
     let level = crate::compat::desktop_ipc::level_of(sound);
     let init = kirie_web::page::init_script(&crate::compat::common::web_props_json(dir, properties), level);
-    let data = crate::os::runtime_dir().join("webview2");
+    let data = crate::os::runtime_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("webview2");
     Box::new(move |window: isize, size: SurfaceSize| {
         let opened = kirie_web::webview2::DesktopPage::open(
             window,
@@ -202,9 +204,7 @@ pub(crate) fn web_page(
 }
 
 fn control_socket(args: &CompatArgs) -> Option<std::path::PathBuf> {
-    args.control_socket
-        .clone()
-        .or_else(|| Some(crate::default_control_socket()))
+    args.control_socket.clone().or_else(crate::default_control_socket)
 }
 
 fn background_of(args: &CompatArgs) -> Option<String> {
