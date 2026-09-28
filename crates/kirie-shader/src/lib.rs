@@ -68,6 +68,15 @@ impl FsIncludeResolver {
 
 impl IncludeResolver for FsIncludeResolver {
     fn resolve(&self, include_name: &str) -> Option<String> {
+        // The name comes from the shader, which comes from a download: only
+        // a plain relative path may reach the disk, never `/dev/zero` or
+        // `../../` out of the roots.
+        let relative = std::path::Path::new(include_name)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)));
+        if !relative {
+            return None;
+        }
         for root in &self.roots {
             let path = root.join(include_name);
             if let Ok(text) = std::fs::read_to_string(&path) {
@@ -175,6 +184,14 @@ mod tests {
         fn resolve(&self, _: &str) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn the_file_resolver_stays_inside_its_roots() {
+        let resolver = FsIncludeResolver::new(vec![std::env::temp_dir()]);
+        assert!(resolver.resolve("/etc/hostname").is_none());
+        assert!(resolver.resolve("../etc/hostname").is_none());
+        assert!(resolver.resolve("").is_none());
     }
 
     #[test]
