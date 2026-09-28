@@ -111,6 +111,13 @@ fn truncated_and_foreign_files_are_refused() {
         Package::from_reader(Cursor::new(b"PK\x03\x04 a zip file, not ours".repeat(10))),
         Err(PackError::NotAPackage)
     ));
+
+    let mut wrapping = bytes.clone();
+    wrapping[16..24].copy_from_slice(&u64::MAX.to_le_bytes());
+    assert!(matches!(
+        Package::from_reader(Cursor::new(wrapping)),
+        Err(PackError::Corrupt(_))
+    ));
 }
 
 #[test]

@@ -92,7 +92,7 @@ impl<R: Read + Seek> Package<R> {
             return Err(PackError::corrupt("the manifest or index is implausibly large"));
         }
         if manifest_offset < ALIGN
-            || index_offset != manifest_offset + manifest_len
+            || manifest_offset.checked_add(manifest_len) != Some(index_offset)
             || index_offset.checked_add(index_len) != Some(file_len)
         {
             return Err(PackError::corrupt("the header's offsets do not fit the file"));
