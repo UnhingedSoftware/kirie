@@ -217,19 +217,32 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     }
 }
 
+/// Size of the blob last written, so a wallpaper swap that compiled nothing
+/// new does not rewrite megabytes from the render thread.
+static PERSISTED_LEN: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
+    use std::sync::atomic::Ordering;
+
     let Some(cache) = SHARED_PIPELINE_CACHE.get() else {
         return;
     };
     let Some(data) = cache.get_data() else { return };
+    if data.len() == PERSISTED_LEN.load(Ordering::Relaxed) {
+        return;
+    }
     let Some(path) = pipeline_cache_file(adapter) else {
         return;
     };
     let Some(dir) = path.parent() else { return };
     let _ = std::fs::create_dir_all(dir);
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, &data).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    // Several kirie processes can share this file; each writes its own temp
+    // file so two saving at once cannot interleave into one.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        PERSISTED_LEN.store(data.len(), Ordering::Relaxed);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 
