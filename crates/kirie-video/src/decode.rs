@@ -56,6 +56,14 @@ pub const FRAME_QUEUE_CAP: usize = 4;
 
 const FALLBACK_FRAME_DUR: f64 = 1.0 / 30.0;
 
+/// Twice 8K. Every frame is converted into a buffer of this size, so a file
+/// claiming more is refused rather than trusted.
+const MAX_DIMENSION: u32 = 16_384;
+
+fn plausible_size(width: u32, height: u32) -> bool {
+    (1..=MAX_DIMENSION).contains(&width) && (1..=MAX_DIMENSION).contains(&height)
+}
+
 #[derive(Debug)]
 pub struct DecodedFrame {
     pub play_pts: f64,
@@ -100,6 +108,7 @@ pub(crate) struct Decoder {
     unconvertible: u64,
     frame_dur: f64,
     synth_pts: f64,
+    sent: u64,
 }
 
 struct Converter {
@@ -125,7 +134,7 @@ impl Converter {
 impl Decoder {
     pub fn open(path: &Path) -> Result<Self, VideoError> {
         ffmpeg::init()?;
-        let input = ffmpeg::format::input(path)?;
+        let input = open_input(path)?;
         let stream = input
             .streams()
             .best(ffmpeg::media::Type::Video)
@@ -140,7 +149,7 @@ impl Decoder {
         let frame_rate = f64::from(stream.avg_frame_rate()).max(0.0);
         let decoder = open_video_decoder(&stream)?;
         let (width, height) = (decoder.width(), decoder.height());
-        if width == 0 || height == 0 {
+        if !plausible_size(width, height) {
             return Err(VideoError::InvalidDimensions { width, height });
         }
         let duration = if input.duration() > 0 {
@@ -174,6 +183,7 @@ impl Decoder {
             unconvertible: 0,
             frame_dur,
             synth_pts: 0.0,
+            sent: 0,
         })
     }
 
@@ -185,6 +195,7 @@ impl Decoder {
         let mut converter = Converter::new(self.want_nv12);
         let mut consecutive_read_errors = 0u32;
         loop {
+            let sent_before = self.sent;
             loop {
                 let mut packet = ffmpeg::Packet::empty();
                 match packet.read(&mut self.input) {
@@ -219,6 +230,12 @@ impl Decoder {
             if !self.drain(&mut converter, frames, recycle) {
                 return;
             }
+            // Looping a file that gave no picture would read it again and
+            // again as fast as the disk allows, forever.
+            if self.sent == sent_before {
+                tracing::error!("a whole pass over the video produced no frame; stopping video decode");
+                return;
+            }
             if let Err(err) = self.input.seek(0, ..) {
                 tracing::error!(%err, "loop seek to 0 failed; stopping video decode");
                 return;
@@ -244,6 +261,7 @@ impl Decoder {
                         if frames.send(frame).is_err() {
                             return false;
                         }
+                        self.sent += 1;
                     }
                     Err(err) => {
                         self.unconvertible += 1;
@@ -255,6 +273,24 @@ impl Decoder {
                 Err(_) => return true,
             }
         }
+    }
+
+    /// Where the frame just decoded plays, keeping the running frame
+    /// duration and the synthetic clock for frames without timestamps.
+    fn next_play_pts(&mut self) -> f64 {
+        let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
+            Some(ts) => ts as f64 * self.time_base - self.start,
+            None => self.synth_pts,
+        };
+        if let Some(last) = self.last_raw {
+            let delta = raw - last;
+            if delta > 0.0 && delta < 1.0 {
+                self.frame_dur = delta;
+            }
+        }
+        self.last_raw = Some(raw);
+        self.synth_pts = raw + self.frame_dur;
+        self.timeline.map(raw, self.frame_dur)
     }
 
     fn convert(
@@ -271,27 +307,14 @@ impl Decoder {
         let decoded = &self.decoded;
 
         let (width, height) = (decoded.width(), decoded.height());
-        if width == 0 || height == 0 {
+        if !plausible_size(width, height) {
             return Err(VideoError::InvalidDimensions { width, height });
         }
 
         if converter.nv12 && decoded.format() == Pixel::NV12 && width % 2 == 0 && height % 2 == 0 {
-            let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
-                Some(ts) => ts as f64 * self.time_base - self.start,
-                None => self.synth_pts,
-            };
-            if let Some(last) = self.last_raw {
-                let delta = raw - last;
-                if delta > 0.0 && delta < 1.0 {
-                    self.frame_dur = delta;
-                }
-            }
-            self.last_raw = Some(raw);
-            self.synth_pts = raw + self.frame_dur;
-            let play_pts = self.timeline.map(raw, self.frame_dur);
-
             let mut data = recycle.try_recv().unwrap_or_default();
             copy_nv12(decoded, &mut data);
+            let play_pts = self.next_play_pts();
             return Ok(DecodedFrame {
                 play_pts,
                 width,
@@ -335,19 +358,7 @@ impl Decoder {
         };
         scaler.run(decoded, &mut converter.rgb)?;
 
-        let raw = match self.decoded.timestamp().or_else(|| self.decoded.pts()) {
-            Some(ts) => ts as f64 * self.time_base - self.start,
-            None => self.synth_pts,
-        };
-        if let Some(last) = self.last_raw {
-            let delta = raw - last;
-            if delta > 0.0 && delta < 1.0 {
-                self.frame_dur = delta;
-            }
-        }
-        self.last_raw = Some(raw);
-        self.synth_pts = raw + self.frame_dur;
-        let play_pts = self.timeline.map(raw, self.frame_dur);
+        let play_pts = self.next_play_pts();
 
         let mut data = recycle.try_recv().unwrap_or_default();
         copy_rgba(&converter.rgb, &mut data);
@@ -360,6 +371,15 @@ impl Decoder {
             data,
         })
     }
+}
+
+/// Open a media file for reading, allowing only local files for anything the
+/// container itself points at: an HLS or concat playlist dressed up as a
+/// video would otherwise have ffmpeg fetch whatever URLs it lists.
+pub(crate) fn open_input(path: &Path) -> Result<ffmpeg::format::context::Input, ffmpeg::Error> {
+    let mut options = ffmpeg::Dictionary::new();
+    options.set("protocol_whitelist", "file");
+    ffmpeg::format::input_with_dictionary(path, options)
 }
 
 fn copy_nv12(frame: &ffmpeg::frame::Video, buf: &mut Vec<u8>) {

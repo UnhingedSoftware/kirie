@@ -290,6 +290,14 @@ impl VideoRenderer {
     }
 
     fn upload(&mut self, frame: DecodedFrame) {
+        // A texture the device cannot hold is a wgpu validation error, which
+        // panics, and the size comes from the file.
+        let max = self.device.limits().max_texture_dimension_2d;
+        let expected = frame.width as usize * frame.height as usize * 4;
+        if frame.width > max || frame.height > max || frame.data.len() < expected {
+            let _ = self.recycle_tx.try_send(frame.data);
+            return;
+        }
         self.ensure_texture(frame.width, frame.height);
         let Some(tex) = &self.frame_tex else { return };
         self.queue.write_texture(
