@@ -12,6 +12,7 @@ use cef::{
 };
 
 use crate::backend::{FrameBuffer, FrameSlot, PointerState, WebBackend, WebError, WebFrameRef, WebSize};
+use crate::page::PageSource;
 
 use super::client::{SharedSize, make_client};
 use super::registry::{BrowserEntry, BrowserId, BrowserRegistry};
@@ -405,7 +406,12 @@ fn create_browser(req: &CreateRequest) -> Option<Browser> {
         windowless_frame_rate: FRAME_RATE,
         ..Default::default()
     };
-    let url_str = CefString::from(req.url.as_str());
+    let source = Arc::new(PageSource::from_arg(&req.url));
+    let mut context = match source.as_ref() {
+        PageSource::Folder { .. } => Some(super::folder::folder_context(&source)?),
+        PageSource::Url(_) => None,
+    };
+    let url_str = CefString::from(source.address().as_str());
 
     let browser = browser_host_create_browser_sync(
         Some(&window_info),
@@ -413,7 +419,7 @@ fn create_browser(req: &CreateRequest) -> Option<Browser> {
         Some(&url_str),
         Some(&browser_settings),
         None,
-        None,
+        context.as_mut(),
     )?;
 
     if req.muted

@@ -245,17 +245,36 @@ fn classify_file(file: &Path) -> Wallpaper {
     }
 }
 
+/// What a web backend is handed for a wallpaper's entry page.
+///
+/// The CEF host serves the wallpaper's folder itself, so it gets the folder
+/// and the page (see `kirie_web::page::PageSource`). The system web views
+/// still open the page as `file://`; the page must stay inside the folder,
+/// and a `file://` address in project.json counts as a name inside it.
 #[must_use]
 pub fn web_entry_url(dir: &Path, file: &str) -> String {
     let lower = file.to_ascii_lowercase();
-    if lower.starts_with("http://") || lower.starts_with("https://") || lower.starts_with("file://") {
+    if lower.starts_with("http://") || lower.starts_with("https://") {
         return file.to_owned();
     }
-    let path = dir.join(file);
-    let abs = std::fs::canonicalize(&path).unwrap_or(path);
-    file_url(&abs)
+    #[cfg(feature = "web-cef")]
+    {
+        kirie_web::page::PageSource::of(dir, file).to_arg()
+    }
+    #[cfg(not(feature = "web-cef"))]
+    {
+        let path = dir.join(file);
+        let abs = std::fs::canonicalize(&path).unwrap_or(path);
+        let root = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+        if !abs.starts_with(&root) {
+            tracing::warn!(file, "the entry page is outside the wallpaper's folder");
+            return "about:blank".to_owned();
+        }
+        file_url(&abs)
+    }
 }
 
+#[cfg(not(feature = "web-cef"))]
 fn file_url(path: &Path) -> String {
     use std::path::Component;
 
@@ -284,6 +303,7 @@ fn file_url(path: &Path) -> String {
     url
 }
 
+#[cfg(not(feature = "web-cef"))]
 fn hex_digit(n: u8) -> char {
     match n {
         0..=9 => (b'0' + n) as char,
@@ -325,5 +345,44 @@ mod path_shape_tests {
         );
         assert_eq!(looks_like_a_path(r"\\server\share\wall"), cfg!(windows));
         assert!(!looks_like_a_path(r"wallpapers\1388331347"));
+    }
+}
+
+#[cfg(test)]
+mod web_entry_tests {
+    use super::web_entry_url;
+    use std::path::Path;
+
+    #[test]
+    fn an_address_passes_through() {
+        assert_eq!(
+            web_entry_url(Path::new("/w"), "https://example.com/"),
+            "https://example.com/"
+        );
+    }
+
+    #[cfg(feature = "web-cef")]
+    #[test]
+    fn the_cef_host_is_given_the_whole_folder() {
+        let arg = web_entry_url(Path::new("/walls/123"), "file:///etc/passwd");
+        let source = kirie_web::page::PageSource::from_arg(&arg);
+        let kirie_web::page::PageSource::Folder { dir, .. } = &source else {
+            panic!("not a folder page: {arg}");
+        };
+        assert_eq!(dir, Path::new("/walls/123"));
+        assert!(source.address().starts_with("https://wallpaper.kirie.invalid/"));
+    }
+
+    #[cfg(not(feature = "web-cef"))]
+    #[test]
+    fn an_entry_page_outside_the_folder_is_not_opened() {
+        let base = std::env::temp_dir().join(format!("kirie-web-entry-{}", std::process::id()));
+        let dir = base.join("item");
+        std::fs::create_dir_all(&dir).expect("scratch");
+        std::fs::write(base.join("outside.html"), "x").expect("scratch");
+        std::fs::write(dir.join("index.html"), "x").expect("scratch");
+        assert_eq!(web_entry_url(&dir, "../outside.html"), "about:blank");
+        assert!(web_entry_url(&dir, "index.html").starts_with("file:///"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
