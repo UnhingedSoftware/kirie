@@ -931,6 +931,7 @@ fn build_for_spec(
         }
     }
     let _trim = TrimOnExit;
+    crate::prebake::remember_screen(target.output_name, target.size);
     let saved = spec_background(spec).map(|bg| super::saved_props::with_saved(bg, properties));
     let properties: &[(String, String)] = saved.as_deref().unwrap_or(properties);
     match spec {
@@ -971,28 +972,30 @@ fn build_for_spec(
                 }
             }
         }
-        RunSpec::Image { file, scaling, clamp } => match ImageContent::from_path(file) {
-            Ok(content) => {
-                let options = ImageOptions {
-                    scaling: to_render_scaling(*scaling),
-                    clamp: to_render_clamp(*clamp),
-                };
-                match ImageRenderer::new(target, &content, options) {
-                    Ok(renderer) => {
-                        tracing::info!(output = %target.output_name, "image wallpaper ready");
-                        Box::new(renderer)
-                    }
-                    Err(err) => {
-                        eprintln!("{}: failed to build image renderer: {err}", target.output_name);
-                        black(target)
+        RunSpec::Image { file, scaling, clamp } => {
+            match ImageContent::from_path(&crate::prebake::for_screen(file, target.size)) {
+                Ok(content) => {
+                    let options = ImageOptions {
+                        scaling: to_render_scaling(*scaling),
+                        clamp: to_render_clamp(*clamp),
+                    };
+                    match ImageRenderer::new(target, &content, options) {
+                        Ok(renderer) => {
+                            tracing::info!(output = %target.output_name, "image wallpaper ready");
+                            Box::new(renderer)
+                        }
+                        Err(err) => {
+                            eprintln!("{}: failed to build image renderer: {err}", target.output_name);
+                            black(target)
+                        }
                     }
                 }
+                Err(err) => {
+                    eprintln!("{}: failed to load image: {err}", target.output_name);
+                    black(target)
+                }
             }
-            Err(err) => {
-                eprintln!("{}: failed to load image: {err}", target.output_name);
-                black(target)
-            }
-        },
+        }
         RunSpec::Scene { dir, scaling, clamp } => {
             let options = kirie_render::SceneOptions {
                 render_scale: render_scale(),

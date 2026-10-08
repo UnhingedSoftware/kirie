@@ -37,7 +37,8 @@ mod x11;
 pub use backend::{Backend, Platform, PresentOptions};
 pub use error::PlatformError;
 pub use gpu::{
-    attach_pipeline_cache, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature, power_preference,
+    attach_pipeline_cache, cache_home, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature,
+    power_preference,
 };
 #[cfg(target_os = "linux")]
 pub use renderer::CommandSender;

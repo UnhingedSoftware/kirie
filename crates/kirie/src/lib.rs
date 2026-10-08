@@ -11,6 +11,7 @@ pub mod info;
 pub mod list;
 mod os;
 pub mod pack;
+pub mod prebake;
 pub mod preview;
 mod preview_render;
 pub mod soak;
@@ -91,6 +92,17 @@ enum Command {
         output: Option<PathBuf>,
         #[arg(long)]
         inspect: bool,
+    },
+    /// Resize pictures ahead of time to the screens they will be shown on,
+    /// so the first time one goes up is as quick as the rest.
+    Prebake {
+        /// Pictures, wallpaper folders, or folders of pictures.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// A screen size such as 2560x1440; repeat for several. Without it,
+        /// every screen kirie has drawn on.
+        #[arg(long = "size", value_parser = prebake::parse_size)]
+        sizes: Vec<(u32, u32)>,
     },
     Extract {
         path: PathBuf,
@@ -179,6 +191,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             if sub == "info"
                 || sub == "extract"
                 || sub == "pack"
+                || sub == "prebake"
                 || sub == "check"
                 || sub == "list"
                 || sub == "gpus"
@@ -273,6 +286,11 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
                 pack::run(&path, output)
             }
         }
+        Command::Prebake { paths, sizes } => match prebake::run(&paths, &sizes) {
+            Ok(true) => Ok(()),
+            Ok(false) => return ExitCode::FAILURE,
+            Err(err) => Err(err),
+        },
         Command::Gpus { json } => gpus::run(json),
         Command::Update { check, force } => update::run(check, force),
         Command::Workshop { command } => match command {

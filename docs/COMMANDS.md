@@ -29,6 +29,7 @@ anything else goes to the renderer.
   - [`kirie assets`](#kirie-assets)
   - [`kirie gpus`](#kirie-gpus)
   - [`kirie extract`](#kirie-extract)
+  - [`kirie prebake`](#kirie-prebake)
   - [`kirie workshop`](#kirie-workshop)
   - [`kirie ask`](#kirie-ask)
   - [`kirie preview`](#kirie-preview)
@@ -193,6 +194,44 @@ kirie extract materials/water.tex -o /tmp/tex
 ```
 
 Extracting a `project.json` is refused — that is a manifest, not an archive.
+
+### `kirie prebake`
+
+Resize pictures ahead of time to the screens they will be shown on.
+
+```
+kirie prebake <PATH>... [--size <WxH>]...
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `--size <WxH>` | every screen kirie has drawn on | A screen size to bake for; repeat for several |
+
+A `PATH` is a picture, a wallpaper folder whose `project.json` names a
+picture, or a plain folder (the pictures directly inside it).
+
+kirie draws a picture bigger than the screen from a copy resized once, with a
+Lanczos filter, to just cover that screen at the picture's own shape. It is a
+JPEG (PNG when the picture is see-through) in `<cache>/kirie/pictures`, one per
+screen size, keyed by the picture's path, size and modification time, and the
+cache keeps the most recently used 512 MB. The GPU then never shrinks a
+6000-pixel photo itself, which used the full-size texture's memory and showed
+jagged edges. Phone photos are turned upright from their EXIF orientation.
+Every scaling mode frames the copy exactly as it framed the original.
+
+kirie makes these on its own the first time a picture goes up on a screen;
+`kirie prebake` makes them in advance, so that first time is quick too. With
+no `--size` it bakes for every screen size kirie has drawn on, which it
+records in `<cache>/kirie/screens.json`. Pictures no larger than the screen,
+GIFs and `.tex` files are drawn as they are.
+
+```sh
+kirie prebake ~/Pictures/sunset.jpg
+kirie prebake ~/Pictures/Wallpapers --size 2560x1440 --size 1920x1080
+```
+
+Exits non-zero when a picture could not be baked, or when no `--size` is
+given and kirie has never drawn on a screen.
 
 ### `kirie workshop`
 
@@ -676,6 +715,7 @@ kirie ask workshop subscribe 1388331347
 | `KIRIE_BLOOM_THRESHOLD`, `KIRIE_BLOOM_STRENGTH` | Override the bloom pass |
 | `KIRIE_NO_PREBAKE` | Skip the prebaked scene-bundle cache |
 | `KIRIE_NO_PIPELINE_CACHE` | Skip the on-disk pipeline cache |
+| `KIRIE_NO_PICTURE_BAKE` | Draw pictures from the original file instead of a copy resized to the screen (see [`kirie prebake`](#kirie-prebake)) |
 | `KIRIE_SHADER_DUMP`, `KIRIE_SHADER_DUMP_ALL` | Write translated shaders to disk |
 | `KIRIE_WEB_CONSOLE` | Forward web-wallpaper console output to the log |
 | `KIRIE_NO_LAYERED_HOST` | Windows 11 24H2 and later: draw straight into the desktop instead of inside a layered window under the icons |

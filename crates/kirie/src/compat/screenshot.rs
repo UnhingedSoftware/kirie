@@ -356,8 +356,9 @@ pub(crate) fn build_offscreen_renderer(
             Box::new(kirie_video::VideoRenderer::new(render_target, player))
         }
         Wallpaper::Image { file } => {
-            let content =
-                ImageContent::from_path(file).with_context(|| format!("loading image {}", file.display()))?;
+            let drawn = crate::prebake::for_screen(file, render_target.size);
+            let content = ImageContent::from_path(&drawn)
+                .with_context(|| format!("loading image {}", drawn.display()))?;
             let options = ImageOptions {
                 scaling: super::common::to_render_scaling(scaling),
                 clamp: super::common::to_render_clamp(clamp),

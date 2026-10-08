@@ -156,6 +156,12 @@ Pictures: PNG, JPEG, WebP, BMP and GIF (animated GIFs play). Videos: MP4,
 WebM, MKV, MOV, M4V and AVI, looped. [haru](https://github.com/UnhingedSoftware/haru)
 does the same from its Library with **Add a picture or video**.
 
+A picture bigger than the screen is drawn from a copy resized once, with a
+good filter, to that screen's size (one per screen size, kept in kirie's
+cache), which looks sharper and uses less video memory than letting the GPU
+shrink it. `kirie prebake ~/Pictures/Wallpapers` makes those copies in
+advance.
+
 ### Workshop wallpapers
 
 Anywhere a wallpaper is named you can give a Workshop ID instead of a path, and

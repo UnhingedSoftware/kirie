@@ -161,14 +161,16 @@ fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
 /// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so asking only for those
 /// found nothing and the pipeline cache was never written or read there.
 #[cfg(windows)]
-fn cache_home() -> Option<std::path::PathBuf> {
+#[must_use]
+pub fn cache_home() -> Option<std::path::PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
 }
 
 #[cfg(unix)]
-fn cache_home() -> Option<std::path::PathBuf> {
+#[must_use]
+pub fn cache_home() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
