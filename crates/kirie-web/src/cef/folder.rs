@@ -130,9 +130,17 @@ wrap_resource_handler! {
         ) -> c_int {
             let Some(bytes_skipped) = bytes_skipped else { return 0 };
             let mut opened = self.opened.lock().unwrap_or_else(PoisonError::into_inner);
-            match opened.as_mut().map(|opened| opened.file.seek(SeekFrom::Current(bytes_to_skip))) {
-                Some(Ok(_)) => {
-                    *bytes_skipped = bytes_to_skip;
+            // Never past the end: a Range starting beyond the file would
+            // otherwise be told it skipped bytes the file does not have.
+            let skipped = opened.as_mut().and_then(|opened| {
+                let at = opened.file.stream_position().ok()?;
+                let step = u64::try_from(bytes_to_skip).ok()?.min(opened.len.saturating_sub(at));
+                opened.file.seek(SeekFrom::Start(at + step)).ok()?;
+                i64::try_from(step).ok()
+            });
+            match skipped {
+                Some(step) if step > 0 || bytes_to_skip == 0 => {
+                    *bytes_skipped = step;
                     1
                 }
                 _ => {

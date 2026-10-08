@@ -144,6 +144,9 @@ pub struct FrameCost {
 pub fn reset() {
     ON.store(true, Ordering::Relaxed);
     REPORTING.store(false, Ordering::Relaxed);
+    if let Ok(mut since) = SINCE.lock() {
+        *since = None;
+    }
     clear();
 }
 

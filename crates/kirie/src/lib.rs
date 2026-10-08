@@ -373,6 +373,10 @@ mod socket_tests {
     // two agreeing on the file name is what makes them able to talk at all.
     #[test]
     fn the_socket_is_named_the_same_on_every_platform() {
-        assert!(super::default_control_socket().is_some_and(|path| path.ends_with("lwe.sock")));
+        // None is a machine with no private directory to put it in, which
+        // says nothing about the name.
+        if let Some(path) = super::default_control_socket() {
+            assert!(path.ends_with("lwe.sock"));
+        }
     }
 }
