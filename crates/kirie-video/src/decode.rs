@@ -18,11 +18,9 @@ fn tell_scaler_the_colours(
     };
 
     let table = match space {
-        Space::BT709 => SWS_CS_ITU709,
-        Space::BT470BG | Space::SMPTE170M => SWS_CS_ITU601,
         Space::SMPTE240M => SWS_CS_SMPTE240M,
-        _ if height >= 720 => SWS_CS_ITU709,
-        _ => SWS_CS_ITU601,
+        _ if is_bt601(space, height) => SWS_CS_ITU601,
+        _ => SWS_CS_ITU709,
     };
     let full = i32::from(range == Range::JPEG);
 
@@ -49,6 +47,17 @@ fn tell_scaler_the_colours(
     }
 }
 
+/// Whether a frame's YUV uses the BT.601 matrix rather than BT.709. A stream
+/// that does not say is taken to be 709 from 720 lines up, as players do.
+fn is_bt601(space: ffmpeg::color::Space, height: u32) -> bool {
+    use ffmpeg::color::Space;
+    match space {
+        Space::BT470BG | Space::SMPTE170M => true,
+        Space::BT709 | Space::SMPTE240M => false,
+        _ => height < 720,
+    }
+}
+
 use crate::error::VideoError;
 use crate::pacing::{LoopTimeline, Timed};
 
@@ -62,6 +71,10 @@ pub struct DecodedFrame {
     pub width: u32,
     pub height: u32,
     pub pixels: FramePixels,
+    /// For `Nv12`: the frame's YUV uses the BT.601 matrix, not BT.709.
+    pub bt601: bool,
+    /// For `Nv12`: luma spans 0-255 rather than the usual 16-235.
+    pub full_range: bool,
     pub data: Vec<u8>,
 }
 
@@ -100,24 +113,23 @@ pub(crate) struct Decoder {
     unconvertible: u64,
     frame_dur: f64,
     synth_pts: f64,
+    hw: Option<crate::hw::Attached>,
 }
 
 struct Converter {
     nv12: bool,
     scaler: Option<scaling::Context>,
     rgb: ffmpeg::frame::Video,
-    #[cfg(feature = "vaapi")]
     hw: crate::hw::HwDownload,
 }
 
 impl Converter {
-    fn new(nv12: bool) -> Self {
+    fn new(nv12: bool, hw: Option<crate::hw::Attached>) -> Self {
         Self {
             nv12,
             scaler: None,
             rgb: ffmpeg::frame::Video::empty(),
-            #[cfg(feature = "vaapi")]
-            hw: crate::hw::HwDownload::new(),
+            hw: crate::hw::HwDownload::new(hw),
         }
     }
 }
@@ -138,7 +150,7 @@ impl Decoder {
             stream.start_time() as f64 * time_base
         };
         let frame_rate = f64::from(stream.avg_frame_rate()).max(0.0);
-        let decoder = open_video_decoder(&stream)?;
+        let (decoder, hw) = open_video_decoder(&stream)?;
         let (width, height) = (decoder.width(), decoder.height());
         if width == 0 || height == 0 {
             return Err(VideoError::InvalidDimensions { width, height });
@@ -174,6 +186,7 @@ impl Decoder {
             unconvertible: 0,
             frame_dur,
             synth_pts: 0.0,
+            hw,
         })
     }
 
@@ -182,7 +195,7 @@ impl Decoder {
     }
 
     pub fn run(mut self, frames: &Sender<DecodedFrame>, recycle: &Receiver<Vec<u8>>) {
-        let mut converter = Converter::new(self.want_nv12);
+        let mut converter = Converter::new(self.want_nv12, self.hw);
         let mut consecutive_read_errors = 0u32;
         loop {
             loop {
@@ -262,13 +275,10 @@ impl Decoder {
         converter: &mut Converter,
         recycle: &Receiver<Vec<u8>>,
     ) -> Result<DecodedFrame, VideoError> {
-        #[cfg(feature = "vaapi")]
         let decoded = match converter.hw.download(&self.decoded)? {
             Some(sw) => sw,
             None => &self.decoded,
         };
-        #[cfg(not(feature = "vaapi"))]
-        let decoded = &self.decoded;
 
         let (width, height) = (decoded.width(), decoded.height());
         if width == 0 || height == 0 {
@@ -297,6 +307,8 @@ impl Decoder {
                 width,
                 height,
                 pixels: FramePixels::Nv12,
+                bt601: is_bt601(decoded.color_space(), height),
+                full_range: decoded.color_range() == ffmpeg::color::Range::JPEG,
                 data,
             });
         }
@@ -357,6 +369,8 @@ impl Decoder {
             width,
             height,
             pixels: FramePixels::Rgba,
+            bt601: false,
+            full_range: false,
             data,
         })
     }
@@ -378,30 +392,37 @@ fn copy_nv12(frame: &ffmpeg::frame::Video, buf: &mut Vec<u8>) {
     }
 }
 
+/// Opens the stream's decoder on the first hardware backend that will take
+/// it, or on the CPU when none will.
 fn open_video_decoder(
     stream: &ffmpeg::format::stream::Stream<'_>,
-) -> Result<ffmpeg::decoder::Video, VideoError> {
-    #[cfg(feature = "vaapi")]
-    {
+) -> Result<(ffmpeg::decoder::Video, Option<crate::hw::Attached>), VideoError> {
+    for &backend in crate::hw::backends() {
         let mut context = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?;
-        match crate::hw::attach_vaapi(&mut context) {
-            Ok(()) => match context.decoder().video() {
+        match crate::hw::attach(&mut context, backend) {
+            Ok(format) => match context.decoder().video() {
                 Ok(decoder) => {
-                    tracing::info!("VAAPI device attached; hardware decode enabled for supported profiles");
-                    return Ok(decoder);
+                    tracing::info!(backend = backend.name, "hardware video decoder opened");
+                    return Ok((
+                        decoder,
+                        Some(crate::hw::Attached {
+                            name: backend.name,
+                            format,
+                        }),
+                    ));
                 }
                 Err(err) => {
-                    tracing::info!(%err, "VAAPI decoder open failed; falling back to CPU decode");
+                    tracing::info!(backend = backend.name, %err, "hardware video decoder failed to open")
                 }
             },
-            Err(err) => tracing::info!(%err, "VAAPI unavailable; using CPU decode"),
+            Err(err) => tracing::info!(%err, "hardware video decode unavailable"),
         }
     }
-    Ok(
-        ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
-            .decoder()
-            .video()?,
-    )
+    let decoder = ffmpeg::codec::context::Context::from_parameters(stream.parameters())?
+        .decoder()
+        .video()?;
+    tracing::info!("decoding video on the CPU");
+    Ok((decoder, None))
 }
 
 fn copy_rgba(rgb: &ffmpeg::frame::Video, buf: &mut Vec<u8>) {

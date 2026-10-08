@@ -1,3 +1,12 @@
+//! Hardware video decode: which ffmpeg device each platform asks for, and the
+//! copy back to system memory that the rest of the pipeline expects.
+//!
+//! Windows always tries D3D11VA and then DXVA2. Both are in the ffmpeg the
+//! release build gets from vcpkg, and both reach whichever GPU drives the
+//! screen through its own video engine (NVDEC, Quick Sync, VCN) without any
+//! vendor SDK. Linux asks for VAAPI when built with the `vaapi` feature.
+//! Anywhere else, or when nothing here works for a stream, frames are decoded
+//! on the CPU as before. `KIRIE_NO_HWDEC` turns this off entirely.
 #![allow(unsafe_code)]
 
 use ffmpeg_next as ffmpeg;
@@ -8,17 +17,62 @@ use ffmpeg_next::format::Pixel;
 pub(crate) enum HwAttachError {
     #[error("no decoder for {0:?}")]
     DecoderNotFound(ffmpeg::codec::Id),
-    #[error("codec {0} has no VAAPI hw-device support")]
-    Unsupported(String),
-    #[error("VAAPI device creation failed: {0}")]
-    Device(ffmpeg::Error),
+    #[error("codec {codec} has no {backend} support")]
+    Unsupported { codec: String, backend: &'static str },
+    #[error("{backend} device creation failed: {err}")]
+    Device {
+        backend: &'static str,
+        err: ffmpeg::Error,
+    },
 }
 
-pub(crate) fn attach_vaapi(ctx: &mut ffmpeg::codec::context::Context) -> Result<(), HwAttachError> {
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Backend {
+    pub(crate) name: &'static str,
+    device: ffi::AVHWDeviceType,
+}
+
+#[cfg(windows)]
+const BACKENDS: &[Backend] = &[
+    Backend {
+        name: "D3D11VA",
+        device: ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_D3D11VA,
+    },
+    Backend {
+        name: "DXVA2",
+        device: ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_DXVA2,
+    },
+];
+
+#[cfg(all(not(windows), feature = "vaapi"))]
+const BACKENDS: &[Backend] = &[Backend {
+    name: "VAAPI",
+    device: ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+}];
+
+#[cfg(all(not(windows), not(feature = "vaapi")))]
+const BACKENDS: &[Backend] = &[];
+
+/// The hardware decoders worth trying on this platform, best first.
+pub(crate) fn backends() -> &'static [Backend] {
+    if std::env::var_os("KIRIE_NO_HWDEC").is_some() {
+        return &[];
+    }
+    BACKENDS
+}
+
+/// Gives `ctx` a hardware device of `backend`'s type, and answers the pixel
+/// format its decoded frames will carry. libavcodec's default `get_format`
+/// then picks that format whenever the stream's profile is one the hardware
+/// takes, and falls back to a software format by itself when it is not.
+pub(crate) fn attach(
+    ctx: &mut ffmpeg::codec::context::Context,
+    backend: Backend,
+) -> Result<Pixel, HwAttachError> {
     let id = ctx.id();
     let codec = ffmpeg::codec::decoder::find(id).ok_or(HwAttachError::DecoderNotFound(id))?;
 
-    let mut supported = false;
+    let mut format = None;
     for index in 0.. {
         // SAFETY: `codec.as_ptr()` is the valid, program-lifetime AVCodec
         // `find` returned -- ffmpeg's codec descriptors are static and are
@@ -29,34 +83,41 @@ pub(crate) fn attach_vaapi(ctx: &mut ffmpeg::codec::context::Context) -> Result<
         // which is read and dropped inside this iteration.
         let config = unsafe { ffi::avcodec_get_hw_config(codec.as_ptr(), index).as_ref() };
         let Some(config) = config else { break };
-        if config.device_type == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI
+        if config.device_type == backend.device
             && config.methods & (ffi::AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX as i32) != 0
         {
-            supported = true;
+            format = Some(Pixel::from(config.pix_fmt));
             break;
         }
     }
-    if !supported {
-        return Err(HwAttachError::Unsupported(codec.name().to_owned()));
-    }
+    let Some(format) = format else {
+        return Err(HwAttachError::Unsupported {
+            codec: codec.name().to_owned(),
+            backend: backend.name,
+        });
+    };
 
     let mut device: *mut ffi::AVBufferRef = std::ptr::null_mut();
     // SAFETY: `&mut device` is a valid out-pointer; NULL device path + NULL
-    // options ask ffmpeg to open the default VAAPI device, which is what
-    // this function is for. On success `device` owns one reference to a
+    // options ask ffmpeg to open the default device of this type (for D3D11VA
+    // and DXVA2 that is adapter 0, the GPU driving the main screen), which is
+    // what this function is for. On success `device` owns one reference to a
     // fresh AVBufferRef; on failure ffmpeg leaves it null and the error is
     // returned below before anything reads it.
     let ret = unsafe {
         ffi::av_hwdevice_ctx_create(
             &mut device,
-            ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
+            backend.device,
             std::ptr::null(),
             std::ptr::null_mut(),
             0,
         )
     };
     if ret < 0 {
-        return Err(HwAttachError::Device(ffmpeg::Error::from(ret)));
+        return Err(HwAttachError::Device {
+            backend: backend.name,
+            err: ffmpeg::Error::from(ret),
+        });
     }
 
     // SAFETY: `ctx` wraps a live, not-yet-opened AVCodecContext (owned by
@@ -64,37 +125,62 @@ pub(crate) fn attach_vaapi(ctx: &mut ffmpeg::codec::context::Context) -> Result<
     // aliases nothing. `hw_device_ctx` is documented as being set by the
     // caller and owned and freed by libavcodec afterwards, so handing the
     // reference over rather than taking another one is the contract, and
-    // the field was null until now -- `attach_vaapi` runs once per context,
-    // before it is opened -- so nothing is overwritten and leaked.
+    // the field was null until now -- the caller makes a fresh context for
+    // every backend it tries and attaches to it once, before it is opened --
+    // so nothing is overwritten and leaked.
     unsafe {
         (*ctx.as_mut_ptr()).hw_device_ctx = device;
     }
-    Ok(())
+    Ok(format)
+}
+
+/// The hardware a decoder was opened with, for `HwDownload`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Attached {
+    pub(crate) name: &'static str,
+    pub(crate) format: Pixel,
 }
 
 pub(crate) struct HwDownload {
+    attached: Option<Attached>,
     frame: ffmpeg::frame::Video,
     announced: bool,
 }
 
 impl HwDownload {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(attached: Option<Attached>) -> Self {
         Self {
+            attached,
             frame: ffmpeg::frame::Video::empty(),
             announced: false,
         }
     }
 
+    /// Copies a frame that lives on the GPU into system memory (NV12 for
+    /// 8-bit video, P010 for 10-bit) and answers it; answers `None` for a
+    /// frame the CPU decoded, which needs no copy.
     pub(crate) fn download(
         &mut self,
         src: &ffmpeg::frame::Video,
     ) -> Result<Option<&ffmpeg::frame::Video>, ffmpeg::Error> {
-        if src.format() != Pixel::VAAPI {
+        let Some(attached) = self.attached else {
             return Ok(None);
-        }
+        };
+        let on_gpu = src.format() == attached.format;
         if !self.announced {
-            tracing::info!("VAAPI hardware decode active");
             self.announced = true;
+            if on_gpu {
+                tracing::info!(backend = attached.name, "hardware video decode active");
+            } else {
+                tracing::info!(
+                    backend = attached.name,
+                    format = ?src.format(),
+                    "the GPU's decoder does not take this video's profile; decoding on the CPU"
+                );
+            }
+        }
+        if !on_gpu {
+            return Ok(None);
         }
 
         if self.frame.width() != src.width() || self.frame.height() != src.height() {
@@ -120,6 +206,10 @@ impl HwDownload {
         if ret < 0 {
             return Err(ffmpeg::Error::from(ret));
         }
+        // The transfer copies pixels only; the scaler and the NV12 path read
+        // colour details off the frame they are handed.
+        self.frame.set_color_space(src.color_space());
+        self.frame.set_color_range(src.color_range());
         Ok(Some(&self.frame))
     }
 }

@@ -312,7 +312,7 @@ pub(crate) fn build_presented_renderer(
             silent: sound.silent,
             paused: false,
             scaling: super::common::to_video_scaling(scaling),
-            nv12: false,
+            nv12: true,
             enable_audio: true,
         };
         let (player, _control) = VideoPlayer::open(media, options)
@@ -348,6 +348,7 @@ pub(crate) fn build_offscreen_renderer(
             let options = VideoOptions {
                 scaling: super::common::to_video_scaling(scaling),
                 enable_audio: false,
+                nv12: true,
                 ..VideoOptions::default()
             };
             let (player, _control) = VideoPlayer::open(media, options)

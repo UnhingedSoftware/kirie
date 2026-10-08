@@ -5,7 +5,7 @@ use kirie_platform::{RenderTarget, Renderer, SurfaceSize};
 
 use crate::audio::AudioLink;
 use crate::clock::{WallClock, audio_position};
-use crate::decode::DecodedFrame;
+use crate::decode::{DecodedFrame, FramePixels};
 use crate::pacing::Pacer;
 use crate::player::{RendererCmd, VideoPlayer};
 use crate::scaling::{ScalingMode, UvRect, compute_uvs};
@@ -15,11 +15,16 @@ const STATS_INTERVAL: Duration = Duration::from_secs(2);
 const SHADER: &str = r#"
 struct Uniforms {
     rect: vec4<f32>,
+    // x: 1 when the frame is NV12 (frame_tex is luma, chroma_tex is CbCr),
+    // y: 1 for BT.601 rather than BT.709, z: 1 for full-range YUV,
+    // w: 1 when the target is sRGB and the result has to be linearised.
+    yuv: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var frame_tex: texture_2d<f32>;
 @group(0) @binding(2) var frame_samp: sampler;
+@group(0) @binding(3) var chroma_tex: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
@@ -46,8 +51,31 @@ fn vs_main(@builtin(vertex_index) index: u32) -> VsOut {
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = mix(u.rect.xy, u.rect.zw, in.uv);
     let inside = step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
-    let color = textureSample(frame_tex, frame_samp, clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)));
-    return vec4<f32>(color.rgb * inside, 1.0);
+    let at = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    var color = textureSample(frame_tex, frame_samp, at).rgb;
+    let chroma = textureSample(chroma_tex, frame_samp, at).rg - vec2<f32>(0.5);
+    if (u.yuv.x > 0.5) {
+        var y = color.r;
+        var c = chroma;
+        if (u.yuv.z < 0.5) {
+            y = (y - 16.0 / 255.0) * (255.0 / 219.0);
+            c = c * (255.0 / 224.0);
+        }
+        if (u.yuv.y > 0.5) {
+            color = vec3<f32>(y + 1.402 * c.y, y - 0.344136 * c.x - 0.714136 * c.y, y + 1.772 * c.x);
+        } else {
+            color = vec3<f32>(y + 1.5748 * c.y, y - 0.187324 * c.x - 0.468124 * c.y, y + 1.8556 * c.x);
+        }
+        color = clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+        if (u.yuv.w > 0.5) {
+            color = select(
+                pow((color + 0.055) / 1.055, vec3<f32>(2.4)),
+                color / 12.92,
+                color <= vec3<f32>(0.04045),
+            );
+        }
+    }
+    return vec4<f32>(color * inside, 1.0);
 }
 "#;
 
@@ -55,13 +83,19 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct Uniforms {
     rect: [f32; 4],
+    yuv: [f32; 4],
 }
 
+/// What the frame textures hold: RGBA in `main`, or NV12's luma in `main`
+/// and its half-size CbCr plane in `chroma`. RGBA binds a 1x1 stand-in as
+/// `chroma`, which the shader never reads from.
 struct FrameTexture {
-    texture: wgpu::Texture,
+    main: wgpu::Texture,
+    chroma: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
+    pixels: FramePixels,
 }
 
 pub struct VideoRenderer {
@@ -73,7 +107,8 @@ pub struct VideoRenderer {
     uniforms: wgpu::Buffer,
     texture_format: wgpu::TextureFormat,
     frame_tex: Option<FrameTexture>,
-    uv_key: Option<(u32, u32, u32, u32, ScalingMode)>,
+    uv_key: Option<(u32, u32, u32, u32, ScalingMode, [u32; 4])>,
+    yuv: [f32; 4],
 
     frames_rx: Receiver<DecodedFrame>,
     recycle_tx: Sender<Vec<u8>>,
@@ -134,6 +169,16 @@ impl VideoRenderer {
                     binding: 2,
                     visibility: wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
                     count: None,
                 },
             ],
@@ -201,6 +246,7 @@ impl VideoRenderer {
             texture_format,
             frame_tex: None,
             uv_key: None,
+            yuv: [0.0; 4],
             frames_rx: parts.frames_rx,
             recycle_tx: parts.recycle_tx,
             commands_rx: parts.commands_rx,
@@ -239,16 +285,9 @@ impl VideoRenderer {
         }
     }
 
-    fn ensure_texture(&mut self, width: u32, height: u32) {
-        if self
-            .frame_tex
-            .as_ref()
-            .is_some_and(|t| t.width == width && t.height == height)
-        {
-            return;
-        }
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("kirie-video-frame"),
+    fn plane(&self, label: &str, width: u32, height: u32, format: wgpu::TextureFormat) -> wgpu::Texture {
+        self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(label),
             size: wgpu::Extent3d {
                 width,
                 height,
@@ -257,11 +296,37 @@ impl VideoRenderer {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: self.texture_format,
+            format,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
-        });
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        })
+    }
+
+    fn ensure_texture(&mut self, width: u32, height: u32, pixels: FramePixels) {
+        if self
+            .frame_tex
+            .as_ref()
+            .is_some_and(|t| t.width == width && t.height == height && t.pixels == pixels)
+        {
+            return;
+        }
+        let (main, chroma) = match pixels {
+            FramePixels::Rgba => (
+                self.plane("kirie-video-frame", width, height, self.texture_format),
+                self.plane("kirie-video-no-chroma", 1, 1, wgpu::TextureFormat::Rg8Unorm),
+            ),
+            FramePixels::Nv12 => (
+                self.plane("kirie-video-luma", width, height, wgpu::TextureFormat::R8Unorm),
+                self.plane(
+                    "kirie-video-chroma",
+                    width / 2,
+                    height / 2,
+                    wgpu::TextureFormat::Rg8Unorm,
+                ),
+            ),
+        };
+        let main_view = main.create_view(&wgpu::TextureViewDescriptor::default());
+        let chroma_view = chroma.create_view(&wgpu::TextureViewDescriptor::default());
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("kirie-video-bg"),
             layout: &self.bind_group_layout,
@@ -272,51 +337,94 @@ impl VideoRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(&main_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&self.sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&chroma_view),
+                },
             ],
         });
-        tracing::info!(width, height, "video frame texture (re)created");
+        tracing::info!(width, height, ?pixels, "video frame texture (re)created");
         self.frame_tex = Some(FrameTexture {
-            texture,
+            main,
+            chroma,
             bind_group,
             width,
             height,
+            pixels,
         });
     }
 
-    fn upload(&mut self, frame: DecodedFrame) {
-        self.ensure_texture(frame.width, frame.height);
-        let Some(tex) = &self.frame_tex else { return };
+    fn write_plane(
+        &self,
+        texture: &wgpu::Texture,
+        data: &[u8],
+        width: u32,
+        height: u32,
+        bytes_per_texel: u32,
+    ) {
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &tex.texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            &frame.data,
+            data,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
-                bytes_per_row: Some(frame.width * 4),
-                rows_per_image: Some(frame.height),
+                bytes_per_row: Some(width * bytes_per_texel),
+                rows_per_image: Some(height),
             },
             wgpu::Extent3d {
-                width: frame.width,
-                height: frame.height,
+                width,
+                height,
                 depth_or_array_layers: 1,
             },
         );
+    }
+
+    fn upload(&mut self, frame: DecodedFrame) {
+        let (width, height) = (frame.width, frame.height);
+        self.ensure_texture(width, height, frame.pixels);
+        let Some(tex) = &self.frame_tex else { return };
+        match frame.pixels {
+            FramePixels::Rgba => {
+                self.write_plane(&tex.main, &frame.data, width, height, 4);
+                self.yuv = [0.0; 4];
+            }
+            FramePixels::Nv12 => {
+                let luma = (width * height) as usize;
+                let (y, cbcr) = frame.data.split_at(luma.min(frame.data.len()));
+                self.write_plane(&tex.main, y, width, height, 1);
+                self.write_plane(&tex.chroma, cbcr, width / 2, height / 2, 2);
+                let flag = |on: bool| if on { 1.0 } else { 0.0 };
+                self.yuv = [
+                    1.0,
+                    flag(frame.bt601),
+                    flag(frame.full_range),
+                    flag(self.texture_format.is_srgb()),
+                ];
+            }
+        }
         let _ = self.recycle_tx.try_send(frame.data);
     }
 
     fn update_uvs(&mut self, size: SurfaceSize) {
         let Some(tex) = &self.frame_tex else { return };
-        let key = (size.width, size.height, tex.width, tex.height, self.scaling);
+        let key = (
+            size.width,
+            size.height,
+            tex.width,
+            tex.height,
+            self.scaling,
+            self.yuv.map(f32::to_bits),
+        );
         if self.uv_key == Some(key) {
             return;
         }
@@ -332,6 +440,7 @@ impl VideoRenderer {
             0,
             bytemuck::bytes_of(&Uniforms {
                 rect: [ustart, vstart, uend, vend],
+                yuv: self.yuv,
             }),
         );
     }

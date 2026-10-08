@@ -940,7 +940,7 @@ fn build_for_spec(
                 silent,
                 paused: false,
                 scaling: to_video_scaling(*scaling),
-                nv12: false,
+                nv12: true,
                 enable_audio: true,
             };
             match VideoPlayer::open(media, options) {
