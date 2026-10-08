@@ -53,16 +53,23 @@ anything else goes to the renderer.
 Anywhere kirie takes a wallpaper — `--bg`, the trailing positional argument,
 `kirie info`, `kirie check` — you can give either:
 
-- a **Workshop ID**, looked up under every Steam library on the machine, or
-- a **path** to the item directory (anything containing a `/` is taken as a path).
+- a **Workshop ID**, looked up under every Steam library on the machine,
+- a **path** to the item directory, or
+- a **picture or video file** of your own. Pictures: `png`, `jpg`, `jpeg`,
+  `webp`, `bmp`, `gif` (and Wallpaper Engine's `tex`); videos: `mp4`, `webm`,
+  `mkv`, `mov`, `m4v`, `avi`. These need neither Steam nor Wallpaper Engine.
+
+Only a value made entirely of digits is treated as a Workshop ID; anything
+else, including a bare file name such as `sunset.jpg`, is a path.
 
 ```sh
 kirie --screen-root HDMI-A-1 --bg 1388331347
 kirie --screen-root HDMI-A-1 --bg ~/.steam/steam/steamapps/workshop/content/431960/1388331347
+kirie --screen-root HDMI-A-1 --bg ~/Pictures/sunset.jpg
 ```
 
-A bare ID with no `/` that matches no installed item fails with `Cannot find
-workshop directory for steam app 431960 and content <id>`.
+An ID that matches no installed item fails with `Cannot find workshop
+directory for steam app 431960 and content <id>`.
 
 ## Subcommands
 

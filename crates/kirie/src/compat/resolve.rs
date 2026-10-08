@@ -31,8 +31,16 @@ fn looks_like_a_path(value: &str) -> bool {
     drive || value.starts_with('\\')
 }
 
+/// Whether `--bg` names a Workshop item: every Workshop id is a number. Only
+/// these are looked up in Steam's library; anything else, such as
+/// `--bg sunset.jpg` from the folder the picture is in, is the user's own
+/// file and needs neither Steam nor Wallpaper Engine.
+fn is_workshop_id(value: &str) -> bool {
+    !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit())
+}
+
 pub fn translate_background(value: &str) -> Result<String, ParseError> {
-    if looks_like_a_path(value) {
+    if looks_like_a_path(value) || !is_workshop_id(value) || Path::new(value).exists() {
         return Ok(value.to_owned());
     }
     if steam::home_dir().is_none() && std::env::var_os("KIRIE_STEAM_LIBRARY").is_none() {
@@ -177,7 +185,7 @@ pub fn we_assets_dir_or_warn() -> Option<PathBuf> {
 }
 
 const VIDEO_EXTS: [&str; 6] = ["mp4", "webm", "mkv", "avi", "mov", "m4v"];
-const IMAGE_EXTS: [&str; 6] = ["png", "jpg", "jpeg", "bmp", "gif", "tex"];
+const IMAGE_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "bmp", "gif", "webp", "tex"];
 
 pub fn classify(background: &str) -> Result<Wallpaper, ClassifyError> {
     let path = Path::new(background);
@@ -321,7 +329,7 @@ pub enum ClassifyError {
 
 #[cfg(test)]
 mod path_shape_tests {
-    use super::looks_like_a_path;
+    use super::{Wallpaper, classify, is_workshop_id, looks_like_a_path, translate_background};
 
     #[test]
     fn a_slash_means_a_path_on_every_platform() {
@@ -333,6 +341,46 @@ mod path_shape_tests {
     #[test]
     fn a_workshop_id_is_not_a_path() {
         assert!(!looks_like_a_path("1388331347"));
+    }
+
+    #[test]
+    fn a_bare_file_name_is_the_users_own_file() {
+        // Only a number is ever looked up in Steam's library, so a picture
+        // named from its own folder runs without Steam installed at all.
+        assert!(!is_workshop_id("sunset.jpg"));
+        assert!(!is_workshop_id(""));
+        assert!(is_workshop_id("1388331347"));
+        assert_eq!(
+            translate_background("sunset.jpg").ok().as_deref(),
+            Some("sunset.jpg")
+        );
+        assert_eq!(
+            translate_background("rain.webm").ok().as_deref(),
+            Some("rain.webm")
+        );
+    }
+
+    #[test]
+    fn pictures_and_videos_classify_by_extension() {
+        let dir = std::env::temp_dir().join(format!("kirie-own-files-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        for (name, video) in [
+            ("a.WEBP", false),
+            ("b.jpeg", false),
+            ("c.MKV", true),
+            ("d.mov", true),
+        ] {
+            let file = dir.join(name);
+            let _ = std::fs::write(&file, b"x");
+            let found = classify(&file.to_string_lossy());
+            let expected = if video {
+                Wallpaper::Video { media: file.clone() }
+            } else {
+                Wallpaper::Image { file: file.clone() }
+            };
+            assert_eq!(found.ok(), Some(expected), "{name}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

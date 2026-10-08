@@ -37,7 +37,7 @@ clap = { version = "4", features = ["derive"] }
 blake3 = "1"
 memmap2 = "0.9"
 libc = "0.2"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "bmp", "webp"] }
 texture2ddecoder = "0.1"
 insta = "1"
 wgpu = "30"
