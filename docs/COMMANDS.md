@@ -679,6 +679,7 @@ kirie ask workshop subscribe 1388331347
 | `KIRIE_SHADER_DUMP`, `KIRIE_SHADER_DUMP_ALL` | Write translated shaders to disk |
 | `KIRIE_WEB_CONSOLE` | Forward web-wallpaper console output to the log |
 | `KIRIE_NO_LAYERED_HOST` | Windows 11 24H2 and later: draw straight into the desktop instead of inside a layered window under the icons |
+| `KIRIE_NO_HWDEC` | Decode video wallpapers on the CPU instead of the GPU's video decoder (D3D11VA or DXVA2 on Windows, VAAPI on Linux builds with the `vaapi` feature) |
 | `WGPU_BACKEND` | Windows: limit the GPU backends kirie tries, e.g. `dx12` or `vulkan` |
 | `KIRIE_CORPUS` | Wallpaper corpus directory used by the tests |
 | `RUST_LOG` | Tracing filter, e.g. `RUST_LOG=debug` |
