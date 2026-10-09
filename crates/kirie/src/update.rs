@@ -91,6 +91,7 @@ fn replace(path: &std::path::Path, url: &str) -> Result<()> {
             "--output",
         ])
         .arg(&staged)
+        .arg("--url")
         .arg(url)
         .status()
         .context("could not run curl")?;
@@ -146,6 +147,7 @@ fn fetch_text(url: &str) -> Result<String> {
             "30",
             "--header",
             "Accept: application/vnd.github+json",
+            "--url",
             url,
         ])
         .output()

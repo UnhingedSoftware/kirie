@@ -89,7 +89,7 @@ mod linux {
                 return Err("--window is only supported on the X11 backend".into());
             }
             (_, Some((w, h))) => {
-                Platform::connect_x11(X11Mode::Window { width: w, height: h }, make_factory())?
+                Platform::connect_x11(X11Mode::Window { width: w, height: h }, &options, make_factory())?
             }
             (Some(Backend::Wayland), None) => {
                 Platform::connect_with(Backend::Wayland, options, make_factory())?

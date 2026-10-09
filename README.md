@@ -142,6 +142,28 @@ kirie check                            # can this machine render at all?
 kirie workshop browse                  # find more, and subscribe
 ```
 
+### Your own pictures and videos
+
+A picture or video of your own needs no Steam and no Wallpaper Engine: hand
+kirie the file.
+
+```sh
+kirie --screen-root HDMI-A-1 --bg ~/Pictures/sunset.jpg
+kirie --screen-root HDMI-A-1 --bg ~/Videos/rain.mp4 --silent
+```
+
+Pictures: PNG, JPEG, WebP, BMP and GIF (animated GIFs play). Videos: MP4,
+WebM, MKV, MOV, M4V and AVI, looped. [haru](https://github.com/UnhingedSoftware/haru)
+does the same from its Library with **Add a picture or video**.
+
+A picture bigger than the screen is drawn from a copy resized once, with a
+good filter, to that screen's size (one per screen size, kept in kirie's
+cache), which looks sharper and uses less video memory than letting the GPU
+shrink it. `kirie prebake ~/Pictures/Wallpapers` makes those copies in
+advance.
+
+### Workshop wallpapers
+
 Anywhere a wallpaper is named you can give a Workshop ID instead of a path, and
 kirie looks it up across your Steam libraries:
 

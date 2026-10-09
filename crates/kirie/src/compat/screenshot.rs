@@ -312,7 +312,7 @@ pub(crate) fn build_presented_renderer(
             silent: sound.silent,
             paused: false,
             scaling: super::common::to_video_scaling(scaling),
-            nv12: false,
+            nv12: true,
             enable_audio: true,
         };
         let (player, _control) = VideoPlayer::open(media, options)
@@ -348,6 +348,7 @@ pub(crate) fn build_offscreen_renderer(
             let options = VideoOptions {
                 scaling: super::common::to_video_scaling(scaling),
                 enable_audio: false,
+                nv12: true,
                 ..VideoOptions::default()
             };
             let (player, _control) = VideoPlayer::open(media, options)
@@ -355,8 +356,9 @@ pub(crate) fn build_offscreen_renderer(
             Box::new(kirie_video::VideoRenderer::new(render_target, player))
         }
         Wallpaper::Image { file } => {
-            let content =
-                ImageContent::from_path(file).with_context(|| format!("loading image {}", file.display()))?;
+            let drawn = crate::prebake::for_screen(file, render_target.size);
+            let content = ImageContent::from_path(&drawn)
+                .with_context(|| format!("loading image {}", drawn.display()))?;
             let options = ImageOptions {
                 scaling: super::common::to_render_scaling(scaling),
                 clamp: super::common::to_render_clamp(clamp),

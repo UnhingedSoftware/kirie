@@ -40,7 +40,6 @@ impl Bloom {
         proj_w: u32,
         proj_h: u32,
         scene_view: &wgpu::TextureView,
-        snapshot_view: &wgpu::TextureView,
         strength: f32,
         threshold: f32,
     ) -> Self {
@@ -158,7 +157,7 @@ impl Bloom {
             layout: &two_tex_layout,
             entries: &[
                 bind_sampler(0, &sampler),
-                bind_texture(1, snapshot_view),
+                bind_texture(1, scene_view),
                 bind_texture(2, &bloom.view),
             ],
         });
@@ -193,7 +192,10 @@ impl Bloom {
         );
     }
 
-    pub(crate) fn run(&self, encoder: &mut wgpu::CommandEncoder, scene_fbo: &Fbo, scene_snapshot: &Fbo) {
+    /// Writes the scene with its glow added into `output`, which must not be
+    /// the scene buffer: the combine reads the scene, and writing the result
+    /// to a second buffer saves copying the scene aside first.
+    pub(crate) fn run(&self, encoder: &mut wgpu::CommandEncoder, output: &wgpu::TextureView) {
         self.pass(
             encoder,
             "bright",
@@ -215,22 +217,12 @@ impl Bloom {
             &self.blur_y_bind,
             &self.bloom.view,
         );
-        crate::frame_cost::texture_copy(u64::from(scene_fbo.width) * u64::from(scene_fbo.height) * 8);
-        encoder.copy_texture_to_texture(
-            scene_fbo.texture.as_image_copy(),
-            scene_snapshot.texture.as_image_copy(),
-            wgpu::Extent3d {
-                width: scene_fbo.width,
-                height: scene_fbo.height,
-                depth_or_array_layers: 1,
-            },
-        );
         self.pass(
             encoder,
             "combine",
             &self.combine_pipeline,
             &self.combine_bind,
-            &scene_fbo.view,
+            output,
         );
     }
 

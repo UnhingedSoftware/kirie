@@ -167,6 +167,11 @@ impl World {
         if self.modules.contains_key(key) {
             return Ok(());
         }
+        // A module's top level runs here, so it gets the same budget as a
+        // tick: `while (true) {}` outside any export would otherwise hang the
+        // script thread, and the renderer waiting on this load with it.
+        self.deadline.arm(SCRIPT_BUDGET);
+        let _guard = DeadlineGuard(self.deadline.clone());
         let key_owned = key.to_owned();
         let loaded = self
             .context
@@ -181,11 +186,21 @@ impl World {
                         key: key_owned.clone(),
                         message: e.to_string(),
                     })?;
-                let (module, _promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
+                let (module, promise) = module.eval().catch(&ctx).map_err(|e| ScriptError::Load {
                     key: key_owned.clone(),
                     message: e.to_string(),
                 })?;
                 drain_jobs(&ctx);
+                // A top level that ran out of budget, or never finished, left
+                // a module half set up: don't register it. One that threw is
+                // still registered, as before, since its hoisted exports work.
+                let unfinished = matches!(promise.state(), rquickjs::promise::PromiseState::Pending);
+                if unfinished || self.deadline.expired() {
+                    return Err(ScriptError::Load {
+                        key: key_owned.clone(),
+                        message: "the module's top level did not finish within its time budget".to_owned(),
+                    });
+                }
                 let namespace = module.namespace().internal()?;
                 let register: Function = global(&ctx, "__registerModule")?;
                 register
@@ -435,6 +450,8 @@ impl World {
     }
 
     pub fn eval_to_string(&self, source: &str) -> Result<String, ScriptError> {
+        self.deadline.arm(SCRIPT_BUDGET);
+        let _guard = DeadlineGuard(self.deadline.clone());
         self.context.with(|ctx| {
             ctx.eval::<Value, _>(source)
                 .catch(&ctx)
@@ -839,6 +856,10 @@ fn build_all<'js>(ctx: &Ctx<'js>, props: &BTreeMap<String, ScriptValue>) -> Resu
     Ok(obj.into_value())
 }
 
+/// A script logging in a loop would otherwise hand the host millions of
+/// lines per frame to format and write out.
+const MAX_LOG_LINES_PER_CALL: usize = 256;
+
 fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
     let host: Object = match global(ctx, "__host") {
         Ok(h) => h,
@@ -857,7 +878,8 @@ fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
         }
     }
     if let Ok(console) = host.get::<_, Array>("console") {
-        for i in 0..console.len() {
+        let kept = console.len().min(MAX_LOG_LINES_PER_CALL);
+        for i in 0..kept {
             if let Ok(s) = console.get::<String>(i) {
                 let error = s.starts_with('E');
                 out.logs.push(LogLine {
@@ -865,6 +887,12 @@ fn drain_side_effects(ctx: &Ctx<'_>, out: &mut TickOutput) {
                     message: s.get(1..).unwrap_or("").to_owned(),
                 });
             }
+        }
+        if console.len() > kept {
+            out.logs.push(LogLine {
+                error: true,
+                message: format!("{} more console lines dropped", console.len() - kept),
+            });
         }
     }
     if let Ok(empty) = Array::new(ctx.clone()) {

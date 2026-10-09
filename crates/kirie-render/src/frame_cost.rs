@@ -11,6 +11,10 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static ON: AtomicBool = AtomicBool::new(false);
+/// Whether `end_frame` logs and clears the totals every few seconds. Off for a
+/// caller that reads them itself with `per_frame`, which a clear mid-run would
+/// otherwise skew.
+static REPORTING: AtomicBool = AtomicBool::new(false);
 
 static RENDER_PASSES: AtomicU64 = AtomicU64::new(0);
 static DRAWS: AtomicU64 = AtomicU64::new(0);
@@ -33,9 +37,10 @@ pub fn counting() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
-/// Start counting. Called for `--render-debug=frame-cost`.
+/// Start counting and logging the totals. Called for `--render-debug=frame-cost`.
 pub fn enable() {
     ON.store(true, Ordering::Relaxed);
+    REPORTING.store(true, Ordering::Relaxed);
 }
 
 /// A render pass opened on the scene encoder.
@@ -94,6 +99,9 @@ pub fn end_frame() {
         return;
     }
     FRAMES.fetch_add(1, Ordering::Relaxed);
+    if !REPORTING.load(Ordering::Relaxed) {
+        return;
+    }
     let Ok(mut since) = SINCE.lock() else { return };
     let started = *since.get_or_insert_with(std::time::Instant::now);
     let elapsed = started.elapsed();
@@ -115,7 +123,7 @@ pub fn end_frame() {
         copies_skipped = cost.snapshots_skipped,
         "frame cost"
     );
-    reset();
+    clear();
     *since = Some(std::time::Instant::now());
 }
 
@@ -132,9 +140,17 @@ pub struct FrameCost {
     pub snapshots_skipped: f64,
 }
 
-/// Zero the counters and start counting.
+/// Zero the counters and start counting, without the periodic log.
 pub fn reset() {
-    enable();
+    ON.store(true, Ordering::Relaxed);
+    REPORTING.store(false, Ordering::Relaxed);
+    if let Ok(mut since) = SINCE.lock() {
+        *since = None;
+    }
+    clear();
+}
+
+fn clear() {
     for counter in [
         &RENDER_PASSES,
         &DRAWS,

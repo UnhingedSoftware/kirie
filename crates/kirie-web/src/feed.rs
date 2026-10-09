@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -308,7 +309,7 @@ fn push_json_string(value: &str, out: &mut String) {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if (c as u32) < 0x20 || c as u32 == 0x7f => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
         }
@@ -331,8 +332,7 @@ pub fn audio_line(bands: &[f32]) -> String {
     out.push_str("audio");
     for b in bands {
         let b = if b.is_finite() { *b } else { 0.0 };
-        out.push(' ');
-        out.push_str(&format!("{b:.4}"));
+        let _ = write!(out, " {b:.4}");
     }
     out
 }

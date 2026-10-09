@@ -204,14 +204,20 @@ impl WebRenderer {
     }
 
     fn upload(&mut self, frame: WebFrameRef<'_>) {
-        self.ensure_texture(frame);
-        let Some(uploaded) = &self.uploaded else {
+        // Checked before a texture is made for it: a frame the device cannot
+        // hold would otherwise be a wgpu validation error, which panics.
+        let max = self.device.limits().max_texture_dimension_2d;
+        if frame.width == 0 || frame.height == 0 || frame.width > max || frame.height > max {
             return;
-        };
+        }
         let expected = (frame.width as usize) * (frame.height as usize) * 4;
         if frame.data.len() < expected {
             return;
         }
+        self.ensure_texture(frame);
+        let Some(uploaded) = &self.uploaded else {
+            return;
+        };
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &uploaded.texture,

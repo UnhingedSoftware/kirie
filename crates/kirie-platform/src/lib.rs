@@ -11,7 +11,7 @@ mod gpu;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
-pub use macos::{DesktopSurface, open_desktop, pump_desktop_events, set_battery_fps};
+pub use macos::set_battery_fps;
 #[cfg(target_os = "linux")]
 mod output;
 #[cfg(target_os = "linux")]
@@ -37,7 +37,8 @@ mod x11;
 pub use backend::{Backend, Platform, PresentOptions};
 pub use error::PlatformError;
 pub use gpu::{
-    attach_pipeline_cache, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature, power_preference,
+    attach_pipeline_cache, cache_home, persist_pipeline_cache, pipeline_cache, pipeline_cache_feature,
+    power_preference,
 };
 #[cfg(target_os = "linux")]
 pub use renderer::CommandSender;

@@ -4,7 +4,6 @@ mod audio;
 mod clock;
 mod decode;
 mod error;
-#[cfg(feature = "vaapi")]
 mod hw;
 mod pacing;
 mod player;

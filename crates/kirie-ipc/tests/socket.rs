@@ -218,7 +218,7 @@ fn unknown_command() {
 #[test]
 fn oversized_request_line_is_served() {
     let s = Server::start("oversized", MockApp::doc_semantics());
-    let long = "a".repeat(1024 * 1024);
+    let long = "a".repeat(256 * 1024);
     let mut line = format!("bg HDMI-A-1 /{long}").into_bytes();
     line.push(b'\n');
     assert_eq!(s.request(&line), b"ok\n");
@@ -229,6 +229,23 @@ fn oversized_request_line_is_served() {
         }
         other => panic!("expected bg, got {other:?}"),
     }
+}
+
+#[test]
+fn a_request_past_the_size_cap_is_refused() {
+    let s = Server::start("too-long", MockApp::doc_semantics());
+    let mut stream = connect(&s.sock);
+    let chunk = vec![b'a'; 64 * 1024];
+    let mut response = Vec::new();
+    for _ in 0..32 {
+        if stream.write_all(&chunk).is_err() {
+            break;
+        }
+    }
+    let _ = stream.shutdown(Shutdown::Write);
+    let _ = stream.read_to_end(&mut response);
+    assert_eq!(response, b"error\n");
+    assert_eq!(s.request(b"ping\n"), b"pong\n");
 }
 
 #[test]
@@ -546,7 +563,8 @@ fn screenshot_ok_and_empty_path_error() {
 fn stale_socket_file_is_unlinked_on_bind() {
     let dir = TempDir::new("stale");
     let sock = dir.sock();
-    fs::write(&sock, b"stale").unwrap();
+    drop(kirie_ipc::UnixListener::bind(&sock).unwrap());
+    assert!(sock.exists(), "a dropped listener leaves its socket file");
     let (tx, rx) = unbounded();
     let server = ControlSocket::bind(&sock, tx).expect("bind over stale file");
     let (app, _cap) = MockApp::doc_semantics().spawn(rx);
@@ -554,6 +572,27 @@ fn stale_socket_file_is_unlinked_on_bind() {
     drop(server);
     let _ = app.join();
     assert!(!sock.exists(), "socket file left behind after shutdown");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_is_not_a_socket_is_never_replaced() {
+    let dir = TempDir::new("not-a-socket");
+    let sock = dir.sock();
+    fs::write(&sock, b"somebody's notes").unwrap();
+    let (tx, _rx) = unbounded();
+    assert!(ControlSocket::bind(&sock, tx).is_err());
+    assert_eq!(fs::read(&sock).unwrap(), b"somebody's notes");
+}
+
+#[cfg(unix)]
+#[test]
+fn the_socket_is_private_to_its_owner() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let s = Server::start("private", MockApp::doc_semantics());
+    let mode = fs::metadata(&s.sock).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]

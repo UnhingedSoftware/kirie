@@ -286,6 +286,14 @@ pub struct ImageObject {
     pub effects: Vec<Effect>,
     pub animationlayers: Vec<AnimationLayer>,
     pub instance: Option<Instance>,
+    /// A compose layer starts from a copy of the scene behind it, or, when
+    /// this is off, from a transparent canvas.
+    #[serde(default = "copies_background")]
+    pub copybackground: bool,
+}
+
+fn copies_background() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -434,6 +442,7 @@ fn parse_image(obj: &Map<String, Value>) -> ImageObject {
         effects,
         animationlayers,
         instance,
+        copybackground: user_bool(obj, "copybackground", true).value,
     }
 }
 

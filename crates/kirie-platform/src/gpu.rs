@@ -161,14 +161,16 @@ fn pipeline_cache_file(adapter: &wgpu::Adapter) -> Option<std::path::PathBuf> {
 /// Windows sets neither `XDG_CACHE_HOME` nor `HOME`, so asking only for those
 /// found nothing and the pipeline cache was never written or read there.
 #[cfg(windows)]
-fn cache_home() -> Option<std::path::PathBuf> {
+#[must_use]
+pub fn cache_home() -> Option<std::path::PathBuf> {
     std::env::var_os("LOCALAPPDATA")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
 }
 
 #[cfg(unix)]
-fn cache_home() -> Option<std::path::PathBuf> {
+#[must_use]
+pub fn cache_home() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
         .map(std::path::PathBuf::from)
@@ -217,19 +219,41 @@ pub fn attach_pipeline_cache(device: &wgpu::Device, adapter: &wgpu::Adapter) {
     }
 }
 
+/// Hash of the blob last written, so a wallpaper swap that compiled nothing
+/// new does not rewrite megabytes from the render thread.
+static PERSISTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn blob_hash(data: &[u8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    data.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn persist_pipeline_cache(adapter: &wgpu::Adapter) {
+    use std::sync::atomic::Ordering;
+
     let Some(cache) = SHARED_PIPELINE_CACHE.get() else {
         return;
     };
     let Some(data) = cache.get_data() else { return };
+    let hash = blob_hash(&data);
+    if hash == PERSISTED.load(Ordering::Relaxed) {
+        return;
+    }
     let Some(path) = pipeline_cache_file(adapter) else {
         return;
     };
     let Some(dir) = path.parent() else { return };
     let _ = std::fs::create_dir_all(dir);
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, &data).is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
+    // Several kirie processes can share this file; each writes its own temp
+    // file so two saving at once cannot interleave into one.
+    let tmp = path.with_extension(format!("{}.tmp", std::process::id()));
+    if std::fs::write(&tmp, &data).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        PERSISTED.store(hash, Ordering::Relaxed);
+    } else {
+        let _ = std::fs::remove_file(&tmp);
     }
 }
 

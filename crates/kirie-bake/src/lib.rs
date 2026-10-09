@@ -8,22 +8,44 @@ pub mod key;
 pub use baker::{BackgroundBaker, BakeOutcome, BakerConfig, ContentFn, PauseFn, SourceFn, never_pause};
 
 pub(crate) fn we_assets_shaders_dir() -> Option<std::path::PathBuf> {
-    const ROOTS: [&str; 4] = [
-        ".local/share/Steam/steamapps/common/wallpaper_engine/assets",
-        ".steam/steam/steamapps/common/wallpaper_engine/assets",
-        ".var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
-        "snap/steam/common/.local/share/Steam/steamapps/common/wallpaper_engine/assets",
-    ];
     if let Some(over) = std::env::var_os("KIRIE_WE_ASSETS") {
         let p = std::path::PathBuf::from(over).join("shaders");
         return p.is_dir().then_some(p);
     }
-    let home = std::env::var_os("HOME")?;
-    let home = std::path::PathBuf::from(home);
-    ROOTS
-        .iter()
-        .map(|r| home.join(r).join("shaders"))
+    steam_roots()
+        .into_iter()
+        .map(|root| root.join("steamapps/common/wallpaper_engine/assets/shaders"))
         .find(|p| p.is_dir())
+}
+
+/// Windows sets no `HOME` and keeps Steam under Program Files, so a
+/// home-relative search alone found nothing there.
+#[cfg(windows)]
+fn steam_roots() -> Vec<std::path::PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"]
+        .iter()
+        .filter_map(std::env::var_os)
+        .filter(|base| !base.is_empty())
+        .map(|base| std::path::PathBuf::from(base).join("Steam"))
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn steam_roots() -> Vec<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    const ROOTS: &[&str] = &["Library/Application Support/Steam"];
+    #[cfg(not(target_os = "macos"))]
+    const ROOTS: &[&str] = &[
+        ".local/share/Steam",
+        ".steam/steam",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "snap/steam/common/.local/share/Steam",
+    ];
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return Vec::new();
+    };
+    let home = std::path::PathBuf::from(home);
+    ROOTS.iter().map(|root| home.join(root)).collect()
 }
 
 #[cfg(target_os = "linux")]
@@ -50,10 +72,6 @@ pub fn resolve_vulkan_icd(selector: &str) -> Option<std::path::PathBuf> {
     let manifest = if explicit.is_file() {
         explicit.to_path_buf()
     } else {
-        // The fallback used to be `to_owned().leak()`, which leaked a Vec on
-        // every call that named a driver this list does not know. Binding the
-        // one-element array here gives it the same lifetime as the borrowed
-        // arms without leaking anything.
         let unknown = [sel.as_str()];
         let tokens: &[&str] = match sel.as_str() {
             "amd" | "radeon" | "radv" => &["radeon", "amd"],

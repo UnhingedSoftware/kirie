@@ -1,0 +1,17 @@
+[package]
+name = "kirie-pack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The .kpk wallpaper package: one file holding a JSON manifest and hashed, 4 KiB-aligned entries"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+blake3 = { workspace = true }
+lz4_flex = { workspace = true }
+
+[lints]
+workspace = true

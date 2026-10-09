@@ -71,6 +71,9 @@ struct PlatformState {
     cmd_tx: CmdSender<RenderCommand>,
     preloaded: HashMap<(String, String), (wgpu::TextureFormat, Box<dyn crate::renderer::Renderer + Send>)>,
     pointer: crate::pointer::PointerPoll,
+    /// False under `--disable-mouse`: the wallpaper is never told where the
+    /// pointer is, and Hyprland is not polled for it.
+    follow_pointer: bool,
     seat_state: SeatState,
     cursor_shape: Option<WpCursorShapeManagerV1>,
     pointers: Vec<(wl_pointer::WlPointer, Option<WpCursorShapeDeviceV1>)>,
@@ -187,7 +190,12 @@ impl WaylandPlatform {
                 },
                 cmd_tx,
                 preloaded: HashMap::new(),
-                pointer: crate::pointer::PointerPoll::start(),
+                pointer: if options.pointer {
+                    crate::pointer::PointerPoll::start()
+                } else {
+                    crate::pointer::PointerPoll::default()
+                },
+                follow_pointer: options.pointer,
                 seat_state,
                 cursor_shape,
                 pointers: Vec::new(),
@@ -805,12 +813,14 @@ impl PlatformState {
             * self.playback_speed;
         ctx.last_frame = Some(now);
 
-        if let Some((gx, gy)) = self.pointer.get() {
-            let (nx, ny, on_output) = pointer_on_output((gx, gy), ctx.position, ctx.logical_size);
-            renderer.set_pointer(nx, ny);
-            renderer.set_pointer_on_output(on_output);
+        if self.follow_pointer {
+            if let Some((gx, gy)) = self.pointer.get() {
+                let (nx, ny, on_output) = pointer_on_output((gx, gy), ctx.position, ctx.logical_size);
+                renderer.set_pointer(nx, ny);
+                renderer.set_pointer_on_output(on_output);
+            }
+            renderer.set_pointer_buttons(self.buttons.left());
         }
-        renderer.set_pointer_buttons(self.buttons.left());
 
         renderer.render(&view, ctx.physical_size, dt);
         let hint = renderer.redraw_hint();

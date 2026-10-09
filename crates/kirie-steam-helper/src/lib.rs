@@ -108,12 +108,8 @@ fn search(args: &[String]) -> std::process::ExitCode {
         }
     }
 
-    let session = match Session::open(&roots) {
-        Ok(session) => session,
-        Err(err) => {
-            emit_error(&err.to_string());
-            return std::process::ExitCode::FAILURE;
-        }
+    let Some(session) = open_session(&roots) else {
+        return std::process::ExitCode::FAILURE;
     };
 
     match session.search(&query, CALL_TIMEOUT) {
@@ -158,12 +154,8 @@ fn state(args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
 
-    let session = match Session::open(&roots) {
-        Ok(session) => session,
-        Err(err) => {
-            emit_error(&err.to_string());
-            return std::process::ExitCode::FAILURE;
-        }
+    let Some(session) = open_session(&roots) else {
+        return std::process::ExitCode::FAILURE;
     };
 
     println!("{}", item_json(&session, id));
@@ -176,12 +168,8 @@ fn subscribe(args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
 
-    let session = match Session::open(&roots) {
-        Ok(session) => session,
-        Err(err) => {
-            emit_error(&err.to_string());
-            return std::process::ExitCode::FAILURE;
-        }
+    let Some(session) = open_session(&roots) else {
+        return std::process::ExitCode::FAILURE;
     };
 
     if let Err(err) = session.subscribe(id, CALL_TIMEOUT) {
@@ -199,12 +187,8 @@ fn unsubscribe(args: &[String]) -> std::process::ExitCode {
         return std::process::ExitCode::FAILURE;
     };
 
-    let session = match Session::open(&roots) {
-        Ok(session) => session,
-        Err(err) => {
-            emit_error(&err.to_string());
-            return std::process::ExitCode::FAILURE;
-        }
+    let Some(session) = open_session(&roots) else {
+        return std::process::ExitCode::FAILURE;
     };
 
     if let Err(err) = session.unsubscribe(id, CALL_TIMEOUT) {
@@ -214,6 +198,12 @@ fn unsubscribe(args: &[String]) -> std::process::ExitCode {
 
     println!("{}", item_json(&session, id));
     std::process::ExitCode::SUCCESS
+}
+
+fn open_session(roots: &[PathBuf]) -> Option<Session> {
+    Session::open(roots)
+        .map_err(|err| emit_error(&err.to_string()))
+        .ok()
 }
 
 fn item_json(session: &Session, id: u64) -> serde_json::Value {
