@@ -80,7 +80,7 @@ fn forget_old(root: &Path, keep: &Path) {
         .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
         .filter(|(_, path)| path != keep)
         .collect();
-    unpacked.sort_by(|a, b| b.0.cmp(&a.0));
+    unpacked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     for (_, old) in unpacked.into_iter().skip(KEEP.saturating_sub(1)) {
         if let Err(err) = std::fs::remove_dir_all(&old) {
             tracing::debug!(dir = %old.display(), %err, "cannot remove an old unpacked package");
