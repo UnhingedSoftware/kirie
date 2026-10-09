@@ -17,6 +17,7 @@ pub mod list_props;
 pub mod desktop_ipc;
 #[cfg(any(target_os = "macos", windows))]
 pub mod desktop_present;
+pub mod package;
 pub mod playlist;
 #[cfg(target_os = "linux")]
 pub mod power;

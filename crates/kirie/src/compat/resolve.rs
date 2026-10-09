@@ -193,6 +193,9 @@ pub fn classify(background: &str) -> Result<Wallpaper, ClassifyError> {
         return classify_dir(path);
     }
     if path.is_file() {
+        if is_package(path) {
+            return crate::compat::package::classify(path);
+        }
         return Ok(classify_file(path));
     }
     Err(ClassifyError::NotFound {
@@ -200,7 +203,12 @@ pub fn classify(background: &str) -> Result<Wallpaper, ClassifyError> {
     })
 }
 
-fn classify_dir(dir: &Path) -> Result<Wallpaper, ClassifyError> {
+fn is_package(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(kirie_pack::EXTENSION))
+}
+
+pub(crate) fn classify_dir(dir: &Path) -> Result<Wallpaper, ClassifyError> {
     let manifest = dir.join("project.json");
     let project = Project::from_path(&manifest).map_err(|source| ClassifyError::Project {
         path: manifest.clone(),
@@ -325,6 +333,8 @@ pub enum ClassifyError {
     NotFound { path: PathBuf },
     #[error("cannot load {path}: {reason}")]
     Project { path: PathBuf, reason: String },
+    #[error("cannot play the package {path}: {reason}")]
+    Package { path: PathBuf, reason: String },
 }
 
 #[cfg(test)]

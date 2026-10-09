@@ -48,8 +48,8 @@ least an eighth. The same folder always gives the same bytes.
 | --- | --- | --- |
 | `id` | yes | Stays the same across updates. `a-z`, `0-9`, `-`, `_`, `.`; up to 128 characters |
 | `title` | yes | Shown in the library and on the Workshop |
-| `kind` | yes | `video`, `image`, `web` or `scene` |
-| `entry` | yes | The file the player starts from. Video: `.mp4`, `.webm`, `.mkv`. Image: `.png`, `.jpg`, `.webp`, `.ktx2`. Web: `.html`. Scene: `.kscene` |
+| `kind` | yes | `video`, `image`, `web` or `scene`; `wallpaper_engine` is for converted items only |
+| `entry` | yes | The file the player starts from. Video: `.mp4`, `.webm`, `.mkv`. Image: `.png`, `.jpg`, `.webp`, `.ktx2`. Web: `.html`. Scene: `.kscene`. Wallpaper Engine: `project.json` |
 | `preview` | no | Image shown in the library and on the Workshop |
 | `properties` | no | Settings the user can change, in display order. Colours are linear RGB from 0 to 1 |
 | `min_kirie` | no | Oldest kirie that can play it |
@@ -59,5 +59,24 @@ least an eighth. The same folder always gives the same bytes.
 know, so a package made for a newer kirie still lists in an older haru.
 
 The `scene` kind is reserved: the `.kscene` scene format is not defined yet,
-and kirie cannot play `.kpk` files of any kind yet. This is the container
-only.
+so kirie refuses to play one.
+
+## Wallpaper Engine items
+
+```sh
+kirie convert ~/.steam/steam/steamapps/workshop/content/431960/1388331347
+```
+
+repacks a Wallpaper Engine item, every file as it is, into `we-1388331347.kpk`
+(or the path given with `-o`). Its kind is `wallpaper_engine`, its entry is the
+item's `project.json`, and its provenance is `converted` with the Workshop id,
+so it stays on the machine that made it and can never be published. Scenes
+still need Wallpaper Engine's assets, exactly as the item's own folder does.
+
+## Playing a package
+
+`kirie --bg wallpaper.kpk` (and `bg` on the control socket) plays
+a package of any kind but `scene`. kirie unpacks it once, checking every entry
+against its hash, into `kirie/packages/<fingerprint>` under the user's cache
+directory, and plays it from there; the same package starts from that copy
+next time. Only the four most recently unpacked packages are kept.

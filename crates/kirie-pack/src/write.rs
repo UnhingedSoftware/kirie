@@ -1,5 +1,6 @@
+use std::borrow::Cow;
 use std::collections::HashSet;
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::read::{Entry, Index};
@@ -34,11 +35,23 @@ impl Compression {
     }
 }
 
+/// A file larger than this is stored as is even when LZ4 was asked for:
+/// LZ4 works on the whole entry at once, so it would have to sit in memory.
+const MAX_COMPRESSED_FILE: u64 = 64 << 20;
+
 /// Assembles a package. Entries are written in the order they were added.
 pub struct Builder {
     manifest: Manifest,
-    entries: Vec<(String, Vec<u8>, Compression)>,
+    entries: Vec<(String, Source, Compression)>,
     seen: HashSet<String>,
+}
+
+/// Where an entry's bytes come from. A file is read only when the package is
+/// written, one at a time, so packing a folder of large videos does not hold
+/// them all in memory.
+enum Source {
+    Bytes(Vec<u8>),
+    File(PathBuf),
 }
 
 /// What `Builder::write` produced.
@@ -63,12 +76,26 @@ impl Builder {
         bytes: Vec<u8>,
         compression: Compression,
     ) -> Result<(), PackError> {
-        let path = path.into();
+        self.push(path.into(), Source::Bytes(bytes), compression)
+    }
+
+    /// Add the file at `from` as the entry `path`. It is read when the
+    /// package is written.
+    pub fn add_file(
+        &mut self,
+        path: impl Into<String>,
+        from: impl Into<PathBuf>,
+        compression: Compression,
+    ) -> Result<(), PackError> {
+        self.push(path.into(), Source::File(from.into()), compression)
+    }
+
+    fn push(&mut self, path: String, source: Source, compression: Compression) -> Result<(), PackError> {
         check_entry_path(&path)?;
         if !self.seen.insert(path.clone()) {
             return Err(PackError::DuplicatePath(path));
         }
-        self.entries.push((path, bytes, compression));
+        self.entries.push((path, source, compression));
         Ok(())
     }
 
@@ -86,30 +113,18 @@ impl Builder {
             entries: Vec::with_capacity(self.entries.len()),
         };
 
-        for (path, bytes, compression) in &self.entries {
-            let (stored, how) = match compression {
-                Compression::Lz4 => {
-                    let packed = lz4_flex::compress(bytes);
-                    if (packed.len() as u64) * 8 <= (bytes.len() as u64) * 7 {
-                        (std::borrow::Cow::Owned(packed), "lz4")
-                    } else {
-                        (std::borrow::Cow::Borrowed(bytes.as_slice()), "none")
-                    }
-                }
-                Compression::None => (std::borrow::Cow::Borrowed(bytes.as_slice()), "none"),
-            };
-            out.write_all(&stored)?;
-            let stored_len = stored.len() as u64;
+        for (path, source, compression) in &self.entries {
+            let stored = write_entry(out, source, *compression)?;
             index.entries.push(Entry {
                 path: path.clone(),
                 offset: pos,
-                stored_len,
-                len: bytes.len() as u64,
-                compression: how.to_owned(),
+                stored_len: stored.stored_len,
+                len: stored.len,
+                compression: stored.compression.to_owned(),
                 cipher: "none".to_owned(),
-                blake3: blake3::hash(&stored).to_hex().to_string(),
+                blake3: stored.blake3,
             });
-            let end = pos + stored_len;
+            let end = pos + stored.stored_len;
             let next = align_up(end);
             write_zeros(out, next - end)?;
             pos = next;
@@ -143,6 +158,81 @@ impl Builder {
     }
 }
 
+struct Stored {
+    stored_len: u64,
+    len: u64,
+    compression: &'static str,
+    blake3: String,
+}
+
+/// Write one entry where `out` stands and say how it was stored.
+fn write_entry<W: Write>(
+    out: &mut W,
+    source: &Source,
+    compression: Compression,
+) -> Result<Stored, PackError> {
+    let file_error = |path: &Path| {
+        let path = path.to_owned();
+        move |source| PackError::File { path, source }
+    };
+    let whole: Cow<'_, [u8]> = match source {
+        Source::Bytes(bytes) => Cow::Borrowed(bytes),
+        Source::File(path) => {
+            let len = std::fs::metadata(path).map_err(file_error(path))?.len();
+            if compression == Compression::None || len > MAX_COMPRESSED_FILE {
+                return copy_file(out, path);
+            }
+            Cow::Owned(std::fs::read(path).map_err(file_error(path))?)
+        }
+    };
+    let len = whole.len() as u64;
+    let (stored, how) = match compression {
+        Compression::Lz4 => {
+            let packed = lz4_flex::compress(&whole);
+            if (packed.len() as u64) * 8 <= len * 7 {
+                (Cow::Owned(packed), "lz4")
+            } else {
+                (whole, "none")
+            }
+        }
+        Compression::None => (whole, "none"),
+    };
+    out.write_all(&stored)?;
+    Ok(Stored {
+        stored_len: stored.len() as u64,
+        len,
+        compression: how,
+        blake3: blake3::hash(&stored).to_hex().to_string(),
+    })
+}
+
+/// Copy a file in as is, hashing it on the way, without reading it whole.
+fn copy_file<W: Write>(out: &mut W, path: &Path) -> Result<Stored, PackError> {
+    let to_error = |source| PackError::File {
+        path: path.to_owned(),
+        source,
+    };
+    let mut file = std::fs::File::open(path).map_err(to_error)?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 1 << 20];
+    let mut len = 0u64;
+    loop {
+        let n = file.read(&mut buf).map_err(to_error)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        out.write_all(&buf[..n])?;
+        len += n as u64;
+    }
+    Ok(Stored {
+        stored_len: len,
+        len,
+        compression: "none",
+        blake3: hasher.finalize().to_hex().to_string(),
+    })
+}
+
 fn write_zeros<W: Write>(out: &mut W, mut n: u64) -> std::io::Result<()> {
     const ZEROS: [u8; 4096] = [0; 4096];
     while n > 0 {
@@ -164,22 +254,28 @@ pub fn pack_dir<W: Write + Seek>(dir: &Path, out: &mut W) -> Result<Summary, Pac
         source,
     })?;
     let manifest = Manifest::from_json_strict(&text)?;
+    pack_folder(dir, manifest, &[MANIFEST_FILE], out)
+}
 
+/// Package every file in `dir` under `manifest`, apart from the names in
+/// `leave_out` at the top of the folder and the ones `pack_dir` skips.
+pub fn pack_folder<W: Write + Seek>(
+    dir: &Path,
+    manifest: Manifest,
+    leave_out: &[&str],
+    out: &mut W,
+) -> Result<Summary, PackError> {
     let mut files = Vec::new();
     collect(dir, dir, &mut files)?;
     files.sort();
 
     let mut builder = Builder::new(manifest);
     for (name, path) in files {
-        if name == MANIFEST_FILE {
+        if leave_out.contains(&name.as_str()) {
             continue;
         }
-        let bytes = std::fs::read(&path).map_err(|source| PackError::File {
-            path: path.clone(),
-            source,
-        })?;
         let compression = Compression::for_path(&name);
-        builder.add(name, bytes, compression)?;
+        builder.add_file(name, path, compression)?;
     }
     builder.write(out)
 }

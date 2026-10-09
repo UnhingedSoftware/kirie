@@ -93,6 +93,14 @@ enum Command {
         #[arg(long)]
         inspect: bool,
     },
+    /// Repack a Wallpaper Engine item folder into a .kpk for this machine.
+    /// kirie plays the package as it plays the folder; it is marked as
+    /// converted and must not be published.
+    Convert {
+        path: PathBuf,
+        #[arg(short = 'o', long = "output")]
+        output: Option<PathBuf>,
+    },
     /// Resize pictures ahead of time to the screens they will be shown on,
     /// so the first time one goes up is as quick as the rest.
     Prebake {
@@ -191,6 +199,7 @@ pub fn run(args: Vec<OsString>) -> ExitCode {
             if sub == "info"
                 || sub == "extract"
                 || sub == "pack"
+                || sub == "convert"
                 || sub == "prebake"
                 || sub == "check"
                 || sub == "list"
@@ -286,6 +295,7 @@ fn run_subcommand(args: Vec<OsString>) -> ExitCode {
                 pack::run(&path, output)
             }
         }
+        Command::Convert { path, output } => pack::convert(&path, output),
         Command::Prebake { paths, sizes } => match prebake::run(&paths, &sizes) {
             Ok(true) => Ok(()),
             Ok(false) => return ExitCode::FAILURE,

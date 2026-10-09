@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::PackError;
 
+/// The entry of a `wallpaper_engine` package: the item's own project file.
+pub const WALLPAPER_ENGINE_ENTRY: &str = "project.json";
+
 /// What a package is: everything a library or the Workshop needs to list it,
 /// and what the player needs to start it. Stored as JSON so haru can read it
 /// without linking the renderer.
@@ -44,6 +47,11 @@ pub enum Kind {
     Image,
     Web,
     Scene,
+    /// A Wallpaper Engine item repacked as it is, `project.json` and all,
+    /// so the player runs it the way it runs the item's own folder. Only a
+    /// converted package can be one.
+    #[serde(rename = "wallpaper_engine")]
+    WallpaperEngine,
 }
 
 impl Kind {
@@ -53,6 +61,7 @@ impl Kind {
             Kind::Image => "image",
             Kind::Web => "web",
             Kind::Scene => "scene",
+            Kind::WallpaperEngine => "wallpaper_engine",
         }
     }
 
@@ -62,6 +71,7 @@ impl Kind {
             Kind::Image => &["png", "jpg", "jpeg", "webp", "ktx2"],
             Kind::Web => &["html", "htm"],
             Kind::Scene => &["kscene"],
+            Kind::WallpaperEngine => &["json"],
         }
     }
 }
@@ -222,6 +232,17 @@ impl Manifest {
                 self.entry
             ));
         }
+        if self.kind == Kind::WallpaperEngine {
+            if self.entry != WALLPAPER_ENGINE_ENTRY {
+                return bad(format!(
+                    "a wallpaper_engine package's entry must be {WALLPAPER_ENGINE_ENTRY:?}, not {:?}",
+                    self.entry
+                ));
+            }
+            if self.provenance == Provenance::Original {
+                return bad("a wallpaper_engine package must be marked as converted".into());
+            }
+        }
         if let Some(preview) = &self.preview
             && !paths.contains(preview.as_str())
         {
@@ -351,6 +372,33 @@ mod tests {
         let mut m = video();
         m.kind = Kind::Scene;
         assert!(m.validate(FILES).is_err());
+    }
+
+    #[test]
+    fn a_wallpaper_engine_package_starts_from_project_json_and_is_converted() {
+        let files = ["project.json", "scene.pkg", "preview.jpg"];
+        let mut m = video();
+        m.kind = Kind::WallpaperEngine;
+        m.entry = "project.json".into();
+        m.provenance = Provenance::Converted {
+            source: "wallpaper_engine".into(),
+            source_id: "1388331347".into(),
+        };
+        m.validate(files).unwrap();
+        assert!(
+            String::from_utf8(m.to_json())
+                .unwrap()
+                .contains("\"wallpaper_engine\""),
+            "the kind is spelt with an underscore"
+        );
+
+        let mut original = m.clone();
+        original.provenance = Provenance::Original;
+        assert!(original.validate(files).is_err());
+
+        let mut other_entry = m;
+        other_entry.entry = "scene.pkg".into();
+        assert!(other_entry.validate(files).is_err());
     }
 
     #[test]

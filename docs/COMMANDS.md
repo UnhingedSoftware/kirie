@@ -29,6 +29,7 @@ anything else goes to the renderer.
   - [`kirie assets`](#kirie-assets)
   - [`kirie gpus`](#kirie-gpus)
   - [`kirie extract`](#kirie-extract)
+  - [`kirie convert`](#kirie-convert)
   - [`kirie prebake`](#kirie-prebake)
   - [`kirie workshop`](#kirie-workshop)
   - [`kirie ask`](#kirie-ask)
@@ -59,6 +60,8 @@ Anywhere kirie takes a wallpaper — `--bg`, the trailing positional argument,
 - a **picture or video file** of your own. Pictures: `png`, `jpg`, `jpeg`,
   `webp`, `bmp`, `gif` (and Wallpaper Engine's `tex`); videos: `mp4`, `webm`,
   `mkv`, `mov`, `m4v`, `avi`. These need neither Steam nor Wallpaper Engine.
+- a **`.kpk` package**, kirie's own format (see [PACKAGE.md](PACKAGE.md)).
+  It is unpacked once into the user's cache and played from there.
 
 Only a value made entirely of digits is treated as a Workshop ID; anything
 else, including a bare file name such as `sunset.jpg`, is a path.
@@ -194,6 +197,23 @@ kirie extract materials/water.tex -o /tmp/tex
 ```
 
 Extracting a `project.json` is refused — that is a manifest, not an archive.
+
+### `kirie convert`
+
+Repack a Wallpaper Engine item folder, every file as it is, into a `.kpk`
+that kirie plays the same way it plays the folder.
+
+```
+kirie convert <DIR> [-o|--output <FILE>]
+```
+
+| Flag | Default | Meaning |
+|------|---------|---------|
+| `-o`, `--output <FILE>` | `we-<workshop id>.kpk` | Where to write the package |
+
+The package is marked as converted from that Workshop item, so it stays on
+this machine and cannot be published. Assets (effect presets) and application
+wallpapers are refused.
 
 ### `kirie prebake`
 
