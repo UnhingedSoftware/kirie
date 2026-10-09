@@ -38,9 +38,9 @@ mod read;
 mod write;
 
 pub use error::PackError;
-pub use manifest::{Choice, Kind, Manifest, Property, PropertyValue, Provenance};
+pub use manifest::{Choice, Kind, Manifest, Property, PropertyValue, Provenance, WALLPAPER_ENGINE_ENTRY};
 pub use read::{Entry, Package, Span};
-pub use write::{Builder, Compression, Summary, pack_dir};
+pub use write::{Builder, Compression, Summary, pack_dir, pack_folder};
 
 /// The extension a package file carries.
 pub const EXTENSION: &str = "kpk";

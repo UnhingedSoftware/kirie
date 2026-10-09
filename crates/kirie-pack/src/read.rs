@@ -52,6 +52,7 @@ pub struct Package<R> {
     manifest: Manifest,
     entries: Vec<Entry>,
     by_path: HashMap<String, usize>,
+    fingerprint: [u8; 16],
 }
 
 impl Package<BufReader<File>> {
@@ -148,7 +149,16 @@ impl<R: Read + Seek> Package<R> {
             manifest,
             entries: index.entries,
             by_path,
+            fingerprint: header[48..64].try_into().expect("16 bytes"),
         })
+    }
+
+    /// What the package holds, in 32 hex digits: two packages with the same
+    /// fingerprint have the same manifest and the same entries, since the
+    /// index it is taken over carries every entry's hash. Known as soon as
+    /// the package is open.
+    pub fn fingerprint(&self) -> String {
+        self.fingerprint.iter().map(|b| format!("{b:02x}")).collect()
     }
 
     pub fn manifest(&self) -> &Manifest {
@@ -214,6 +224,66 @@ impl<R: Read + Seek> Package<R> {
             offset: e.offset,
             len: e.stored_len,
         })
+    }
+
+    /// Write every entry into `dir`, checking each against its hash. `dir`
+    /// should be new and empty: entries are created, never overwritten, and
+    /// nothing is followed out of it. On an error, what was written so far
+    /// stays for the caller to remove.
+    pub fn unpack_to(&mut self, dir: &Path) -> Result<(), PackError> {
+        let file_error = |path: &Path| {
+            let path = path.to_owned();
+            move |source| PackError::File { path, source }
+        };
+        std::fs::create_dir_all(dir).map_err(file_error(dir))?;
+        let entries = self.entries.clone();
+        for entry in entries {
+            // `check_entry_path` passed every path on open: relative, `/`-separated,
+            // with no `.` or `..` and no component a platform reads specially.
+            let target = entry
+                .path
+                .split('/')
+                .fold(dir.to_path_buf(), |at, part| at.join(part));
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent).map_err(file_error(parent))?;
+            }
+            let mut file = std::fs::File::create_new(&target).map_err(file_error(&target))?;
+            if entry.compression == "none" && entry.cipher == "none" {
+                self.copy_stored(&entry, &mut file)?;
+            } else {
+                let bytes = self.read(&entry.path)?;
+                std::io::Write::write_all(&mut file, &bytes).map_err(file_error(&target))?;
+            }
+            file.sync_all().map_err(file_error(&target))?;
+        }
+        Ok(())
+    }
+
+    /// Copy an entry stored as is to `out` a block at a time, then check its
+    /// hash; a mismatch is reported after the bytes were written.
+    fn copy_stored(&mut self, entry: &Entry, out: &mut impl std::io::Write) -> Result<(), PackError> {
+        self.reader.seek(SeekFrom::Start(entry.offset))?;
+        let mut hasher = blake3::Hasher::new();
+        let mut buf = vec![0u8; 1 << 20];
+        let mut left = entry.stored_len;
+        while left > 0 {
+            let step = usize::try_from(left.min(buf.len() as u64)).expect("at most the buffer");
+            self.reader
+                .read_exact(&mut buf[..step])
+                .map_err(|e| match e.kind() {
+                    std::io::ErrorKind::UnexpectedEof => PackError::corrupt("the file ends early"),
+                    _ => PackError::Io(e),
+                })?;
+            hasher.update(&buf[..step]);
+            out.write_all(&buf[..step])?;
+            left -= step as u64;
+        }
+        if hasher.finalize().to_hex().as_str() != entry.blake3 {
+            return Err(PackError::HashMismatch {
+                path: entry.path.clone(),
+            });
+        }
+        Ok(())
     }
 
     /// Check every entry's hash.

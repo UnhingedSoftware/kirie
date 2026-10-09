@@ -199,3 +199,72 @@ fn a_folder_packs() {
     assert!(pack_dir(&dir, &mut Cursor::new(Vec::new())).is_err());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+fn scratch(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("kirie-pack-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn files_added_by_path_read_back_the_same_as_bytes() {
+    let dir = scratch("by-path");
+    let text = b"layer water\n".repeat(2000);
+    std::fs::write(dir.join("scene.kscene"), &text).unwrap();
+    std::fs::write(dir.join("preview.png"), b"not really a png").unwrap();
+    std::fs::write(dir.join("koi.ktx2"), b"texture").unwrap();
+
+    let mut b = Builder::new(scene_manifest());
+    b.add_file("scene.kscene", dir.join("scene.kscene"), Compression::Lz4)
+        .unwrap();
+    b.add_file("preview.png", dir.join("preview.png"), Compression::None)
+        .unwrap();
+    b.add_file("textures/koi.ktx2", dir.join("koi.ktx2"), Compression::Lz4)
+        .unwrap();
+    let mut out = Cursor::new(Vec::new());
+    b.write(&mut out).unwrap();
+
+    let mut p = Package::from_reader(Cursor::new(out.into_inner())).unwrap();
+    assert_eq!(p.entry("scene.kscene").unwrap().compression, "lz4");
+    assert_eq!(p.read("scene.kscene").unwrap(), text);
+    assert_eq!(p.read("preview.png").unwrap(), b"not really a png");
+    p.verify().unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn a_package_unpacks_to_the_files_it_was_made_from() {
+    let dir = scratch("unpack");
+    let mut p = Package::from_reader(Cursor::new(sample())).unwrap();
+    let into = dir.join("out");
+    p.unpack_to(&into).unwrap();
+    assert_eq!(
+        std::fs::read(into.join("scene.kscene")).unwrap(),
+        b"layer water\n".repeat(2000)
+    );
+    assert_eq!(
+        std::fs::read(into.join("textures/koi.ktx2")).unwrap(),
+        p.read("textures/koi.ktx2").unwrap()
+    );
+
+    // Entries are created, never written over.
+    let mut again = Package::from_reader(Cursor::new(sample())).unwrap();
+    assert!(again.unpack_to(&into).is_err());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn unpacking_a_damaged_entry_fails() {
+    let dir = scratch("unpack-damaged");
+    let mut bytes = sample();
+    let p = Package::from_reader(Cursor::new(bytes.clone())).unwrap();
+    let at = p.span("preview.png").unwrap().offset as usize + 10;
+    bytes[at] ^= 1;
+    let mut p = Package::from_reader(Cursor::new(bytes)).unwrap();
+    assert!(matches!(
+        p.unpack_to(&dir.join("out")),
+        Err(PackError::HashMismatch { .. })
+    ));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
